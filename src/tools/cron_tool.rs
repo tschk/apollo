@@ -30,6 +30,7 @@ struct CronArgs {
     goal: String,
     /// Priority 1-10 (default 5)
     #[serde(default = "default_priority")]
+    #[allow(dead_code)]
     priority: u8,
     /// Schedule ID (required for enable/disable/delete)
     #[serde(default)]
@@ -167,14 +168,15 @@ impl Tool for CronTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cron_scheduler::CronScheduler;
 
     #[tokio::test]
     async fn schedule_and_list() {
-        let scheduler = Arc::new(Scheduler::new());
+        let scheduler = Arc::new(CronScheduler::new_noop());
         let tool = CronTool::new(scheduler);
 
         let r = tool
-            .execute(r#"{"action":"schedule","cron":"0 9 * * *","goal":"daily standup"}"#)
+            .execute(r#"{"action":"schedule","cron":"0 0 9 * * * *","goal":"daily standup"}"#)
             .await
             .unwrap();
         assert!(!r.is_error, "{}", r.output);
@@ -185,7 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_cron_fails() {
-        let scheduler = Arc::new(Scheduler::new());
+        let scheduler = Arc::new(CronScheduler::new_noop());
         let tool = CronTool::new(scheduler);
         let r = tool
             .execute(r#"{"action":"schedule","cron":"not-valid","goal":"test"}"#)

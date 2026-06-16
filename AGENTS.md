@@ -191,3 +191,12 @@ cargo test
 ### New Memory Backend
 - Implement `Memory` trait in `src/memory/`
 - All DB ops via `spawn_blocking`
+
+
+<claude-mem-context>
+# Memory Context
+
+# [unthinkclaw] recent context, 2026-05-05 12:29pm GMT+10
+
+No previous sessions found.
+</claude-mem-context>

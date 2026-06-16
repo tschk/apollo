@@ -1,0 +1,342 @@
+//! Trajectory export for RL training data generation.
+//!
+//! Captures full ReAct steps (thought → action → observation → response)
+//! and serializes to JSON for fine-tuning or evaluation.
+//!
+//! Port from hermes-rs `trajectory.rs`.
+//!
+//! pontytail: JSON file output only. Parquet/Arrow can be added when
+//! large-scale training pipelines need direct export.
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+/// A single step in a trajectory (one tool call + result)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrajectoryStep {
+    /// Step index
+    pub step: usize,
+    /// Agent reasoning/thought before the action
+    pub thought: Option<String>,
+    /// Tool name or action taken
+    pub action: Option<String>,
+    /// Arguments passed to the tool
+    pub action_args: Option<String>,
+    /// Direct observation/result from the action
+    pub observation: Option<String>,
+    /// Final response if this was the terminal step
+    pub response: Option<String>,
+    /// Whether the step completed successfully
+    pub success: bool,
+}
+
+/// A complete trajectory (conversation) ready for training.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trajectory {
+    /// Unique identifier
+    pub id: String,
+    /// Session ID this trajectory came from
+    pub session_id: String,
+    /// Model used for generation
+    pub model: String,
+    /// Unix timestamp
+    pub timestamp: i64,
+    /// Total tokens consumed
+    pub total_tokens: usize,
+    /// Number of tool calls made
+    pub tool_calls: usize,
+    /// Number of iterations (LLM rounds)
+    pub iterations: usize,
+    /// Whether the overall task was successful
+    pub success: bool,
+    /// The individual ReAct steps
+    pub steps: Vec<TrajectoryStep>,
+    /// Raw messages for full fidelity
+    pub messages: Vec<TrajectoryMessage>,
+    /// Arbitrary metadata
+    pub metadata: HashMap<String, String>,
+}
+
+/// A single message in the conversation for training data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrajectoryMessage {
+    pub role: String,
+    pub content: String,
+    pub tool_call_id: Option<String>,
+    pub tool_name: Option<String>,
+}
+
+impl Trajectory {
+    pub fn new(id: impl Into<String>, session_id: impl Into<String>, model: impl Into<String>) -> Self {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        Self {
+            id: id.into(),
+            session_id: session_id.into(),
+            model: model.into(),
+            timestamp,
+            total_tokens: 0,
+            tool_calls: 0,
+            iterations: 0,
+            success: false,
+            steps: Vec::new(),
+            messages: Vec::new(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Add a ReAct step to the trajectory.
+    pub fn add_step(&mut self, step: TrajectoryStep) {
+        if step.action.is_some() {
+            self.tool_calls += 1;
+        }
+        self.steps.push(step);
+    }
+
+    /// Record a ReAct tool step directly (used by loop_runner).
+    pub fn record_tool_step(
+        &mut self,
+        thought: Option<String>,
+        action: String,
+        action_args: String,
+        observation: String,
+        success: bool,
+    ) {
+        self.add_step(TrajectoryStep {
+            step: self.steps.len() + 1,
+            thought,
+            action: Some(action),
+            action_args: Some(action_args),
+            observation: Some(observation),
+            response: None,
+            success,
+        });
+    }
+
+    /// Record the final text response for the current step (used by loop_runner).
+    pub fn record_response(&mut self, response: String) {
+        // Record as a message
+        self.add_message("assistant", &response, None, None);
+        self.total_tokens += response.len();
+
+        // Also update the last step's response if applicable
+        if let Some(step) = self.steps.last_mut() {
+            step.response = Some(response);
+        }
+    }
+
+    /// Add a raw message to the trajectory.
+    pub fn add_message(
+        &mut self,
+        role: &str,
+        content: &str,
+        tool_call_id: Option<&str>,
+        tool_name: Option<&str>,
+    ) {
+        self.messages.push(TrajectoryMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            tool_call_id: tool_call_id.map(|s| s.to_string()),
+            tool_name: tool_name.map(|s| s.to_string()),
+        });
+    }
+
+    /// Serialize to pretty JSON.
+    pub fn to_json(&self) -> anyhow::Result<String> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Save to a JSON file (alias for save). Creates parent directories.
+    pub fn save_to_file(&self, path: &Path) -> anyhow::Result<()> {
+        self.save(path)
+    }
+
+    /// Save to a JSON file. Creates parent directories.
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let json = self.to_json()?;
+        std::fs::write(path, &json)?;
+        tracing::info!(
+            "Trajectory saved to {:?} ({} steps, {} tokens, {} msgs)",
+            path,
+            self.steps.len(),
+            self.total_tokens,
+            self.messages.len()
+        );
+        Ok(())
+    }
+}
+
+/// TrajectoryCollector — collects trajectory data during an agent run.
+///
+/// Attach to AgentRunner to capture all steps incrementally.
+pub struct TrajectoryCollector {
+    pub trajectory: Trajectory,
+    current_step: Option<TrajectoryStep>,
+}
+
+impl TrajectoryCollector {
+    pub fn new(session_id: impl Into<String>, model: impl Into<String>) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        Self {
+            trajectory: Trajectory::new(id, session_id, model),
+            current_step: None,
+        }
+    }
+
+    /// Start tracking a new tool call step.
+    pub fn start_step(&mut self, action: &str, action_args: &str) {
+        let step = TrajectoryStep {
+            step: self.trajectory.steps.len() + 1,
+            thought: None,
+            action: Some(action.to_string()),
+            action_args: Some(action_args.to_string()),
+            observation: None,
+            response: None,
+            success: false,
+        };
+        self.current_step = Some(step);
+    }
+
+    /// Complete the current step with an observation.
+    pub fn complete_step(&mut self, observation: &str, success: bool) {
+        if let Some(mut step) = self.current_step.take() {
+            step.observation = Some(observation.to_string());
+            step.success = success;
+            self.trajectory.add_step(step);
+        }
+    }
+
+    /// Mark the current step as failed.
+    pub fn fail_step(&mut self, error: &str) {
+        if let Some(mut step) = self.current_step.take() {
+            step.observation = Some(format!("Error: {}", error));
+            step.success = false;
+            self.trajectory.add_step(step);
+        }
+    }
+
+    /// Attach a thought to the current step.
+    pub fn set_thought(&mut self, thought: &str) {
+        if let Some(ref mut step) = self.current_step {
+            step.thought = Some(thought.to_string());
+        }
+    }
+
+    /// Attach a final response to the current step.
+    pub fn set_response(&mut self, response: &str) {
+        if let Some(ref mut step) = self.current_step {
+            step.response = Some(response.to_string());
+        }
+    }
+
+    /// Record a message to the trajectory.
+    pub fn record_message(
+        &mut self,
+        role: &str,
+        content: &str,
+        tool_call_id: Option<&str>,
+        tool_name: Option<&str>,
+    ) {
+        self.trajectory
+            .add_message(role, content, tool_call_id, tool_name);
+        self.trajectory.total_tokens += content.len();
+    }
+
+    /// Finish and save to file.
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        self.trajectory.save(path)
+    }
+
+    /// Mark the overall trajectory as successful and return JSON.
+    pub fn finalize(&mut self, success: bool) -> String {
+        self.trajectory.success = success;
+        self.to_json().unwrap_or_default()
+    }
+
+    /// Serialize the trajectory to JSON.
+    pub fn to_json(&self) -> anyhow::Result<String> {
+        self.trajectory.to_json()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_trajectory_new() {
+        let t = Trajectory::new("test-1", "session-1", "claude-sonnet");
+        assert_eq!(t.model, "claude-sonnet");
+        assert_eq!(t.tool_calls, 0);
+        assert!(!t.id.is_empty());
+    }
+
+    #[test]
+    fn test_add_step() {
+        let mut t = Trajectory::new("test-2", "session-1", "gpt-4");
+        t.add_step(TrajectoryStep {
+            step: 1,
+            thought: Some("I need to read the file".into()),
+            action: Some("read".into()),
+            action_args: Some(r#"{"path":"test"}"#.into()),
+            observation: Some("file content".into()),
+            response: None,
+            success: true,
+        });
+        assert_eq!(t.steps.len(), 1);
+        assert_eq!(t.tool_calls, 1);
+    }
+
+    #[test]
+    fn test_trajectory_collector() {
+        let mut collector = TrajectoryCollector::new("session-2", "claude-opus");
+
+        collector.start_step("shell", r#"{"command":"ls"}"#);
+        collector.set_thought("Check directory contents");
+        collector.complete_step("file1.txt\nfile2.txt", true);
+
+        assert_eq!(collector.trajectory.steps.len(), 1);
+        assert_eq!(collector.trajectory.tool_calls, 1);
+
+        collector.record_message("user", "list files", None, None);
+        collector.record_message("assistant", "done", None, None);
+
+        assert_eq!(collector.trajectory.messages.len(), 2);
+    }
+
+    #[test]
+    fn test_trajectory_json() {
+        let mut t = Trajectory::new("test-3", "session-3", "claude-sonnet");
+        t.add_step(TrajectoryStep {
+            step: 1,
+            thought: None,
+            action: Some("read".into()),
+            action_args: Some(r#"{"path":"/tmp/test"}"#.into()),
+            observation: Some("data".into()),
+            response: Some("Here's the data".into()),
+            success: true,
+        });
+        t.total_tokens = 150;
+        t.success = true;
+
+        let json = t.to_json().unwrap();
+        assert!(json.contains("\"action\": \"read\""));
+        assert!(json.contains("\"total_tokens\": 150"));
+        assert!(json.contains("\"success\": true"));
+
+        // Round-trip
+        let parsed: Trajectory = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.steps.len(), 1);
+        assert_eq!(parsed.tool_calls, 1);
+    }
+}

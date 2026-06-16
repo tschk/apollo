@@ -10,6 +10,17 @@ pub struct ExecutionPolicy {
     pub allow_plugin_git: bool,
 }
 
+impl Default for ExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            allow_shell: true,
+            allow_dynamic_tools: true,
+            allow_plugin_shell: false,
+            allow_plugin_git: false,
+        }
+    }
+}
+
 impl ExecutionPolicy {
     pub fn from_config(config: &PolicyConfig) -> Self {
         Self {

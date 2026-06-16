@@ -33,6 +33,7 @@ pub mod tool_search;
 pub mod toolsets;
 pub mod traits;
 pub mod vibemania;
+pub mod guardrails;
 pub mod web_fetch;
 pub mod web_search;
 pub mod worktree;

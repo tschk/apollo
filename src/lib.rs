@@ -37,11 +37,14 @@ pub mod runtime;
 pub mod scheduler;
 pub mod self_update;
 pub mod skills;
+pub mod streaming_parser;
 #[cfg(feature = "swarm")]
 pub mod swarm;
 pub mod telegram_runtime;
 pub mod text;
 pub mod tools;
+pub mod trajectory;
+pub mod autonomous;
 
 pub use agent::{AgentMode, AgentRunner};
 pub use channels::Channel;

@@ -114,6 +114,9 @@ notify = { version = "6", features = ["serde"] }
 # Scheduling (Phase 4: cron)
 cron = "0.12"
 
+# Regular expressions (skill templates, etc.)
+regex = "1"
+
 # Home directory resolution
 dirs = "5.0"
 

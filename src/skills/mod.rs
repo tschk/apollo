@@ -1,9 +1,13 @@
 //! Skills system — scan SKILL.md files, match against user requests,
 //! inject matched skill instructions into the system prompt.
+//! Supports template variables and inline shell execution.
+
+pub mod curator;
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
 
 #[derive(Debug, Clone)]
 pub struct Skill {
@@ -28,11 +32,9 @@ pub fn discover_skills_for_workspace(workspace: Option<&Path>) -> Vec<Skill> {
     let mut skills = Vec::new();
     let home = dirs::home_dir().unwrap_or_default();
 
-    // OpenClaw bundled skills
     let openclaw_skills = home.join(".npm-global/lib/node_modules/openclaw/skills");
     scan_skill_dir(&openclaw_skills, &mut skills);
 
-    // User workspace skills
     let workspace_skills = home.join(".openclaw/workspace/skills");
     scan_skill_dir(&workspace_skills, &mut skills);
 
@@ -76,7 +78,6 @@ fn scan_skill_dir(dir: &Path, skills: &mut Vec<Skill>) {
 
 /// Parse YAML-like frontmatter from SKILL.md
 fn parse_skill_frontmatter(content: &str, path: &Path) -> Option<Skill> {
-    // Look for --- delimited frontmatter
     if !content.starts_with("---") {
         return None;
     }
@@ -110,8 +111,8 @@ fn parse_skill_frontmatter(content: &str, path: &Path) -> Option<Skill> {
     })
 }
 
-/// Find the best matching skill for a user message
-/// Stopwords — common words that should never contribute to skill matching
+// ── Matching ──────────────────────────────────────────────────────────────
+
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was", "one",
     "our", "out", "has", "have", "been", "some", "them", "than", "its", "over", "such", "that",
@@ -137,17 +138,12 @@ pub fn match_skill<'a>(skills: &'a [Skill], user_message: &str) -> Option<&'a Sk
         let name_lower = skill.name.to_lowercase();
         let mut score = 0.0f32;
 
-        // Direct name mention (strong signal)
         if msg_lower.contains(&name_lower) && name_lower.len() >= 4 {
             score += 10.0;
         }
 
-        // Word overlap: message words in description (skip stopwords)
         for word in &msg_words {
-            if word.len() < 4 {
-                continue;
-            }
-            if is_stopword(word) {
+            if word.len() < 4 || is_stopword(word) {
                 continue;
             }
             if desc_lower.contains(word) {
@@ -155,12 +151,8 @@ pub fn match_skill<'a>(skills: &'a [Skill], user_message: &str) -> Option<&'a Sk
             }
         }
 
-        // Word overlap: description words in message (skip stopwords)
         for word in desc_lower.split(|c: char| !c.is_alphanumeric()) {
-            if word.len() < 4 {
-                continue;
-            }
-            if is_stopword(word) {
+            if word.len() < 4 || is_stopword(word) {
                 continue;
             }
             if msg_lower.contains(word) {
@@ -174,7 +166,6 @@ pub fn match_skill<'a>(skills: &'a [Skill], user_message: &str) -> Option<&'a Sk
         }
     }
 
-    // Require strong match
     if best_score >= 5.0 {
         best_skill
     } else {
@@ -182,10 +173,104 @@ pub fn match_skill<'a>(skills: &'a [Skill], user_message: &str) -> Option<&'a Sk
     }
 }
 
-/// Load the full content of a skill's SKILL.md
+// ── Template variable substitution / inline shell ─────────────────
+// Ported from hermes-agent skill_preprocessing.py
+
+use std::sync::OnceLock;
+use regex::Regex;
+
+fn skill_template_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\$\{(HERMES_SKILL_DIR|HERMES_SESSION_ID)\}").unwrap())
+}
+
+fn inline_shell_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"!`([^`\n]+)`").unwrap())
+}
+
+/// Load skill content raw (no preprocessing).
 pub fn load_skill_content(skill: &Skill) -> Option<String> {
     std::fs::read_to_string(&skill.location).ok()
 }
+
+/// Preprocess skill content: substitute template vars and expand inline shell.
+pub fn preprocess_skill_content(
+    content: &str,
+    skill_dir: Option<&Path>,
+    session_id: Option<&str>,
+    cwd: Option<&Path>,
+) -> String {
+    let content = substitute_template_vars(content, skill_dir, session_id);
+    expand_inline_shell(&content, cwd, 30)
+}
+
+/// Substitute `${HERMES_SKILL_DIR}` and `${HERMES_SESSION_ID}` in skill content.
+/// Unresolved tokens are left as-is so the author can debug them.
+pub fn substitute_template_vars(
+    content: &str,
+    skill_dir: Option<&Path>,
+    session_id: Option<&str>,
+) -> String {
+    skill_template_re()
+        .replace_all(content, |caps: &regex::Captures| {
+            match caps.get(1).map(|m| m.as_str()) {
+                Some("HERMES_SKILL_DIR") => skill_dir
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| caps[0].to_string()),
+                Some("HERMES_SESSION_ID") => session_id
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| caps[0].to_string()),
+                _ => caps[0].to_string(),
+            }
+        })
+        .to_string()
+}
+
+/// Execute inline shell snippets (`!\`command\``) in skill content.
+/// Replaces each snippet with its stdout (trimmed).
+/// Failures produce a short `[inline-shell error: ...]` marker.
+pub fn expand_inline_shell(
+    content: &str,
+    cwd: Option<&Path>,
+    _timeout_secs: u64,
+) -> String {
+    inline_shell_re()
+        .replace_all(content, |caps: &regex::Captures| {
+            let cmd = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            if cmd.is_empty() {
+                return String::new();
+            }
+            match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(cwd.unwrap_or(Path::new(".")))
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .to_string();
+                    if stdout.len() > 4000 {
+                        format!("{}… [truncated]", &stdout[..4000])
+                    } else {
+                        stdout
+                    }
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    format!(
+                        "[inline-shell error: {}]",
+                        &stderr.trim().chars().take(120).collect::<String>()
+                    )
+                }
+                Err(e) => format!("[inline-shell error: {}]", e),
+            }
+        })
+        .to_string()
+}
+
+// ── Save managed skill ────────────────────────────────────────────────────
 
 pub fn save_managed_skill(workspace: &Path, input: &ManagedSkillInput) -> anyhow::Result<PathBuf> {
     let dir = managed_skills_dir(workspace).join(slugify(&input.name));
@@ -200,12 +285,12 @@ pub fn save_managed_skill(workspace: &Path, input: &ManagedSkillInput) -> anyhow
 }
 
 fn slugify(name: &str) -> String {
-    let slug = name
-        .to_lowercase()
+    name.to_lowercase()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect::<String>();
-    slug.trim_matches('-').to_string()
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
 
 #[cfg(test)]
@@ -244,5 +329,28 @@ mod tests {
         let matched = match_skill(&skills, "review the github issues");
         assert!(matched.is_some());
         assert_eq!(matched.unwrap().name, "github");
+    }
+
+    #[test]
+    fn test_template_substitution() {
+        let result = substitute_template_vars(
+            "Run from ${HERMES_SKILL_DIR} for session ${HERMES_SESSION_ID}",
+            Some(Path::new("/tmp/myskill")),
+            Some("sess_123"),
+        );
+        assert_eq!(result, "Run from /tmp/myskill for session sess_123");
+    }
+
+    #[test]
+    fn test_unknown_template_preserved() {
+        let content = "Token ${UNKNOWN} stays";
+        let result = substitute_template_vars(content, None, None);
+        assert_eq!(result, "Token ${UNKNOWN} stays");
+    }
+
+    #[test]
+    fn test_inline_shell_expansion() {
+        let result = expand_inline_shell("Date is !`echo hello`", None, 5);
+        assert!(result.contains("hello"));
     }
 }
