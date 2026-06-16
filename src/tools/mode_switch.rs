@@ -95,7 +95,7 @@ impl Tool for ModeSwitchTool {
             },
             "bypass" => AgentMode::BypassPermissions,
             "swarm" => AgentMode::Swarm {
-                parallelism: args.parallelism.min(10).max(1),
+                parallelism: args.parallelism.clamp(1, 10),
             },
             other => return Ok(ToolResult::error(format!("Unknown mode: {}", other))),
         };

@@ -68,6 +68,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_system_prompt_empty_workspace() {
         let prompt = build_system_prompt(&PathBuf::from("/nonexistent")).await;
-        assert_eq!(prompt, DEFAULT_PROMPT);
+        assert!(prompt.contains(DEFAULT_PROMPT));
+        assert!(prompt.contains("Routing guidance"));
     }
 }

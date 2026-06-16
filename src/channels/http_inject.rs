@@ -5,6 +5,12 @@ use super::traits::{Channel, IncomingMessage, OutgoingMessage};
 
 pub struct HttpInjectChannel;
 
+impl Default for HttpInjectChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HttpInjectChannel {
     pub fn new() -> Self {
         Self

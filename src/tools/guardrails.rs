@@ -244,8 +244,10 @@ mod tests {
 
     #[test]
     fn test_loop_warn() {
-        let mut config = GuardrailConfig::default();
-        config.same_tool_failure_warn_after = 3;
+        let config = GuardrailConfig {
+            same_tool_failure_warn_after: 3,
+            ..Default::default()
+        };
         let mut g = ToolGuardrails::new(config);
 
         for _ in 0..3 {
@@ -257,9 +259,11 @@ mod tests {
 
     #[test]
     fn test_loop_stop() {
-        let mut config = GuardrailConfig::default();
-        config.hard_stop_enabled = true;
-        config.same_tool_failure_halt_after = 3;
+        let config = GuardrailConfig {
+            hard_stop_enabled: true,
+            same_tool_failure_halt_after: 3,
+            ..Default::default()
+        };
         let mut g = ToolGuardrails::new(config);
 
         for _ in 0..3 {
@@ -271,8 +275,10 @@ mod tests {
 
     #[test]
     fn test_reset() {
-        let mut config = GuardrailConfig::default();
-        config.same_tool_failure_warn_after = 3;
+        let config = GuardrailConfig {
+            same_tool_failure_warn_after: 3,
+            ..Default::default()
+        };
         let mut g = ToolGuardrails::new(config);
 
         for _ in 0..4 {
@@ -286,8 +292,10 @@ mod tests {
 
     #[test]
     fn test_different_args_no_loop() {
-        let mut config = GuardrailConfig::default();
-        config.same_tool_failure_warn_after = 3;
+        let config = GuardrailConfig {
+            same_tool_failure_warn_after: 3,
+            ..Default::default()
+        };
         let mut g = ToolGuardrails::new(config);
 
         let _ = g.observe("shell", r#"{"command":"ls"}"#, "", false);
@@ -297,8 +305,10 @@ mod tests {
 
     #[test]
     fn test_error_detection() {
-        let mut config = GuardrailConfig::default();
-        config.exact_failure_warn_after = 2;
+        let config = GuardrailConfig {
+            exact_failure_warn_after: 2,
+            ..Default::default()
+        };
         let mut g = ToolGuardrails::new(config);
 
         let _ = g.observe("shell", r#"{"command":"ls"}"#, "", true);
