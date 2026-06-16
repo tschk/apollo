@@ -5,7 +5,7 @@ edition = "2021"
 description = "Local-first Rust AI agent runtime — Telegram-first, trait-driven, SurrealDB + RocksDB state layer."
 license = "MIT"
 repository = "https://github.com/undivisible/unthinkclaw"
-keywords = ["agent", "ai", "llm", "telegram", "bot", "automation", "cli"]
+keywords = ["agent", "ai", "llm", "telegram", "automation"]
 categories = ["command-line-utilities", "web-programming::http-client"]
 
 [[bin]]
