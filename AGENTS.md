@@ -33,16 +33,19 @@ src/
   main.rs              — CLI entrypoint
   lib.rs               — module exports
   config/              — config schema + loading
-  agent/               — orchestration loop (loop_runner.rs)
+  agent/               — orchestration loop, compaction trait, skill curator
   channels/            — Telegram, Discord, Slack, CLI, etc.
   providers/           — Anthropic, OpenAI-compat, Ollama, Copilot
-  tools/               — shell, file_ops, web_search, web_fetch, edit, vibemania
+  tools/               — shell, file_ops, web_search, web_fetch, edit, vibemania, guardrails
   memory/              — SurrealDB-backed history, cache, retrieval
+  streaming_parser.rs  — tolerant XML tool-call parser (streaming)
+  trajectory.rs        — ReAct step serialization for RL training
+  autonomous.rs        — 24/7 TODO.md-driven coding loop
   swarm.rs             — parallel sub-agent spawning
   cron_scheduler.rs    — scheduled tasks
   heartbeat.rs         — periodic background checks
-  plugin.rs            — plugin system
-  skills.rs            — skill loading from TOML manifests
+  plugin.rs            — plugin system + lifecycle hooks
+  skills/              — skill loading, template vars, inline shell, curator
   cost.rs              — token cost tracking
   embeddings.rs        — embedding provider trait
   gateway/             — webhook server
@@ -88,9 +91,14 @@ src/
 
 ### Loop Runner (loop_runner.rs)
 - Circuit breaker: 50 rounds max
-- Loop detection: hashes identical tool calls
+- Loop detection: tool guardrails (idempotent/mutating classify, failure count, warn/block)
+- Self-healing: auto re-prompt LLM with error context on tool failures
 - Progress channel: receiver is kept alive (not dropped)
 - History: last 20 messages loaded from the active backend, ordered ASC
+- Context compaction: pluggable compactor trait, default LLM summarizer
+- Trajectory recording: per-chat ReAct step capture for RL training
+- Lifecycle hooks: pre/post tool, session events from plugin system
+- Skill preprocessing: template vars + inline shell in SKILL.md
 
 ### Swarm (swarm.rs)
 - Spawns parallel Codex sub-agents via API
@@ -135,6 +143,13 @@ src/
 | vibemania | Subspace coding agent |
 | dynamic | Dynamically loaded tools |
 | session | Session management |
+| guardrails | Loop detection, failure counting, idempotent/mutating classify |
+| cron | Schedule recurring tasks |
+| mode_switch | Switch execution mode at runtime |
+| doctor | Diagnostics and health checks |
+| worktree | Git worktree operations |
+| config | Configuration management |
+| sleep | Timer utility |
 
 ## 8) Validation
 

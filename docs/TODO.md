@@ -1,69 +1,52 @@
 # TODO
 
-Last updated: 2026-03-18
+Last updated: 2026-06-16
 
-Status key:
-- `[ ]` not started
-- `[-]` in progress
-- `[x]` done
+## Done
 
-## Verified Done
+### v0.2.0 Features
+- [x] Streaming tool-call parser — state-machine detects `<tool_call>` blocks
+  incrementally from streaming LLM output, fires events on `</tool_call>`
+- [x] Tool guardrails — loop detection, idempotent/mutating classification,
+  failure counting with configurable warn/block thresholds
+- [x] Pluggable context compaction — `Compactor` trait + default LLM summarizer
+- [x] Self-healing retry — auto re-prompt LLM with error context on tool failures
+- [x] Trajectory export — ReAct step serialization (thought→action→observation→response)
+  for RL training data
+- [x] Autonomous mode — 24/7 workspace loop: read TODO.md, run agent, validate
+  with tests, git commit/push only on success. Failure pause across restarts
+- [x] Skill curator — background task reviews skills, suggests improvements
+- [x] Plugin lifecycle hooks — PreToolHook, PostToolHook, LifecycleHook traits
+- [x] Skill template preprocessing — `${HERMES_SKILL_DIR}` / `${HERMES_SESSION_ID}`
+  vars + `!\`command\`` inline shell substitution in SKILL.md
+- [x] Cron scheduler — SurrealDB-backed with in-memory noop fallback for testing
+- [x] Hermes-style self-healing, loop detection, and compaction integration in
+  loop_runner.rs
+- [x] All 85 tests pass, 0 clippy warnings
+- [x] v0.2.0 published to crates.io
 
+### Previous (v0.1.x)
 - [x] SurrealDB memory schema includes `files`, `chunks`, FTS, and sticker cache
 - [x] Conversation history is loaded by `chat_id` before agent calls
 - [x] `CLAUDE.md` is in sync with repo instructions via symlink to `AGENTS.md`
 - [x] `cargo clippy --all-targets -- -D warnings` passes
 - [x] `cargo test` passes
 - [x] `cargo build --release` passes
-- [x] GitHub issue `#2` is resolved and closed
-- [x] GitHub issue `#3` is resolved and closed
-- [x] GitHub issue `#4` is resolved and closed
-- [x] GitHub issue `#5` is resolved and closed
-- [x] GitHub issue `#6` is resolved and closed
+- [x] GitHub issue `#2` through `#6` resolved and closed
+- [x] Toolset allowlists, session search, managed skills, Daytona scaffolding
 
-## Active Work
+## Next
 
-- [-] tighten docs so they match the actual state of `main`
-- [-] keep the device-first branch clearly separated from hosted platform work
-- [-] finish tightening SurrealDB docs and scheduler/session coverage
-- [-] thread Hermes-style additions into the runtime without bloating the hot
-  path:
-  - toolset allowlists
-  - session search
-  - managed skills
-  - Daytona runtime adapter
+- [ ] Wire autonomous mode into CLI entrypoint (`unthinkclaw autonomous`)
+- [ ] Add trajectory collection toggle in config.yaml
+- [ ] Add tests for Telegram markdown conversion and long-message chunking
+- [ ] Add tests for audio/sticker handling in Telegram
+- [ ] Integrate streaming parser into execution loop (standalone now)
+- [ ] Make guardrails state persistable across restarts
 
-## Next Up
+## Backlog
 
-- [ ] add tests that cover Telegram markdown conversion and long-message chunking
-- [ ] add tests for audio/sticker handling in Telegram
-- [ ] finish porting scheduler/cron/session metadata onto the Surreal contract
-- [ ] wire Daytona runtime selection into actual command/tool execution
-- [ ] let the agent create and update managed skills automatically after useful
-  task completions
-
-## GPUI Menubar App (crepuscularity)
-
-Goal: Create a native GPUI menubar app using crepuscularity templates.
-
-Requirements:
-- [ ] Add gpui dependency
-- [ ] Create menubar tray icon with status indicator
-- [ ] Create .crepus templates for:
-  - Agent status display (running/stopped/error)
-  - Quick configuration panel
-  - Recent conversations list
-  - Settings access
-- [ ] Wire up to unthinkclaw agent runtime via IPC/channels
-
-Considerations:
-- Integrate GPUI event loop with tokio async runtime
-- Menu bar apps on macOS require different window handling
-- Should work on both macOS and Linux (with different tray implementations)
-
-## Possible Issues To Watch
-
-- [ ] Discord and WhatsApp still look thin compared with Telegram
-- [ ] browser/tool surface is broad; security policy coverage should keep growing
-- [ ] swarm and storage layers are moving faster than the user-facing docs
-- [ ] keep the default build aligned with the Surreal-backed storage contract
+- [ ] Session branching (JSONL tree with parent pointers in SurrealDB)
+- [ ] Add `curator start|stop` CLI commands
+- [ ] Docker runtime adapter to replace Daytona
+- [ ] WASM-based plugin sandbox (long-term)
