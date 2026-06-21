@@ -4,16 +4,13 @@
 //! 1. JSON-RPC methods (existing) — regular plugin methods
 //! 2. Lifecycle hooks — intercept tool calls, session events, etc.
 
+use crate::tools::ToolResult;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::process::Command;
-
-use crate::policy::ExecutionPolicy;
-use crate::tools::ToolResult;
 
 // ── Core Plugin trait ─────────────────────────────────────────────────────
 
@@ -138,7 +135,12 @@ impl HookManager {
     pub async fn emit(&self, event: &LifecycleEvent) {
         for hook in &self.lifecycle_hooks {
             if let Err(e) = hook.on_event(event).await {
-                tracing::warn!("LifecycleHook '{}' error on {:?}: {}", hook.name(), event, e);
+                tracing::warn!(
+                    "LifecycleHook '{}' error on {:?}: {}",
+                    hook.name(),
+                    event,
+                    e
+                );
             }
         }
     }
@@ -210,6 +212,19 @@ impl PluginRegistry {
         Self {
             plugins: HashMap::new(),
             hooks: HookManager::new(),
+        }
+    }
+
+    /// Log discovered OpenClaw/Hermes plugins from workspace (host-agnostic).
+    pub fn ingest_host_plugins(&mut self, workspace: &std::path::Path, extra: &[PathBuf]) {
+        let found = crate::plugin_hosts::discover_host_plugins(workspace, extra);
+        for p in found {
+            tracing::info!(
+                "[plugin-host] {:?} {} {:?}",
+                p.kind,
+                p.name.as_deref().unwrap_or("?"),
+                p.path
+            );
         }
     }
 
@@ -303,269 +318,39 @@ pub struct PluginInfo {
     pub methods: Vec<MethodSpec>,
 }
 
-// ── Built-in Plugins ─────────────────────────────────────────────────────
-
-pub struct AiPlugin;
-
-#[async_trait]
-impl Plugin for AiPlugin {
-    fn name(&self) -> &str {
-        "ai"
-    }
-
-    fn version(&self) -> &str {
-        "0.1.0"
-    }
-
-    fn methods(&self) -> Vec<MethodSpec> {
-        vec![
-            MethodSpec {
-                name: "explain".to_string(),
-                description: "Explain code".to_string(),
-                params: {
-                    let mut m = HashMap::new();
-                    m.insert("code".to_string(), "string".to_string());
-                    m
-                },
-                returns: "string".to_string(),
-            },
-            MethodSpec {
-                name: "refactor".to_string(),
-                description: "Refactor code".to_string(),
-                params: {
-                    let mut m = HashMap::new();
-                    m.insert("code".to_string(), "string".to_string());
-                    m
-                },
-                returns: "string".to_string(),
-            },
-        ]
-    }
-
-    async fn call(&self, method: &str, _params: Value) -> Result<Value, PluginError> {
-        match method {
-            "explain" => Ok(json!({ "result": "Code explanation would go here" })),
-            "refactor" => Ok(json!({ "result": "Refactored code would go here" })),
-            _ => Err(PluginError::new(-32601, "Method not found")),
-        }
-    }
-}
-
-pub struct ToolsPlugin {
-    policy: Arc<ExecutionPolicy>,
-}
-
-impl ToolsPlugin {
-    pub fn new(policy: Arc<ExecutionPolicy>) -> Self {
-        Self { policy }
-    }
-}
-
-#[async_trait]
-impl Plugin for ToolsPlugin {
-    fn name(&self) -> &str {
-        "tools"
-    }
-
-    fn version(&self) -> &str {
-        "0.1.0"
-    }
-
-    fn methods(&self) -> Vec<MethodSpec> {
-        vec![MethodSpec {
-            name: "shell".to_string(),
-            description: "Execute shell command".to_string(),
-            params: {
-                let mut m = HashMap::new();
-                m.insert("cmd".to_string(), "string".to_string());
-                m
-            },
-            returns: "string".to_string(),
-        }]
-    }
-
-    async fn call(&self, method: &str, params: Value) -> Result<Value, PluginError> {
-        match method {
-            "shell" => {
-                if !self.policy.allow_plugin_shell {
-                    return Err(PluginError::new(
-                        -32604,
-                        "Plugin shell execution is disabled by policy",
-                    ));
-                }
-
-                let cmd = params
-                    .get("cmd")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| PluginError::new(-32602, "Invalid params"))?;
-
-                match tokio::time::timeout(
-                    Duration::from_secs(120),
-                    Command::new("sh").arg("-c").arg(cmd).output(),
-                )
-                .await
-                {
-                    Ok(Ok(output)) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        Ok(json!({ "stdout": stdout }))
-                    }
-                    Ok(Err(e)) => Err(PluginError::new(-32000, &e.to_string())),
-                    Err(_) => Err(PluginError::new(-32000, "Command timed out")),
-                }
-            }
-            _ => Err(PluginError::new(-32601, "Method not found")),
-        }
-    }
-}
-
-pub struct VibemaniaPlugin;
-
-#[async_trait]
-impl Plugin for VibemaniaPlugin {
-    fn name(&self) -> &str {
-        "vibemania"
-    }
-
-    fn version(&self) -> &str {
-        "0.1.0"
-    }
-
-    fn methods(&self) -> Vec<MethodSpec> {
-        vec![
-            MethodSpec {
-                name: "run".to_string(),
-                description: "Run task with goal".to_string(),
-                params: {
-                    let mut m = HashMap::new();
-                    m.insert("goal".to_string(), "string".to_string());
-                    m.insert("parallel".to_string(), "number".to_string());
-                    m
-                },
-                returns: "object".to_string(),
-            },
-            MethodSpec {
-                name: "dream".to_string(),
-                description: "Generate ideas".to_string(),
-                params: {
-                    let mut m = HashMap::new();
-                    m.insert("prompt".to_string(), "string".to_string());
-                    m
-                },
-                returns: "object".to_string(),
-            },
-        ]
-    }
-
-    async fn call(&self, method: &str, params: Value) -> Result<Value, PluginError> {
-        match method {
-            "run" => {
-                let goal = params
-                    .get("goal")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Build something great");
-                Ok(json!({ "status": "running", "goal": goal }))
-            }
-            "dream" => Ok(json!({ "ideas": vec!["feature1", "feature2", "feature3"] })),
-            _ => Err(PluginError::new(-32601, "Method not found")),
-        }
-    }
-}
-
-pub struct GitPlugin {
-    policy: Arc<ExecutionPolicy>,
-}
-
-impl GitPlugin {
-    pub fn new(policy: Arc<ExecutionPolicy>) -> Self {
-        Self { policy }
-    }
-}
-
-#[async_trait]
-impl Plugin for GitPlugin {
-    fn name(&self) -> &str {
-        "git"
-    }
-
-    fn version(&self) -> &str {
-        "0.1.0"
-    }
-
-    fn methods(&self) -> Vec<MethodSpec> {
-        vec![
-            MethodSpec {
-                name: "diff".to_string(),
-                description: "Show git diff".to_string(),
-                params: HashMap::new(),
-                returns: "string".to_string(),
-            },
-            MethodSpec {
-                name: "commit".to_string(),
-                description: "Make a commit".to_string(),
-                params: {
-                    let mut m = HashMap::new();
-                    m.insert("message".to_string(), "string".to_string());
-                    m
-                },
-                returns: "object".to_string(),
-            },
-        ]
-    }
-
-    async fn call(&self, method: &str, params: Value) -> Result<Value, PluginError> {
-        match method {
-            "diff" => {
-                if !self.policy.allow_plugin_git {
-                    return Err(PluginError::new(
-                        -32604,
-                        "Plugin git execution is disabled by policy",
-                    ));
-                }
-
-                match tokio::time::timeout(
-                    Duration::from_secs(120),
-                    Command::new("git").arg("diff").output(),
-                )
-                .await
-                {
-                    Ok(Ok(output)) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        Ok(json!({ "diff": stdout }))
-                    }
-                    Ok(Err(e)) => Err(PluginError::new(-32000, &e.to_string())),
-                    Err(_) => Err(PluginError::new(-32000, "git diff timed out")),
-                }
-            }
-            "commit" => {
-                if !self.policy.allow_plugin_git {
-                    return Err(PluginError::new(
-                        -32604,
-                        "Plugin git execution is disabled by policy",
-                    ));
-                }
-
-                let msg = params
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| PluginError::new(-32602, "Invalid params"))?;
-
-                match tokio::time::timeout(
-                    Duration::from_secs(120),
-                    Command::new("git").args(["commit", "-m", msg]).output(),
-                )
-                .await
-                {
-                    Ok(Ok(_)) => Ok(json!({ "committed": true })),
-                    Ok(Err(e)) => Err(PluginError::new(-32000, &e.to_string())),
-                    Err(_) => Err(PluginError::new(-32000, "git commit timed out")),
-                }
-            }
-            _ => Err(PluginError::new(-32601, "Method not found")),
-        }
-    }
-}
-
 // ── Built-in lifecycle hooks ──────────────────────────────────────────────
+
+/// Append short session notes on agent completion.
+pub struct SessionNoteLifecycleHook {
+    workspace: std::path::PathBuf,
+}
+
+impl SessionNoteLifecycleHook {
+    pub fn new(workspace: std::path::PathBuf) -> Self {
+        Self { workspace }
+    }
+}
+
+#[async_trait]
+impl LifecycleHook for SessionNoteLifecycleHook {
+    fn name(&self) -> &str {
+        "session_note"
+    }
+
+    async fn on_event(&self, event: &LifecycleEvent) -> anyhow::Result<()> {
+        if let LifecycleEvent::AgentDone(chat_id, response) = event {
+            let preview: String = response.chars().take(200).collect();
+            if !preview.is_empty() {
+                let _ = crate::memory::session_note::append_session_note(
+                    &self.workspace,
+                    chat_id,
+                    &preview,
+                );
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Logging hook — traces every lifecycle event
 pub struct LoggingLifecycleHook;
@@ -612,14 +397,44 @@ impl LifecycleHook for LoggingLifecycleHook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    struct TestPlugin;
+
+    #[async_trait]
+    impl Plugin for TestPlugin {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn version(&self) -> &str {
+            "0.1.0"
+        }
+
+        fn methods(&self) -> Vec<MethodSpec> {
+            vec![MethodSpec {
+                name: "echo".to_string(),
+                description: "Echo input".to_string(),
+                params: HashMap::new(),
+                returns: "object".to_string(),
+            }]
+        }
+
+        async fn call(&self, method: &str, params: Value) -> Result<Value, PluginError> {
+            match method {
+                "echo" => Ok(json!({ "result": params })),
+                _ => Err(PluginError::new(-32601, "Method not found")),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_plugin_call() {
         let mut registry = PluginRegistry::new();
-        registry.register_sync(Arc::new(AiPlugin));
+        registry.register_sync(Arc::new(TestPlugin));
 
         let result = registry
-            .call("ai", "explain", json!({ "code": "fn main() {}" }))
+            .call("test", "echo", json!({ "code": "fn main() {}" }))
             .await
             .unwrap();
 
@@ -632,11 +447,7 @@ mod tests {
         manager.register_lifecycle(Arc::new(LoggingLifecycleHook));
         let _ = manager.check_pre_tool("test", "{}").await;
         manager
-            .notify_post_tool(
-                "test",
-                "{}",
-                &ToolResult::success("ok"),
-            )
+            .notify_post_tool("test", "{}", &ToolResult::success("ok"))
             .await;
         // No crash = success
     }

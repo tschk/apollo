@@ -10,12 +10,12 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
+use crate::agent::compaction::{Compactor, ContextInfo, DefaultCompactor};
 use crate::agent::hooks::{run_post_hooks, run_pre_hooks, HookDecision, ToolHook};
-use crate::agent::stream::{emit, AgentStreamEvent};
 use crate::agent::mode::{
     is_approval, is_rejection, AgentMode, NullChannel, PendingPlan, PendingPlans,
 };
-use crate::agent::compaction::{Compactor, ContextInfo, DefaultCompactor};
+use crate::agent::stream::{emit, AgentStreamEvent};
 use crate::channels::{Channel, IncomingMessage, OutgoingMessage};
 use crate::cost::{CostTracker, TokenUsage};
 use crate::memory::MemoryBackend;
@@ -69,6 +69,11 @@ pub struct AgentRunner {
     plugin_registry: Arc<RwLock<PluginRegistry>>,
     /// Current trajectory being recorded (per chat)
     trajectories: Arc<RwLock<HashMap<String, Trajectory>>>,
+    memory_ideas: crate::config::MemoryIdeasConfig,
+    group_chat: crate::config::GroupChatConfig,
+    #[cfg(feature = "rs-gbrain")]
+    rs_gbrain: crate::config::RsGbrainConfig,
+    session_note_workspace: Option<PathBuf>,
 }
 
 impl AgentRunner {
@@ -104,6 +109,11 @@ impl AgentRunner {
             hook_manager: Arc::new(HookManager::new()),
             plugin_registry: Arc::new(RwLock::new(PluginRegistry::new())),
             trajectories: Arc::new(RwLock::new(HashMap::new())),
+            memory_ideas: crate::config::MemoryIdeasConfig::default(),
+            group_chat: crate::config::GroupChatConfig::default(),
+            #[cfg(feature = "rs-gbrain")]
+            rs_gbrain: crate::config::RsGbrainConfig::default(),
+            session_note_workspace: None,
         }
     }
 
@@ -164,7 +174,24 @@ impl AgentRunner {
     }
 
     pub fn with_workspace(mut self, workspace: PathBuf) -> Self {
+        self.session_note_workspace = Some(workspace.clone());
         self.workspace = workspace;
+        self
+    }
+
+    pub fn with_memory_ideas(mut self, cfg: crate::config::MemoryIdeasConfig) -> Self {
+        self.memory_ideas = cfg;
+        self
+    }
+
+    pub fn with_group_chat(mut self, cfg: crate::config::GroupChatConfig) -> Self {
+        self.group_chat = cfg;
+        self
+    }
+
+    #[cfg(feature = "rs-gbrain")]
+    pub fn with_rs_gbrain(mut self, cfg: crate::config::RsGbrainConfig) -> Self {
+        self.rs_gbrain = cfg;
         self
     }
 
@@ -399,14 +426,18 @@ impl AgentRunner {
 
         // Emit lifecycle event: agent start
         self.hook_manager
-            .emit(&LifecycleEvent::AgentStart(msg.chat_id.clone(), msg.text.clone()))
+            .emit(&LifecycleEvent::AgentStart(
+                msg.chat_id.clone(),
+                msg.text.clone(),
+            ))
             .await;
 
         // Initialize per-chat guardrails
         {
             let mut gr = self.guardrails.write().await;
-            gr.entry(msg.chat_id.clone())
-                .or_insert_with(|| ToolGuardrails::new(crate::tools::guardrails::GuardrailConfig::default()));
+            gr.entry(msg.chat_id.clone()).or_insert_with(|| {
+                ToolGuardrails::new(crate::tools::guardrails::GuardrailConfig::default())
+            });
         }
 
         // Initialize per-chat trajectory
@@ -499,11 +530,24 @@ impl AgentRunner {
                 }
             }
         }
+        if msg.is_group {
+            if let Some(group_memory) = self.load_group_memory(&msg.chat_id).await? {
+                if !group_memory.trim().is_empty() {
+                    messages.push(ChatMessage::system(crate::context::group_memory_prompt(
+                        &msg.chat_id,
+                        &group_memory,
+                    )));
+                }
+            }
+        }
 
-        let history = self
-            .memory
-            .get_conversation_history(&msg.chat_id, self.agent_config.max_history_messages)
-            .await?;
+        let history = crate::memory::context_inject::merged_history(
+            &self.memory,
+            &msg.chat_id,
+            self.memory_ideas.principal_id.as_deref(),
+            self.agent_config.max_history_messages,
+        )
+        .await?;
         for (role, content) in history {
             match role.as_str() {
                 "user" => messages.push(ChatMessage::user(&content)),
@@ -512,7 +556,29 @@ impl AgentRunner {
             }
         }
 
-        messages.push(ChatMessage::user(&effective_text));
+        let mut user_turn = effective_text.clone();
+        if self.memory_ideas.inject_context {
+            let blocks = crate::memory::context_inject::personal_context_blocks(
+                &self.memory,
+                crate::memory::context_inject::InjectConfig {
+                    workspace: &self.workspace,
+                    principal_id: self.memory_ideas.principal_id.as_deref(),
+                    graph_recall_limit: self.memory_ideas.graph_recall_limit,
+                },
+                &effective_text,
+            )
+            .await;
+            if !blocks.is_empty() {
+                user_turn = format!("{user_turn}\n\n{}", blocks.join("\n\n"));
+            }
+        }
+        #[cfg(feature = "rs-gbrain")]
+        if self.rs_gbrain.enabled && self.rs_gbrain.inject_brief {
+            if let Ok(Ok(Some(xml))) = tokio::task::spawn_blocking(rs_gbrain_brief_xml).await {
+                user_turn = format!("{user_turn}\n\n{xml}");
+            }
+        }
+        messages.push(ChatMessage::user(&user_turn));
 
         let tool_specs: Vec<crate::tools::ToolSpec> =
             self.tools.read().await.iter().map(|t| t.spec()).collect();
@@ -597,7 +663,8 @@ impl AgentRunner {
                                 TokenUsage {
                                     input_tokens: usage.input_tokens as usize,
                                     output_tokens: usage.output_tokens as usize,
-                                    total_tokens: (usage.input_tokens + usage.output_tokens) as usize,
+                                    total_tokens: (usage.input_tokens + usage.output_tokens)
+                                        as usize,
                                 },
                             )
                             .await;
@@ -718,9 +785,7 @@ impl AgentRunner {
                         context_chars,
                         messages.len()
                     );
-                    let result = compactor
-                        .compress(&messages, Some(&effective_text))
-                        .await;
+                    let result = compactor.compress(&messages, Some(&effective_text)).await;
                     if result.did_compact {
                         messages = result.messages;
                         compactions_done += 1;
@@ -805,12 +870,14 @@ impl AgentRunner {
                             continue;
                         }
                         tracing::info!("Done after {} round(s) [{:?}]", round + 1, state);
-                        self.finish_execution(msg, &text, &draft_id, channel).await?;
+                        self.finish_execution(msg, &text, &draft_id, channel)
+                            .await?;
                         return Ok(String::new());
                     }
                     AgentState::Summarizing | AgentState::Direct | AgentState::Planning => {
                         tracing::info!("Done after {} round(s) [{:?}]", round + 1, state);
-                        self.finish_execution(msg, &text, &draft_id, channel).await?;
+                        self.finish_execution(msg, &text, &draft_id, channel)
+                            .await?;
                         return Ok(String::new());
                     }
                 }
@@ -939,18 +1006,27 @@ impl AgentRunner {
                         match run_pre_hooks(&hooks_snapshot, &tc.name, &tc.arguments).await {
                             HookDecision::Block(reason) => {
                                 tracing::info!("Hook blocked '{}': {}", tc.name, reason);
-                                crate::tools::ToolResult::error(format!("Blocked by policy: {}", reason))
+                                crate::tools::ToolResult::error(format!(
+                                    "Blocked by policy: {}",
+                                    reason
+                                ))
                             }
                             HookDecision::Allow => {
-                                if let Some(tool) = tools_snapshot.iter().find(|t| t.name() == tc.name) {
+                                if let Some(tool) =
+                                    tools_snapshot.iter().find(|t| t.name() == tc.name)
+                                {
                                     match tool.execute(&tc.arguments).await {
                                         Ok(r) => r,
-                                        Err(e) => {
-                                            crate::tools::ToolResult::error(format!("Tool error: {}", e))
-                                        }
+                                        Err(e) => crate::tools::ToolResult::error(format!(
+                                            "Tool error: {}",
+                                            e
+                                        )),
                                     }
                                 } else {
-                                    crate::tools::ToolResult::error(format!("Unknown tool: {}", tc.name))
+                                    crate::tools::ToolResult::error(format!(
+                                        "Unknown tool: {}",
+                                        tc.name
+                                    ))
                                 }
                             }
                         }
@@ -972,11 +1048,13 @@ impl AgentRunner {
                 {
                     let mut gr = self.guardrails.write().await;
                     if let Some(g) = gr.get_mut(&msg.chat_id) {
-                        let decision = g.observe(&tc.name, &tc.arguments, &result.output, result.is_error);
+                        let decision =
+                            g.observe(&tc.name, &tc.arguments, &result.output, result.is_error);
                         match decision {
                             GuardrailDecision::Stop(reason) => {
                                 tracing::warn!("Guardrail stop: {}", reason);
-                                self.finish_execution(msg, &reason, &draft_id, channel).await?;
+                                self.finish_execution(msg, &reason, &draft_id, channel)
+                                    .await?;
                                 return Ok(reason);
                             }
                             GuardrailDecision::Warn(warning) => {
@@ -1046,16 +1124,17 @@ impl AgentRunner {
                     ));
                 }
 
-                let truncated_output = if result.output.len() > self.agent_config.max_tool_result_chars {
-                    format!(
-                        "{}...\n⚠️ [Truncated {} → {} chars]",
-                        &result.output[..self.agent_config.max_tool_result_chars],
-                        result.output.len(),
-                        self.agent_config.max_tool_result_chars
-                    )
-                } else {
-                    result.output.clone()
-                };
+                let truncated_output =
+                    if result.output.len() > self.agent_config.max_tool_result_chars {
+                        format!(
+                            "{}...\n⚠️ [Truncated {} → {} chars]",
+                            &result.output[..self.agent_config.max_tool_result_chars],
+                            result.output.len(),
+                            self.agent_config.max_tool_result_chars
+                        )
+                    } else {
+                        result.output.clone()
+                    };
 
                 messages.push(ChatMessage::tool_result(&tc.id, &truncated_output));
             }
@@ -1149,6 +1228,13 @@ impl AgentRunner {
                 text.to_string(),
             ))
             .await;
+        if let Some(ws) = &self.session_note_workspace {
+            let preview: String = text.chars().take(200).collect();
+            if !preview.is_empty() {
+                let _ =
+                    crate::memory::session_note::append_session_note(ws, &msg.chat_id, &preview);
+            }
+        }
 
         let stream = self.stream_sink();
         emit(
@@ -1159,9 +1245,7 @@ impl AgentRunner {
         );
 
         if let Some(ref mid) = draft_id {
-            let _ = channel
-                .finalize_draft(&msg.chat_id, mid, text)
-                .await;
+            let _ = channel.finalize_draft(&msg.chat_id, mid, text).await;
         }
 
         Ok(())
@@ -1180,9 +1264,30 @@ impl AgentRunner {
         }
 
         let tool_keywords = [
-            "read ", "write ", "edit ", "create ", "build ", "fix ", "search ", "fetch ",
-            "check ", "run ", "execute ", "install ", "deploy ", "find ", "list ", "show me ",
-            "what's in ", "look at ", "file", "code", "commit", "git ", "grep", "curl",
+            "read ",
+            "write ",
+            "edit ",
+            "create ",
+            "build ",
+            "fix ",
+            "search ",
+            "fetch ",
+            "check ",
+            "run ",
+            "execute ",
+            "install ",
+            "deploy ",
+            "find ",
+            "list ",
+            "show me ",
+            "what's in ",
+            "look at ",
+            "file",
+            "code",
+            "commit",
+            "git ",
+            "grep",
+            "curl",
         ];
         for kw in &tool_keywords {
             if lower.contains(kw) {
@@ -1210,7 +1315,82 @@ impl AgentRunner {
                 (&msg.chat_id, "assistant", "assistant", response),
             ])
             .await?;
+        if msg.is_group {
+            self.update_group_memory(msg, response).await?;
+        }
         Ok(())
+    }
+
+    async fn load_group_memory(&self, chat_id: &str) -> anyhow::Result<Option<String>> {
+        let key = crate::context::group_memory_key(chat_id);
+        Ok(self
+            .memory
+            .recall(&self.group_chat.rolling_memory_namespace, &key)
+            .await?
+            .map(|entry| entry.value))
+    }
+
+    async fn update_group_memory(
+        &self,
+        msg: &IncomingMessage,
+        response: &str,
+    ) -> anyhow::Result<()> {
+        let existing = self
+            .load_group_memory(&msg.chat_id)
+            .await?
+            .unwrap_or_default();
+        let updated = Self::rolling_group_memory(
+            &existing,
+            msg,
+            response,
+            self.group_chat.rolling_memory_max_chars,
+        );
+        let key = crate::context::group_memory_key(&msg.chat_id);
+        self.memory
+            .store(
+                &self.group_chat.rolling_memory_namespace,
+                &key,
+                &updated,
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    fn rolling_group_memory(
+        existing: &str,
+        msg: &IncomingMessage,
+        response: &str,
+        max_chars: usize,
+    ) -> String {
+        let sender = msg
+            .sender_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&msg.sender_id);
+        let mut text = String::new();
+        if !existing.trim().is_empty() {
+            text.push_str(existing.trim());
+            text.push_str("\n\n");
+        }
+        text.push_str(&format!("[{sender}] user: {}\n", msg.text.trim()));
+        text.push_str(&format!("assistant: {}", response.trim()));
+        if text.chars().count() <= max_chars {
+            return text;
+        }
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(max_chars)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if let Some(idx) = tail.find('\n') {
+            tail[idx + 1..].to_string()
+        } else {
+            tail
+        }
     }
 
     /// Compact conversation messages — fallback when no compactor is set
@@ -1284,30 +1464,41 @@ impl AgentRunner {
         let summary = match self.provider.chat(&compact_request).await {
             Ok(resp) => {
                 if let Some(usage) = &resp.usage {
-                    let _ = self.cost_tracker.record(
-                        &self.agent_config.fast_model,
-                        TokenUsage {
-                            input_tokens: usage.input_tokens as usize,
-                            output_tokens: usage.output_tokens as usize,
-                            total_tokens: (usage.input_tokens + usage.output_tokens) as usize,
-                        },
-                    ).await;
+                    let _ = self
+                        .cost_tracker
+                        .record(
+                            &self.agent_config.fast_model,
+                            TokenUsage {
+                                input_tokens: usage.input_tokens as usize,
+                                output_tokens: usage.output_tokens as usize,
+                                total_tokens: (usage.input_tokens + usage.output_tokens) as usize,
+                            },
+                        )
+                        .await;
                 }
-                resp.text.unwrap_or_else(|| "Failed to summarize.".to_string())
+                resp.text
+                    .unwrap_or_else(|| "Failed to summarize.".to_string())
             }
             Err(e) => {
                 tracing::warn!("Compaction failed: {}, falling back to truncation", e);
-                format!("[Previous {} messages truncated to save context]", old_msgs.len())
+                format!(
+                    "[Previous {} messages truncated to save context]",
+                    old_msgs.len()
+                )
             }
         };
         let mut compacted = Vec::new();
-        for sm in &system_msgs { compacted.push((*sm).clone()); }
+        for sm in &system_msgs {
+            compacted.push((*sm).clone());
+        }
         compacted.push(ChatMessage::user(format!(
             "[Conversation compacted — {} earlier messages summarized]\n\n{}",
             old_msgs.len(),
             summary
         )));
-        compacted.push(ChatMessage::assistant("Understood, continuing from the summary.".to_string()));
+        compacted.push(ChatMessage::assistant(
+            "Understood, continuing from the summary.".to_string(),
+        ));
         compacted.extend(recent_msgs.iter().map(|m| (*m).clone()));
         Ok(compacted)
     }
@@ -1336,6 +1527,36 @@ impl AgentRunner {
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "rs-gbrain")]
+fn rs_gbrain_brief_xml() -> anyhow::Result<Option<String>> {
+    let e = rs_gbrain::BrainEngine::open_default()?;
+    let b = e.load_brief()?;
+    if b.open_loops.is_empty() && b.time_contexts.is_empty() {
+        return Ok(None);
+    }
+    let mut out = String::from("<memory_brief>\n");
+    if !b.time_contexts.is_empty() {
+        out.push_str("  <time_contexts>\n");
+        for line in &b.time_contexts {
+            out.push_str("    - ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("  </time_contexts>\n");
+    }
+    if !b.open_loops.is_empty() {
+        out.push_str("  <open_loops>\n");
+        for line in &b.open_loops {
+            out.push_str("    - ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("  </open_loops>\n");
+    }
+    out.push_str("</memory_brief>");
+    Ok(Some(out))
 }
 
 // ── Helper ──
@@ -1372,5 +1593,3 @@ fn extract_tool_hint(name: &str, arguments: &str) -> String {
     })
     .unwrap_or_default()
 }
-
-

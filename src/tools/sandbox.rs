@@ -1,5 +1,3 @@
-//! Shared workspace path sandbox helpers for filesystem tools.
-
 use std::path::{Component, Path, PathBuf};
 
 fn workspace_canonical(workspace: &Path) -> PathBuf {

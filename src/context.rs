@@ -2,7 +2,6 @@ use crate::channels::IncomingMessage;
 
 const GROUP_KEYWORDS: &[&str] = &[
     "unthinkclaw",
-    "unthinkclaw-live",
     "plugin",
     "plugins",
     "plugin layer",
@@ -27,6 +26,40 @@ const GROUP_KEYWORDS: &[&str] = &[
     "could you",
 ];
 
+const GENERAL_ASSISTANT_PATTERNS: &[&str] = &[
+    "what can you do",
+    "how does this work",
+    "how do i",
+    "what is this",
+    "what does this do",
+    "can you help",
+    "could you help",
+    "setup",
+    "set up",
+    "configure",
+    "configuration",
+    "plugin",
+    "plugins",
+    "manifest",
+    "layer",
+    "transport",
+    "command",
+    "commands",
+];
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+pub fn is_assistant_topic(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+
+    contains_any(&lower, GROUP_KEYWORDS) || contains_any(&lower, GENERAL_ASSISTANT_PATTERNS)
+}
+
 pub fn should_respond(msg: &IncomingMessage) -> bool {
     if !msg.is_group {
         return true;
@@ -41,9 +74,8 @@ pub fn should_respond(msg: &IncomingMessage) -> bool {
         return true;
     }
 
-    let direct_mention = text.contains("@unthinkclaw") || text.contains("@unthinkclaw-live");
-    let topic_hit = GROUP_KEYWORDS.iter().any(|keyword| text.contains(keyword));
-    direct_mention || topic_hit
+    let direct_mention = text.contains("@unthinkclaw");
+    direct_mention || is_assistant_topic(&text)
 }
 
 pub fn routing_guidance(is_group: bool, transport: &str) -> Option<String> {
@@ -73,5 +105,16 @@ Default transport: {transport}
 
 Treat the configured transport as a thin adapter over the core runtime, with settings overrides isolated from the core config so upgrades do not conflict. Use context-aware routing for group chats, but only answer ambient messages when they are clearly about the assistant, its plugins, or operational commands.",
         transport = transport
+    )
+}
+
+pub fn group_memory_key(chat_id: &str) -> String {
+    format!("group:{chat_id}")
+}
+
+pub fn group_memory_prompt(chat_id: &str, summary: &str) -> String {
+    format!(
+        "## Rolling group memory\nChat: {chat_id}\n\n{}",
+        summary.trim()
     )
 }

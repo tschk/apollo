@@ -23,7 +23,7 @@ use unthinkclaw::policy::ExecutionPolicy;
 use unthinkclaw::prompt;
 use unthinkclaw::self_update::{SelfUpdater, UpdateOutcome};
 use unthinkclaw::skills;
-use unthinkclaw::telegram_runtime::run_telegram_chat;
+use unthinkclaw::telegram_runtime::{run_telegram_chat, TelegramChatRun};
 
 #[derive(Parser)]
 #[command(
@@ -424,6 +424,7 @@ async fn main() -> anyhow::Result<()> {
             let cfg = load_config(&config);
             let model = model.unwrap_or(cfg.model.clone());
             let workspace = workspace.unwrap_or(cfg.workspace.clone());
+            let _ = unthinkclaw::workspace_init::ensure_workspace_kit(&workspace);
 
             let provider = build_provider(&cfg);
             let policy = Arc::new(ExecutionPolicy::from_config(&cfg.policy));
@@ -483,8 +484,30 @@ async fn main() -> anyhow::Result<()> {
                         &cfg.agent.permission_profile,
                     ))
                     .with_workspace(workspace.clone())
+                    .with_memory_ideas(cfg.memory.clone())
+                    .with_group_chat(cfg.group_chat.clone())
                     .with_skills(discovered_skills.clone())
                     .await;
+            #[cfg(feature = "rs-gbrain")]
+            {
+                runner = runner.with_rs_gbrain(cfg.rs_gbrain.clone());
+            }
+
+            {
+                let mut host_reg = unthinkclaw::plugin::PluginRegistry::new();
+                host_reg.ingest_host_plugins(&workspace, &cfg.plugin_layer.host_plugin_roots);
+                #[cfg(feature = "rs-gbrain")]
+                if cfg.rs_gbrain.enabled {
+                    let ws = workspace.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(e) = rs_gbrain::BrainEngine::open_default() {
+                            let _ = rs_gbrain::sync_workspace_brief(&ws, &e);
+                        }
+                    })
+                    .await;
+                }
+                runner = runner.with_plugin_registry(host_reg).await;
+            }
 
             #[cfg(feature = "swarm")]
             if let Some(coord) = coordinator {
@@ -570,6 +593,10 @@ async fn main() -> anyhow::Result<()> {
                     // Start heartbeat background task
                     let heartbeat_cfg = HeartbeatConfig {
                         workspace: workspace.clone(),
+                        deliver_chat_id: cfg.memory.heartbeat_chat_id.clone(),
+                        dream_on_heartbeat: cfg.memory.dream_on_heartbeat
+                            && cfg.rs_gbrain.enabled
+                            && cfg.rs_gbrain.dream_on_heartbeat,
                         ..Default::default()
                     };
                     let (hb_tx, hb_rx) = tokio::sync::mpsc::channel(16);
@@ -584,15 +611,16 @@ async fn main() -> anyhow::Result<()> {
                         .ok_or_else(|| anyhow::anyhow!("--telegram-token required"))?;
                     let chat_id = telegram_chat_id
                         .ok_or_else(|| anyhow::anyhow!("--telegram-chat-id required"))?;
-                    run_telegram_chat(
-                        runner_arc,
+                    run_telegram_chat(TelegramChatRun {
+                        runner: runner_arc,
                         memory,
                         token,
                         chat_id,
-                        cfg.model.clone(),
-                        discovered_skills.len(),
-                        workspace.clone(),
-                    )
+                        model: cfg.model.clone(),
+                        skills_count: discovered_skills.len(),
+                        workspace: workspace.clone(),
+                        channel_cfg: &cfg.channel,
+                    })
                     .await?;
                 }
                 #[cfg(feature = "channel-discord")]

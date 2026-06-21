@@ -22,6 +22,9 @@ pub struct Config {
     pub plugin_layer: PluginLayerConfig,
     pub group_chat: GroupChatConfig,
     pub toolsets: ToolsetConfig,
+    pub memory: MemoryIdeasConfig,
+    #[serde(default)]
+    pub rs_gbrain: RsGbrainConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +145,10 @@ pub struct ObservabilityConfig {
 pub struct ChannelConfig {
     pub kind: String, // "cli", "telegram", "discord", "websocket"
     pub token: Option<String>,
+    /// When non-empty, only these Telegram (or channel) chat IDs may send inbound messages.
+    pub allowed_chat_ids: Vec<String>,
+    /// When non-empty, only these sender user IDs may send inbound messages.
+    pub allowed_sender_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,7 +177,9 @@ pub struct PolicyConfig {
 #[serde(default)]
 pub struct PluginLayerConfig {
     pub enabled: bool,
-    pub manifest_path: PathBuf,
+    /// Extra directories to scan for OpenClaw SKILL.md and Hermes plugin.json
+    #[serde(default)]
+    pub host_plugin_roots: Vec<PathBuf>,
     pub hook_events: Vec<String>,
     pub allow_core_fallback: bool,
     pub layered_overrides: Vec<String>,
@@ -191,6 +200,51 @@ pub struct GroupChatConfig {
 pub struct ToolsetConfig {
     pub enabled: Vec<String>,
     pub disabled: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryIdeasConfig {
+    /// One logical user across channels (merged history when set).
+    pub principal_id: Option<String>,
+    /// Inject brief + recall gate + idea graph context each turn.
+    pub inject_context: bool,
+    pub graph_recall_limit: usize,
+    /// Route heartbeat synthetic messages to this chat_id (e.g. telegram chat id).
+    pub heartbeat_chat_id: Option<String>,
+    /// After idle, expand open loops into dream nodes (graph).
+    pub dream_on_heartbeat: bool,
+}
+
+impl Default for MemoryIdeasConfig {
+    fn default() -> Self {
+        Self {
+            principal_id: None,
+            inject_context: true,
+            graph_recall_limit: 5,
+            heartbeat_chat_id: None,
+            dream_on_heartbeat: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RsGbrainConfig {
+    pub enabled: bool,
+    pub inject_brief: bool,
+    /// Run rs_gbrain nightly dream on heartbeat tick (when memory.dream_on_heartbeat)
+    pub dream_on_heartbeat: bool,
+}
+
+impl Default for RsGbrainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            inject_brief: true,
+            dream_on_heartbeat: true,
+        }
+    }
 }
 
 /// Apply a named onboarding permission profile to `cfg` (policy, toolsets, and `permission_profile`).
@@ -271,15 +325,14 @@ impl Config {
             },
             hosting: HostingConfig::default(),
             observability: ObservabilityConfig::default(),
-            channel: ChannelConfig {
-                kind: "cli".to_string(),
-                token: None,
-            },
+            channel: ChannelConfig::default(),
             gateway: GatewayConfig::default(),
             policy: PolicyConfig::default(),
             plugin_layer: PluginLayerConfig::default(),
             group_chat: GroupChatConfig::default(),
             toolsets: ToolsetConfig::default(),
+            memory: MemoryIdeasConfig::default(),
+            rs_gbrain: RsGbrainConfig::default(),
         }
     }
 }
@@ -372,6 +425,8 @@ impl Default for ChannelConfig {
         Self {
             kind: "cli".to_string(),
             token: None,
+            allowed_chat_ids: Vec::new(),
+            allowed_sender_ids: Vec::new(),
         }
     }
 }
@@ -406,7 +461,7 @@ impl Default for PluginLayerConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            manifest_path: PathBuf::from("plugins/manifest.json"),
+            host_plugin_roots: Vec::new(),
             hook_events: vec![
                 "before_message".to_string(),
                 "after_message".to_string(),

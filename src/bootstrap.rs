@@ -21,8 +21,7 @@ use crate::tools::shell::ShellTool;
 use crate::tools::skill_manager::SkillManagerTool;
 use crate::tools::toolsets::is_tool_enabled;
 use crate::tools::{
-    BriefTool, ConfigTool, SleepTool, TodoWriteTool, Tool, ToolSearchTool, VibemaniaTool,
-    WorktreeTool,
+    BriefTool, ConfigTool, SleepTool, TodoWriteTool, Tool, VibemaniaTool, WorktreeTool,
 };
 
 pub fn load_config(path: &str) -> Config {
@@ -195,9 +194,6 @@ pub fn build_base_tools(
         Arc::new(ConfigTool::new(workspace.join("unthinkclaw.json"))),
         Arc::new(SleepTool),
         Arc::new(TodoWriteTool::new(workspace.to_path_buf())),
-        Arc::new(ToolSearchTool::new(Arc::new(tokio::sync::RwLock::new(
-            vec![],
-        )))), // Placeholder, populated later
         Arc::new(VibemaniaTool::new(workspace.to_path_buf())),
         Arc::new(WorktreeTool::new(workspace.to_path_buf())),
     ];
@@ -208,6 +204,13 @@ pub fn build_base_tools(
             Arc::clone(&memory),
         )));
         tools.push(Arc::new(EmbeddingSearchTool::new(provider, memory)));
+    }
+    #[cfg(feature = "rs-gbrain")]
+    if cfg.rs_gbrain.enabled {
+        tools.push(Arc::new(crate::tools::rs_gbrain::BrainSearchTool));
+        tools.push(Arc::new(crate::tools::rs_gbrain::BrainQueryTool));
+        tools.push(Arc::new(crate::tools::rs_gbrain::BrainPutTool));
+        tools.push(Arc::new(crate::tools::rs_gbrain::BrainGetTool));
     }
     tools
         .into_iter()

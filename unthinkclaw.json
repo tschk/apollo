@@ -14,7 +14,6 @@
   "policy": {},
   "plugin_layer": {
     "enabled": true,
-    "manifest_path": "plugins/manifest.json",
     "hook_events": [
       "before_message",
       "after_message",

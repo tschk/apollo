@@ -6,7 +6,6 @@
 //! - `Channel` — Communication (CLI, Telegram, Discord, Matrix, WebSocket)
 //! - `Tool` — Agent capability (Shell, File I/O, Vibemania, custom)
 //! - `MemoryBackend` — Persistent SurrealDB state, vector embeddings, file-based tooling
-//! - `RuntimeAdapter` — Execution (Native, Docker, WASM planned)
 //!
 //! Embeddings — Vector search for semantic memory
 //! Swarms — Manager/Worker pattern for parallel execution
@@ -16,11 +15,12 @@
 
 pub mod agent;
 pub mod agent_http;
+pub mod autonomous;
 pub mod bootstrap;
 pub mod channels;
 pub mod claw_adapter;
-pub mod context;
 pub mod config;
+pub mod context;
 pub mod cost;
 pub mod cron_scheduler;
 pub mod diagnostics;
@@ -30,10 +30,10 @@ pub mod mcp;
 pub mod mcp_server;
 pub mod memory;
 pub mod plugin;
+pub mod plugin_hosts;
 pub mod policy;
 pub mod prompt;
 pub mod providers;
-pub mod runtime;
 pub mod scheduler;
 pub mod self_update;
 pub mod skills;
@@ -44,7 +44,7 @@ pub mod telegram_runtime;
 pub mod text;
 pub mod tools;
 pub mod trajectory;
-pub mod autonomous;
+pub mod workspace_init;
 
 pub use agent::{AgentMode, AgentRunner};
 pub use channels::Channel;

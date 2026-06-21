@@ -1,5 +1,3 @@
-//! Shared outbound network validation helpers.
-
 use std::net::IpAddr;
 
 fn is_private_ip(ip: IpAddr) -> bool {
