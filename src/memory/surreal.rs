@@ -145,6 +145,21 @@ const SCHEMA_SQL: &str = r#"
     DEFINE FIELD IF NOT EXISTS next_run ON cron_jobs TYPE option<string>;
     DEFINE INDEX IF NOT EXISTS cron_name_idx ON cron_jobs FIELDS name UNIQUE;
 
+    DEFINE TABLE IF NOT EXISTS memory_nodes SCHEMALESS;
+    DEFINE FIELD IF NOT EXISTS id ON memory_nodes TYPE string;
+    DEFINE FIELD IF NOT EXISTS kind ON memory_nodes TYPE string;
+    DEFINE FIELD IF NOT EXISTS text ON memory_nodes TYPE string;
+    DEFINE FIELD IF NOT EXISTS confidence ON memory_nodes TYPE float;
+    DEFINE FIELD IF NOT EXISTS status ON memory_nodes TYPE string;
+    DEFINE FIELD IF NOT EXISTS created_at ON memory_nodes TYPE string;
+    DEFINE INDEX IF NOT EXISTS memory_node_id_idx ON memory_nodes FIELDS id UNIQUE;
+
+    DEFINE TABLE IF NOT EXISTS memory_edges SCHEMALESS;
+    DEFINE FIELD IF NOT EXISTS from_id ON memory_edges TYPE string;
+    DEFINE FIELD IF NOT EXISTS to_id ON memory_edges TYPE string;
+    DEFINE FIELD IF NOT EXISTS rel ON memory_edges TYPE string;
+    DEFINE FIELD IF NOT EXISTS created_at ON memory_edges TYPE string;
+
     DEFINE ANALYZER IF NOT EXISTS memory_analyzer TOKENIZERS blank, class FILTERS lowercase, snowball(english);
     DEFINE INDEX IF NOT EXISTS memory_fts_idx ON memories FIELDS value
         SEARCH ANALYZER memory_analyzer BM25;

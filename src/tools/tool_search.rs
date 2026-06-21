@@ -93,12 +93,24 @@ impl Tool for ToolSearchTool {
                 let score: usize = terms
                     .iter()
                     .map(|term| {
-                        let in_name = if name_lower.contains(term.as_str()) { 2 } else { 0 };
-                        let in_desc = if desc_lower.contains(term.as_str()) { 1 } else { 0 };
+                        let in_name = if name_lower.contains(term.as_str()) {
+                            2
+                        } else {
+                            0
+                        };
+                        let in_desc = if desc_lower.contains(term.as_str()) {
+                            1
+                        } else {
+                            0
+                        };
                         in_name + in_desc
                     })
                     .sum();
-                if score > 0 { Some((score, t)) } else { None }
+                if score > 0 {
+                    Some((score, t))
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -133,17 +145,23 @@ impl Tool for ToolSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::shell::ShellTool;
     use crate::policy::ExecutionPolicy;
+    use crate::tools::shell::ShellTool;
     use std::path::PathBuf;
 
     #[tokio::test]
     async fn finds_shell_tool() {
-        let shell = Arc::new(ShellTool::new(PathBuf::from("."), Arc::new(ExecutionPolicy::default())));
+        let shell = Arc::new(ShellTool::new(
+            PathBuf::from("."),
+            Arc::new(ExecutionPolicy::default()),
+        ));
         let tools: Arc<RwLock<Vec<Arc<dyn Tool>>>> = Arc::new(RwLock::new(vec![shell]));
         let tool = ToolSearchTool::new(tools);
 
-        let r = tool.execute(r#"{"query":"shell execute command"}"#).await.unwrap();
+        let r = tool
+            .execute(r#"{"query":"shell execute command"}"#)
+            .await
+            .unwrap();
         assert!(!r.is_error);
         assert!(r.output.contains("exec") || r.output.contains("shell"));
     }

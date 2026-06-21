@@ -175,7 +175,11 @@ impl CronScheduler {
             Ok(jobs)
         } else {
             let jobs = self.noop_jobs.lock().unwrap();
-            Ok(jobs.iter().filter(|j| j.enabled && j.next_run.as_deref() <= Some(&now)).cloned().collect())
+            Ok(jobs
+                .iter()
+                .filter(|j| j.enabled && j.next_run.as_deref() <= Some(&now))
+                .cloned()
+                .collect())
         }
     }
 

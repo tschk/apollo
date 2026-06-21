@@ -7,22 +7,43 @@ use axum::{extract::State, routing::post, Json, Router};
 
 use crate::agent::AgentRunner;
 use crate::channels::telegram::TelegramChannel;
+use crate::channels::telegram::TelegramIngressFilter;
 use crate::channels::Channel;
 use crate::channels::IncomingMessage;
+use crate::config::ChannelConfig;
 use crate::memory::MemoryBackend;
 use crate::tools::message::MessageTool;
 
-pub async fn run_telegram_chat(
-    runner: Arc<AgentRunner>,
-    memory: Arc<dyn MemoryBackend>,
-    token: String,
-    chat_id: i64,
-    model: String,
-    skills_count: usize,
-    workspace: PathBuf,
-) -> anyhow::Result<()> {
+pub struct TelegramChatRun<'a> {
+    pub runner: Arc<AgentRunner>,
+    pub memory: Arc<dyn MemoryBackend>,
+    pub token: String,
+    pub chat_id: i64,
+    pub model: String,
+    pub skills_count: usize,
+    pub workspace: PathBuf,
+    pub channel_cfg: &'a ChannelConfig,
+}
 
-    let tg = TelegramChannel::new(token.clone(), chat_id).with_memory(memory.clone());
+pub async fn run_telegram_chat(run: TelegramChatRun<'_>) -> anyhow::Result<()> {
+    let TelegramChatRun {
+        runner,
+        memory,
+        token,
+        chat_id,
+        model,
+        skills_count,
+        workspace,
+        channel_cfg,
+    } = run;
+    let ingress = TelegramIngressFilter {
+        allowed_chat_ids: channel_cfg.allowed_chat_ids.clone(),
+        allowed_sender_ids: channel_cfg.allowed_sender_ids.clone(),
+    };
+
+    let tg = TelegramChannel::new(token.clone(), chat_id)
+        .with_memory(memory.clone())
+        .with_ingress_filter(ingress.clone());
     let tg_arc = Arc::new(tg.clone());
 
     runner.add_tool(Arc::new(MessageTool::new(tg_arc))).await;
@@ -34,7 +55,9 @@ pub async fn run_telegram_chat(
     println!("   API: http://127.0.0.1:31337/message");
     println!("   Listening for messages...");
 
-    let mut ch = TelegramChannel::new(token, chat_id).with_memory(memory.clone());
+    let mut ch = TelegramChannel::new(token, chat_id)
+        .with_memory(memory.clone())
+        .with_ingress_filter(ingress);
     let mut rx = ch.start().await?;
 
     let (cli_tx, mut cli_rx) = tokio::sync::mpsc::channel::<IncomingMessage>(32);

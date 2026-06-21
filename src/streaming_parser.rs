@@ -175,7 +175,10 @@ impl StreamingToolCallParser {
                     args: tc.args,
                 });
             } else {
-                events.push(ParserEvent::Text(format!("<tool_call>{}</tool_call>", content)));
+                events.push(ParserEvent::Text(format!(
+                    "<tool_call>{}</tool_call>",
+                    content
+                )));
             }
         } else if !self.buffer.is_empty() {
             events.push(ParserEvent::Text(std::mem::take(&mut self.buffer)));
@@ -205,7 +208,10 @@ impl StreamingToolCallParser {
                 args: tc.args,
             });
         } else {
-            debug!("unparseable tool_call: {:?}", &content[..content.len().min(100)]);
+            debug!(
+                "unparseable tool_call: {:?}",
+                &content[..content.len().min(100)]
+            );
             events.push(ParserEvent::Error(format!(
                 "Malformed tool_call content: {}",
                 &content[..content.len().min(100)]
@@ -281,13 +287,16 @@ mod tests {
     fn test_simple_tool_call() {
         let input = r#"<tool_call>{"name":"read","arguments":{"path":"/tmp/x"}}</tool_call>"#;
         let events = parse_tool_calls(input);
-        let names: Vec<&str> = events.iter().filter_map(|e| {
-            if let ParserEvent::ToolCall { name, .. } = e {
-                Some(name.as_str())
-            } else {
-                None
-            }
-        }).collect();
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|e| {
+                if let ParserEvent::ToolCall { name, .. } = e {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(names, vec!["read"]);
     }
 
@@ -321,9 +330,16 @@ mod tests {
             all_events.extend(parser.feed(chunk));
         }
         all_events.extend(parser.end());
-        let texts: Vec<&str> = all_events.iter().filter_map(|e| {
-            if let ParserEvent::Text(t) = e { Some(t.as_str()) } else { None }
-        }).collect();
+        let texts: Vec<&str> = all_events
+            .iter()
+            .filter_map(|e| {
+                if let ParserEvent::Text(t) = e {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert!(texts.contains(&"Hello. "));
         assert!(texts.contains(&" Done."));
     }
@@ -335,7 +351,10 @@ mod tests {
             r#"<tool_call>{"name":"read","arguments":{"path":"b"}}</tool_call>"#
         );
         let events = parse_tool_calls(input);
-        let tc_count = events.iter().filter(|e| matches!(e, ParserEvent::ToolCall { .. })).count();
+        let tc_count = events
+            .iter()
+            .filter(|e| matches!(e, ParserEvent::ToolCall { .. }))
+            .count();
         assert_eq!(tc_count, 2);
     }
 
@@ -346,7 +365,12 @@ mod tests {
         let events = parse_tool_calls(input);
         let has_error = events.iter().any(|e| matches!(e, ParserEvent::Error(_)));
         // Either an error or a best-effort parse
-        assert!(has_error || events.iter().any(|e| matches!(e, ParserEvent::ToolCall { .. })));
+        assert!(
+            has_error
+                || events
+                    .iter()
+                    .any(|e| matches!(e, ParserEvent::ToolCall { .. }))
+        );
     }
 
     #[test]
@@ -366,7 +390,9 @@ mod tests {
         let mut parser = StreamingToolCallParser::new();
         parser.feed("Just text");
         let events = parser.end();
-        assert!(events.iter().any(|e| matches!(e, ParserEvent::Text(t) if t == "Just text")));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ParserEvent::Text(t) if t == "Just text")));
     }
 
     #[test]
@@ -376,9 +402,16 @@ mod tests {
         parser.reset();
         let events = parser.feed(r#"<tool_call>{"name":"y","arguments":{}}</tool_call>"#);
         assert!(!events.is_empty());
-        let names: Vec<&str> = events.iter().filter_map(|e| {
-            if let ParserEvent::ToolCall { name, .. } = e { Some(name.as_str()) } else { None }
-        }).collect();
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|e| {
+                if let ParserEvent::ToolCall { name, .. } = e {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(names, vec!["y"]);
     }
 }

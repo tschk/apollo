@@ -11,6 +11,9 @@ pub struct HeartbeatConfig {
     pub quiet_start_hour: u32, // 23
     pub quiet_end_hour: u32,   // 8
     pub workspace: PathBuf,
+    /// Deliver synthetic heartbeat to this chat_id (else "heartbeat").
+    pub deliver_chat_id: Option<String>,
+    pub dream_on_heartbeat: bool,
 }
 
 impl Default for HeartbeatConfig {
@@ -20,6 +23,8 @@ impl Default for HeartbeatConfig {
             quiet_start_hour: 23,
             quiet_end_hour: 8,
             workspace: PathBuf::from("."),
+            deliver_chat_id: None,
+            dream_on_heartbeat: false,
         }
     }
 }
@@ -75,11 +80,16 @@ pub fn start_heartbeat(
                 content
             );
 
+            let chat_id = config
+                .deliver_chat_id
+                .clone()
+                .unwrap_or_else(|| "heartbeat".to_string());
+
             let msg = IncomingMessage {
                 id: format!("heartbeat-{}", chrono::Utc::now().timestamp()),
                 sender_id: "system".to_string(),
                 sender_name: Some("heartbeat".to_string()),
-                chat_id: "heartbeat".to_string(),
+                chat_id,
                 text: prompt,
                 is_group: false,
                 reply_to: None,
@@ -91,7 +101,15 @@ pub fn start_heartbeat(
                 break;
             }
 
-            // Update heartbeat state
+            #[cfg(feature = "rs-gbrain")]
+            if config.dream_on_heartbeat {
+                let ws = config.workspace.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || run_rs_gbrain_dream(&ws)).await
+                {
+                    tracing::warn!("Heartbeat dream task failed: {e}");
+                }
+            }
+
             update_heartbeat_state(&config.workspace);
         }
     })
@@ -118,3 +136,16 @@ fn update_heartbeat_state(workspace: &Path) {
 }
 
 use chrono::Timelike;
+
+#[cfg(feature = "rs-gbrain")]
+fn run_rs_gbrain_dream(workspace: &Path) -> anyhow::Result<()> {
+    let e = rs_gbrain::BrainEngine::open_default()?;
+    let _ = rs_gbrain::sync_workspace_brief(workspace, &e);
+    let r = rs_gbrain::run_nightly_cycle(&e, &rs_gbrain::HashEmbedder)?;
+    tracing::info!(
+        "rs_gbrain dream: hypotheses={} vectors={}",
+        r.hypothesis_pages,
+        r.chunks_indexed
+    );
+    Ok(())
+}

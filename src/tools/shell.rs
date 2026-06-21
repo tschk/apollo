@@ -82,7 +82,8 @@ impl Tool for ShellTool {
         // Guard: block catastrophic commands unconditionally
         if let Some(reason) = check_catastrophic_command(&args.command) {
             return Ok(ToolResult::error(format!(
-                "⛔ Blocked catastrophic command: {}", reason
+                "⛔ Blocked catastrophic command: {}",
+                reason
             )));
         }
 
@@ -193,8 +194,12 @@ fn check_catastrophic_command(cmd: &str) -> Option<&'static str> {
     let lower = cmd.to_lowercase();
 
     // rm -rf / or similar
-    if (lower.contains("rm ") && lower.contains("-rf") && (lower.contains(" /") || lower.contains(" *")))
-        || (lower.contains("rm ") && lower.contains("-fr") && (lower.contains(" /") || lower.contains(" *")))
+    if (lower.contains("rm ")
+        && lower.contains("-rf")
+        && (lower.contains(" /") || lower.contains(" *")))
+        || (lower.contains("rm ")
+            && lower.contains("-fr")
+            && (lower.contains(" /") || lower.contains(" *")))
     {
         return Some("Destructive recursive delete on root or wildcard.");
     }

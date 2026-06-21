@@ -96,10 +96,7 @@ impl Tool for ConfigTool {
                 let mut config: Value = serde_json::from_str(&raw)?;
 
                 // Walk the pointer and set the value
-                let parts: Vec<&str> = args.path
-                    .trim_start_matches('/')
-                    .split('/')
-                    .collect();
+                let parts: Vec<&str> = args.path.trim_start_matches('/').split('/').collect();
 
                 if parts.is_empty() || parts[0].is_empty() {
                     return Ok(ToolResult::error("invalid path"));

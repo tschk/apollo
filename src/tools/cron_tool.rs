@@ -96,7 +96,17 @@ impl Tool for CronTool {
                 if args.goal.is_empty() {
                     return Ok(ToolResult::error("goal is required"));
                 }
-                match self.scheduler.add("agent_task", &args.cron, &args.goal, "cli", "claude-sonnet-4-5").await {
+                match self
+                    .scheduler
+                    .add(
+                        "agent_task",
+                        &args.cron,
+                        &args.goal,
+                        "cli",
+                        "claude-sonnet-4-5",
+                    )
+                    .await
+                {
                     Ok(id) => Ok(ToolResult::success(format!(
                         "Scheduled '{}' with id={} (cron: {})",
                         args.goal, id, args.cron

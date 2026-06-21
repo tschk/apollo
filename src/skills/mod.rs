@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
@@ -176,8 +175,8 @@ pub fn match_skill<'a>(skills: &'a [Skill], user_message: &str) -> Option<&'a Sk
 // ── Template variable substitution / inline shell ─────────────────
 // Ported from hermes-agent skill_preprocessing.py
 
-use std::sync::OnceLock;
 use regex::Regex;
+use std::sync::OnceLock;
 
 fn skill_template_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -230,11 +229,7 @@ pub fn substitute_template_vars(
 /// Execute inline shell snippets (`!\`command\``) in skill content.
 /// Replaces each snippet with its stdout (trimmed).
 /// Failures produce a short `[inline-shell error: ...]` marker.
-pub fn expand_inline_shell(
-    content: &str,
-    cwd: Option<&Path>,
-    _timeout_secs: u64,
-) -> String {
+pub fn expand_inline_shell(content: &str, cwd: Option<&Path>, _timeout_secs: u64) -> String {
     inline_shell_re()
         .replace_all(content, |caps: &regex::Captures| {
             let cmd = caps.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -248,9 +243,7 @@ pub fn expand_inline_shell(
                 .output()
             {
                 Ok(output) if output.status.success() => {
-                    let stdout = String::from_utf8_lossy(&output.stdout)
-                        .trim()
-                        .to_string();
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if stdout.len() > 4000 {
                         format!("{}… [truncated]", &stdout[..4000])
                     } else {

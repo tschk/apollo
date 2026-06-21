@@ -77,11 +77,7 @@ impl Tool for WorktreeTool {
 
         match args.action.as_str() {
             "list" => {
-                let output = run_git(
-                    &self.workspace,
-                    &["worktree", "list", "--porcelain"],
-                )
-                .await?;
+                let output = run_git(&self.workspace, &["worktree", "list", "--porcelain"]).await?;
                 Ok(ToolResult::success(if output.is_empty() {
                     "No worktrees.".to_string()
                 } else {
@@ -151,7 +147,11 @@ impl Tool for WorktreeTool {
 
                 // Remove worktree
                 let path_str = worktree_path.to_string_lossy().to_string();
-                let _ = run_git(&self.workspace, &["worktree", "remove", "--force", &path_str]).await;
+                let _ = run_git(
+                    &self.workspace,
+                    &["worktree", "remove", "--force", &path_str],
+                )
+                .await;
 
                 // Delete the branch
                 let _ = run_git(&self.workspace, &["branch", "-D", &branch]).await;

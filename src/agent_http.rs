@@ -31,7 +31,11 @@ pub struct ChatResponseBody {
     pub response: String,
 }
 
-pub async fn chat_once(runner: &AgentRunner, message: &str, chat_id: &str) -> anyhow::Result<String> {
+pub async fn chat_once(
+    runner: &AgentRunner,
+    message: &str,
+    chat_id: &str,
+) -> anyhow::Result<String> {
     let msg = IncomingMessage {
         id: uuid::Uuid::new_v4().to_string(),
         sender_id: "http".into(),

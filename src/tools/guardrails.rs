@@ -114,7 +114,13 @@ impl ToolGuardrails {
     }
 
     /// Observe a tool call and return the guardrail decision.
-    pub fn observe(&mut self, name: &str, args: &str, _output: &str, is_error: bool) -> GuardrailDecision {
+    pub fn observe(
+        &mut self,
+        name: &str,
+        args: &str,
+        _output: &str,
+        is_error: bool,
+    ) -> GuardrailDecision {
         let hash = hash_args(args);
         let identity = (name.to_string(), hash.clone());
 
@@ -166,8 +172,7 @@ impl ToolGuardrails {
                 .count()
                 + 1;
 
-            if self.config.hard_stop_enabled
-                && error_count >= self.config.exact_failure_block_after
+            if self.config.hard_stop_enabled && error_count >= self.config.exact_failure_block_after
             {
                 tracing::warn!(
                     "[guardrails] Stop: {} failed {} consecutive times",
@@ -176,18 +181,11 @@ impl ToolGuardrails {
                 );
                 return GuardrailDecision::Stop(format!(
                     "Tool '{}' failed {} consecutive times — blocking further attempts.",
-                    name,
-                    error_count
+                    name, error_count
                 ));
             }
-            if self.config.warnings_enabled
-                && error_count >= self.config.exact_failure_warn_after
-            {
-                tracing::warn!(
-                    "[guardrails] Warn: {} failed {} times",
-                    name,
-                    error_count
-                );
+            if self.config.warnings_enabled && error_count >= self.config.exact_failure_warn_after {
+                tracing::warn!("[guardrails] Warn: {} failed {} times", name, error_count);
                 return GuardrailDecision::Warn(format!(
                     "WARNING: Tool '{}' keeps failing ({} consecutive errors). Try a different approach.",
                     name,

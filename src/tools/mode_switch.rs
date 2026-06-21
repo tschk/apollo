@@ -112,7 +112,10 @@ impl Tool for ModeSwitchTool {
         };
 
         *self.mode.write().unwrap() = new_mode;
-        Ok(ToolResult::success(format!("Switched to {} mode", description)))
+        Ok(ToolResult::success(format!(
+            "Switched to {} mode",
+            description
+        )))
     }
 }
 

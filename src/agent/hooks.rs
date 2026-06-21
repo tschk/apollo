@@ -24,13 +24,7 @@ pub trait ToolHook: Send + Sync {
     async fn before_tool_use(&self, tool_name: &str, arguments: &str) -> HookDecision;
 
     /// Called after the tool completes (whether success or error).
-    async fn after_tool_result(
-        &self,
-        _tool_name: &str,
-        _arguments: &str,
-        _result: &ToolResult,
-    ) {
-    }
+    async fn after_tool_result(&self, _tool_name: &str, _arguments: &str, _result: &ToolResult) {}
 }
 
 /// Enforces `allow` / `deny` rules from `PermissionRulesConfig`.
@@ -94,12 +88,7 @@ impl ToolHook for LoggingHook {
         HookDecision::Allow
     }
 
-    async fn after_tool_result(
-        &self,
-        tool_name: &str,
-        _arguments: &str,
-        result: &ToolResult,
-    ) {
+    async fn after_tool_result(&self, tool_name: &str, _arguments: &str, result: &ToolResult) {
         tracing::debug!(
             "← tool:{} is_error:{} len:{}",
             tool_name,
@@ -156,7 +145,10 @@ mod tests {
 
     #[tokio::test]
     async fn permission_hook_allow_list() {
-        let hook = PermissionHook::new(vec![], vec!["web_search".to_string(), "file_ops".to_string()]);
+        let hook = PermissionHook::new(
+            vec![],
+            vec!["web_search".to_string(), "file_ops".to_string()],
+        );
         assert!(matches!(
             hook.before_tool_use("web_search", "{}").await,
             HookDecision::Allow

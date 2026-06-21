@@ -36,11 +36,7 @@ pub struct CompressResult {
 pub trait Compactor: Send + Sync {
     fn name(&self) -> &str;
     fn should_compress(&self, info: &ContextInfo) -> bool;
-    async fn compress(
-        &self,
-        messages: &[ChatMessage],
-        task: Option<&str>,
-    ) -> CompressResult;
+    async fn compress(&self, messages: &[ChatMessage], task: Option<&str>) -> CompressResult;
 }
 
 // ── Default compactor ─────────────────────────────────────────────────────
@@ -71,11 +67,7 @@ impl Compactor for DefaultCompactor {
         info.total_chars > threshold
     }
 
-    async fn compress(
-        &self,
-        messages: &[ChatMessage],
-        task: Option<&str>,
-    ) -> CompressResult {
+    async fn compress(&self, messages: &[ChatMessage], task: Option<&str>) -> CompressResult {
         let keep_recent = 6;
 
         if messages.len() <= keep_recent + 2 {

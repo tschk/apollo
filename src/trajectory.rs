@@ -69,7 +69,11 @@ pub struct TrajectoryMessage {
 }
 
 impl Trajectory {
-    pub fn new(id: impl Into<String>, session_id: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        session_id: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)

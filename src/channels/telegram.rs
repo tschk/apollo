@@ -16,12 +16,35 @@ use crate::memory::MemoryBackend;
 /// Telegram message length limit
 const TELEGRAM_MAX_LEN: usize = 4096;
 
+#[derive(Clone, Default)]
+pub struct TelegramIngressFilter {
+    pub allowed_chat_ids: Vec<String>,
+    pub allowed_sender_ids: Vec<String>,
+}
+
+impl TelegramIngressFilter {
+    pub fn allows(&self, chat_id: &str, sender_id: &str) -> bool {
+        if !self.allowed_chat_ids.is_empty() && !self.allowed_chat_ids.iter().any(|c| c == chat_id)
+        {
+            return false;
+        }
+        if !self.allowed_sender_ids.is_empty()
+            && !sender_id.is_empty()
+            && !self.allowed_sender_ids.iter().any(|s| s == sender_id)
+        {
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Clone)]
 pub struct TelegramChannel {
     bot_token: String,
     chat_id: i64,
     client: reqwest::Client,
     memory: Option<Arc<dyn MemoryBackend>>,
+    ingress: TelegramIngressFilter,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,11 +127,17 @@ impl TelegramChannel {
             chat_id,
             client: reqwest::Client::new(),
             memory: None,
+            ingress: TelegramIngressFilter::default(),
         }
     }
 
     pub fn with_memory(mut self, memory: Arc<dyn MemoryBackend>) -> Self {
         self.memory = Some(memory);
+        self
+    }
+
+    pub fn with_ingress_filter(mut self, ingress: TelegramIngressFilter) -> Self {
+        self.ingress = ingress;
         self
     }
 
@@ -383,6 +412,7 @@ impl Channel for TelegramChannel {
         let chat_id = self.chat_id;
         let client = self.client.clone();
         let memory = self.memory.clone();
+        let ingress = self.ingress.clone();
 
         tokio::spawn(async move {
             let ch = TelegramChannel {
@@ -390,6 +420,7 @@ impl Channel for TelegramChannel {
                 chat_id,
                 client,
                 memory,
+                ingress,
             };
             let mut offset = 0;
             loop {
@@ -434,6 +465,17 @@ impl Channel for TelegramChannel {
                             };
 
                             if text.is_empty() {
+                                continue;
+                            }
+
+                            let chat_id_str = msg.chat.id.to_string();
+                            let sender_id_str = from.map(|u| u.id.to_string()).unwrap_or_default();
+                            if !ch.ingress.allows(&chat_id_str, &sender_id_str) {
+                                tracing::warn!(
+                                    "Telegram ingress denied chat={} sender={}",
+                                    chat_id_str,
+                                    sender_id_str
+                                );
                                 continue;
                             }
 

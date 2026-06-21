@@ -166,7 +166,9 @@ impl SwarmCoordinator {
                             .await
                         {
                             Some(id) => id,
-                            None => return (task, "⚠️ Swarm lane full, task deferred.".to_string()),
+                            None => {
+                                return (task, "⚠️ Swarm lane full, task deferred.".to_string())
+                            }
                         };
 
                         let msg = crate::channels::IncomingMessage {
@@ -180,7 +182,7 @@ impl SwarmCoordinator {
                             timestamp: chrono::Utc::now(),
                         };
                         let null_ch = crate::agent::mode::NullChannel::new("swarm");
-                        
+
                         let result = runner
                             .handle_message(&msg, &null_ch)
                             .await

@@ -201,9 +201,8 @@ impl AutonomousLoop {
                 .await
             {
                 Ok(response) => {
-                    status.last_result = Some(
-                        response.chars().take(500).collect::<String>() + "...",
-                    );
+                    status.last_result =
+                        Some(response.chars().take(500).collect::<String>() + "...");
                     status.last_run = Some(chrono::Utc::now().to_rfc3339());
 
                     // Run validation tests
@@ -280,7 +279,10 @@ fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
         Ok(true)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!("[autonomous] tests failed:\n{}", &stderr[..stderr.len().min(1000)]);
+        tracing::warn!(
+            "[autonomous] tests failed:\n{}",
+            &stderr[..stderr.len().min(1000)]
+        );
         Ok(false)
     }
 }
@@ -328,7 +330,10 @@ fn git_commit_and_push(message: &str, remote: &str, branch: &str, cwd: &Path) {
             tracing::info!("[autonomous] push successful");
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("[autonomous] push failed: {}", &stderr[..stderr.len().min(500)]);
+            tracing::warn!(
+                "[autonomous] push failed: {}",
+                &stderr[..stderr.len().min(500)]
+            );
         }
     }
 }

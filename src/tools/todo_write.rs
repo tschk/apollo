@@ -23,8 +23,16 @@ impl TodoWriteTool {
             .chars()
             .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
             .collect();
-        let clean = if clean.is_empty() { "TODO".to_string() } else { clean };
-        let name = if clean.ends_with(".md") { clean } else { format!("{}.md", clean) };
+        let clean = if clean.is_empty() {
+            "TODO".to_string()
+        } else {
+            clean
+        };
+        let name = if clean.ends_with(".md") {
+            clean
+        } else {
+            format!("{}.md", clean)
+        };
         self.workspace.join(".tasks").join(name)
     }
 }
@@ -85,18 +93,19 @@ impl Tool for TodoWriteTool {
         let path = self.todo_path(&args.file);
 
         match args.action.as_str() {
-            "read" => {
-                match tokio::fs::read_to_string(&path).await {
-                    Ok(content) => Ok(ToolResult::success(content)),
-                    Err(_) => Ok(ToolResult::success("(file does not exist yet)")),
-                }
-            }
+            "read" => match tokio::fs::read_to_string(&path).await {
+                Ok(content) => Ok(ToolResult::success(content)),
+                Err(_) => Ok(ToolResult::success("(file does not exist yet)")),
+            },
             "write" => {
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
                 tokio::fs::write(&path, &args.content).await?;
-                Ok(ToolResult::success(format!("Written to {}", path.display())))
+                Ok(ToolResult::success(format!(
+                    "Written to {}",
+                    path.display()
+                )))
             }
             "append" => {
                 if let Some(parent) = path.parent() {
@@ -110,7 +119,10 @@ impl Tool for TodoWriteTool {
                 };
                 let new_content = format!("{}{}{}\n", existing, separator, args.content);
                 tokio::fs::write(&path, &new_content).await?;
-                Ok(ToolResult::success(format!("Appended to {}", path.display())))
+                Ok(ToolResult::success(format!(
+                    "Appended to {}",
+                    path.display()
+                )))
             }
             other => Ok(ToolResult::error(format!("Unknown action: {}", other))),
         }
