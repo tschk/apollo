@@ -8,13 +8,6 @@ channels, 20+ LLM providers, pluggable memory (SurrealDB + RocksDB), tool guardr
 context compaction, streaming tool-call parsing, autonomous coding mode, and a plugin
 system with lifecycle hooks.
 
-## What This Branch Is
-
-- `main` is the device-first branch — single-machine bot that runs on your laptop,
-  desktop, server, or box at home.
-- `codex/full-platform` is where the hosted gateway, web UI, and deployment work
-  belong.
-
 ## Features
 
 ### Core
