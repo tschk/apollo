@@ -19,19 +19,10 @@ pub async fn build_system_prompt(workspace: &Path) -> String {
         ("MEMORY.md", "## Long-Term Memory", 8_000),
     ];
 
-    let mut readers = Vec::with_capacity(files.len());
-    for (filename, header, limit) in files {
-        readers.push(async move {
-            read_file(workspace, filename, limit)
-                .await
-                .map(|content| format!("{header}\n{content}"))
-        });
-    }
-
     let mut parts = Vec::new();
-    for reader in readers {
-        if let Some(content) = reader.await {
-            parts.push(content);
+    for (filename, header, limit) in files {
+        if let Some(content) = read_file(workspace, filename, limit).await {
+            parts.push(format!("{header}\n{content}"));
         }
     }
 
