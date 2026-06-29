@@ -25,6 +25,26 @@ impl GoogleChatChannel {
     }
 }
 
+fn parse_webhook_message(body: &Value) -> Option<IncomingMessage> {
+    if body["type"].as_str() == Some("MESSAGE") {
+        let msg = &body["message"];
+        let text = msg["text"].as_str().unwrap_or("").to_string();
+        if !text.is_empty() {
+            return Some(IncomingMessage {
+                id: msg["name"].as_str().unwrap_or("").to_string(),
+                sender_id: body["user"]["name"].as_str().unwrap_or("").to_string(),
+                sender_name: body["user"]["displayName"].as_str().map(|s| s.to_string()),
+                chat_id: body["space"]["name"].as_str().unwrap_or("").to_string(),
+                text,
+                is_group: body["space"]["type"].as_str() == Some("ROOM"),
+                reply_to: None,
+                timestamp: chrono::Utc::now(),
+            });
+        }
+    }
+    None
+}
+
 #[async_trait]
 impl Channel for GoogleChatChannel {
     fn name(&self) -> &str {
@@ -44,30 +64,8 @@ impl Channel for GoogleChatChannel {
                 post(move |Json(body): Json<Value>| {
                     let tx = tx.clone();
                     async move {
-                        if body["type"].as_str() == Some("MESSAGE") {
-                            let msg = &body["message"];
-                            let text = msg["text"].as_str().unwrap_or("").to_string();
-                            if !text.is_empty() {
-                                let incoming = IncomingMessage {
-                                    id: msg["name"].as_str().unwrap_or("").to_string(),
-                                    sender_id: body["user"]["name"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    sender_name: body["user"]["displayName"]
-                                        .as_str()
-                                        .map(|s| s.to_string()),
-                                    chat_id: body["space"]["name"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    text,
-                                    is_group: body["space"]["type"].as_str() == Some("ROOM"),
-                                    reply_to: None,
-                                    timestamp: chrono::Utc::now(),
-                                };
-                                let _ = tx.send(incoming).await;
-                            }
+                        if let Some(incoming) = parse_webhook_message(&body) {
+                            let _ = tx.send(incoming).await;
                         }
                         "{}"
                     }
