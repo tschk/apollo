@@ -305,24 +305,14 @@ impl Config {
 
     pub fn default_config() -> Self {
         Self {
-            provider: ProviderConfig {
-                name: "anthropic".to_string(),
-                api_key: None,
-                base_url: None,
-            },
+            provider: ProviderConfig::default(),
             embeddings: EmbeddingsConfig::default(),
             agent: AgentConfig::default(),
             model: "claude-sonnet-4-6".to_string(),
             system_prompt: "You are a helpful AI assistant.".to_string(),
             workspace: PathBuf::from("."),
             storage: StorageConfig::default(),
-            runtime: RuntimeConfig {
-                kind: "native".to_string(),
-                docker_image: None,
-                memory_limit_mb: None,
-                state_path: None,
-                self_update: SelfUpdateConfig::default(),
-            },
+            runtime: RuntimeConfig::default(),
             hosting: HostingConfig::default(),
             observability: ObservabilityConfig::default(),
             channel: ChannelConfig::default(),
