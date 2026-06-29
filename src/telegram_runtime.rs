@@ -108,38 +108,46 @@ pub async fn run_telegram_chat(run: TelegramChatRun<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
+struct BridgeState {
+    tx: tokio::sync::mpsc::Sender<IncomingMessage>,
+    chat_id: String,
+}
+
+async fn handle_bridge_message(
+    State(state): State<BridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> (axum::http::StatusCode, &'static str) {
+    let text = body["message"].as_str().unwrap_or("").to_string();
+    if text.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "missing 'message' field",
+        );
+    }
+    let msg = IncomingMessage {
+        id: format!("cli-{}", chrono::Utc::now().timestamp()),
+        chat_id: state.chat_id,
+        sender_id: "cli".to_string(),
+        sender_name: Some("CLI".to_string()),
+        text,
+        timestamp: chrono::Utc::now(),
+        is_group: false,
+        reply_to: None,
+    };
+    let _ = state.tx.send(msg).await;
+    (axum::http::StatusCode::OK, "queued")
+}
+
 fn spawn_local_message_bridge(cli_tx: tokio::sync::mpsc::Sender<IncomingMessage>, chat_id: i64) {
-    let chat_id_clone = chat_id.to_string();
+    let state = BridgeState {
+        tx: cli_tx,
+        chat_id: chat_id.to_string(),
+    };
     tokio::spawn(async move {
         let app = Router::new()
-            .route(
-                "/message",
-                post(
-                    |State(tx): State<tokio::sync::mpsc::Sender<IncomingMessage>>,
-                     Json(body): Json<serde_json::Value>| async move {
-                        let text = body["message"].as_str().unwrap_or("").to_string();
-                        if text.is_empty() {
-                            return (
-                                axum::http::StatusCode::BAD_REQUEST,
-                                "missing 'message' field",
-                            );
-                        }
-                        let msg = IncomingMessage {
-                            id: format!("cli-{}", chrono::Utc::now().timestamp()),
-                            chat_id: chat_id_clone.clone(),
-                            sender_id: "cli".to_string(),
-                            sender_name: Some("CLI".to_string()),
-                            text,
-                            timestamp: chrono::Utc::now(),
-                            is_group: false,
-                            reply_to: None,
-                        };
-                        let _ = tx.send(msg).await;
-                        (axum::http::StatusCode::OK, "queued")
-                    },
-                ),
-            )
-            .with_state(cli_tx);
+            .route("/message", post(handle_bridge_message))
+            .with_state(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:31337")
             .await
