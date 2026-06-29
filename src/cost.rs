@@ -60,8 +60,8 @@ pub struct CostTracker {
 }
 
 impl CostTracker {
-    pub fn new() -> Self {
-        let models = vec![
+    fn default_models() -> Vec<ModelCost> {
+        vec![
             ModelCost {
                 model: "claude-opus-4-6".to_string(),
                 input_cost_per_1m: 15.0,
@@ -92,11 +92,13 @@ impl CostTracker {
                 input_cost_per_1m: 0.075,
                 output_cost_per_1m: 0.3,
             },
-        ];
+        ]
+    }
 
+    pub fn new() -> Self {
         Self {
             costs: Arc::new(RwLock::new(Vec::new())),
-            models: Arc::new(RwLock::new(models)),
+            models: Arc::new(RwLock::new(Self::default_models())),
             rate_limit_status: Arc::new(RwLock::new(None)),
         }
     }
