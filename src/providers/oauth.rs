@@ -1,9 +1,17 @@
 //! OAuth token support for Anthropic
 //! Converts Claude.dev OAuth tokens (oat01) to API calls via token exchange
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+#[derive(Deserialize)]
+struct RefreshResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<i64>,
+}
 
 /// OAuth token cache (refreshed as needed)
 #[derive(Clone)]
@@ -50,7 +58,21 @@ impl OAuthTokenCache {
                 .ok_or_else(|| anyhow::anyhow!("No refresh token available"))?
         };
 
-        // Exchange refresh token for new access token
+        let body = Self::fetch_new_token(&refresh_token).await?;
+
+        let expires_in = body.expires_in.unwrap_or(3600) * 1000; // Convert to ms
+        let new_expires = chrono::Utc::now().timestamp_millis() + expires_in;
+
+        *self.token.write().await = Some(body.access_token);
+        if let Some(r) = body.refresh_token {
+            *self.refresh_token.write().await = Some(r);
+        }
+        *self.expires_at.write().await = new_expires;
+
+        Ok(())
+    }
+
+    async fn fetch_new_token(refresh_token: &str) -> anyhow::Result<RefreshResponse> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
@@ -59,7 +81,7 @@ impl OAuthTokenCache {
             .post("https://api.anthropic.com/v1/oauth/token")
             .json(&serde_json::json!({
                 "grant_type": "refresh_token",
-                "refresh_token": &refresh_token,
+                "refresh_token": refresh_token,
             }))
             .send()
             .await?;
@@ -71,22 +93,8 @@ impl OAuthTokenCache {
             ));
         }
 
-        let body = response.json::<Value>().await?;
-        let new_token = body["access_token"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("No access_token in refresh response"))?;
-        let new_refresh = body["refresh_token"].as_str();
-        let expires_in = body["expires_in"].as_i64().unwrap_or(3600) * 1000; // Convert to ms
-
-        let new_expires = chrono::Utc::now().timestamp_millis() + expires_in;
-
-        *self.token.write().await = Some(new_token.to_string());
-        if let Some(r) = new_refresh {
-            *self.refresh_token.write().await = Some(r.to_string());
-        }
-        *self.expires_at.write().await = new_expires;
-
-        Ok(())
+        let body = response.json::<RefreshResponse>().await?;
+        Ok(body)
     }
 }
 
