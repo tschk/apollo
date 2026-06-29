@@ -1390,14 +1390,14 @@ async fn main() -> anyhow::Result<()> {
                         if teams.is_empty() {
                             println!("No teams.");
                         } else {
+                            let ids: Vec<String> =
+                                teams.iter().map(|t| t.team_id.clone()).collect();
+                            let counts = coordinator.teams.member_counts_for(&ids).await?;
                             for t in &teams {
-                                let members = coordinator.teams.list_members(&t.team_id).await?;
+                                let n = counts.get(&t.team_id).copied().unwrap_or(0);
                                 println!(
                                     "{} (lead: {}, members: {}, status: {})",
-                                    t.name,
-                                    t.lead_agent_id,
-                                    members.len(),
-                                    t.status
+                                    t.name, t.lead_agent_id, n, t.status
                                 );
                             }
                         }
@@ -1506,50 +1506,70 @@ fn compiled_in_providers() -> Vec<&'static str> {
     names
 }
 
+fn get_provider_matches<'a>(all: &[&'a str], filter: &str) -> Vec<&'a str> {
+    let needle = filter.trim().to_lowercase();
+    if needle.is_empty() {
+        all.to_vec()
+    } else {
+        all.iter()
+            .copied()
+            .filter(|n| n.to_lowercase().contains(&needle))
+            .collect()
+    }
+}
+
+fn print_provider_matches(matches: &[&str]) {
+    if matches.is_empty() {
+        println!("  (no matches — try another filter)");
+    } else {
+        println!("\n  Matching providers:");
+        for (i, n) in matches.iter().enumerate() {
+            println!("    [{}] {}", i + 1, n);
+        }
+    }
+}
+
+fn parse_provider_selection(input: &str, matches: &[&str], all: &[&str]) -> Option<String> {
+    if input.is_empty() {
+        if matches.len() == 1 {
+            return Some(matches[0].to_string());
+        }
+        return None;
+    }
+    if let Ok(idx) = input.parse::<usize>() {
+        if (1..=matches.len()).contains(&idx) {
+            return Some(matches[idx - 1].to_string());
+        }
+    }
+    if let Some(found) = matches.iter().find(|n| n.eq_ignore_ascii_case(input)) {
+        return Some((*found).to_string());
+    }
+    if let Some(found) = all.iter().find(|n| n.eq_ignore_ascii_case(input)) {
+        return Some((*found).to_string());
+    }
+    None
+}
+
 fn prompt_provider_interactive() -> anyhow::Result<String> {
     let all = compiled_in_providers();
     println!("  Choose a provider (type to filter the list, then pick a number or exact name):");
     let mut filter = String::new();
     loop {
-        let needle = filter.trim().to_lowercase();
-        let matches: Vec<&str> = if needle.is_empty() {
-            all.clone()
-        } else {
-            all.iter()
-                .copied()
-                .filter(|n| n.to_lowercase().contains(&needle))
-                .collect()
-        };
-        if matches.is_empty() {
-            println!("  (no matches — try another filter)");
-        } else {
-            println!("\n  Matching providers:");
-            for (i, n) in matches.iter().enumerate() {
-                println!("    [{}] {}", i + 1, n);
-            }
-        }
+        let matches = get_provider_matches(&all, &filter);
+        print_provider_matches(&matches);
+
         eprint!("  Filter, #, or exact name (empty = pick if exactly one match): ");
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         let t = line.trim();
-        if t.is_empty() {
-            if matches.len() == 1 {
-                return Ok(matches[0].to_string());
-            }
-            continue;
+
+        if let Some(selection) = parse_provider_selection(t, &matches, &all) {
+            return Ok(selection);
         }
-        if let Ok(idx) = t.parse::<usize>() {
-            if (1..=matches.len()).contains(&idx) {
-                return Ok(matches[idx - 1].to_string());
-            }
+
+        if !t.is_empty() {
+            filter = t.to_string();
         }
-        if let Some(found) = matches.iter().find(|n| n.eq_ignore_ascii_case(t)) {
-            return Ok((*found).to_string());
-        }
-        if let Some(found) = all.iter().find(|n| n.eq_ignore_ascii_case(t)) {
-            return Ok((*found).to_string());
-        }
-        filter = t.to_string();
     }
 }
 
