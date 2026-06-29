@@ -45,16 +45,20 @@ provider-ollama = []
 # Swarm mode (distributed agent coordination)
 swarm = []
 
-# Local SQLite brain (rs_gbrain crate)
+# Local SQLite brain (gbrain / rs_gbrain on crates.io)
 rs-gbrain = ["dep:rs_gbrain"]
+
+# Desktop automation (rs_peekaboo on crates.io)
+peekaboo = ["dep:rs_peekaboo"]
 
 # Bundles
 all-channels = ["channel-cli", "channel-telegram", "channel-discord", "channel-slack", "channel-whatsapp", "channel-signal", "channel-matrix", "channel-irc", "channel-googlechat", "channel-msteams"]
 all-providers = ["provider-anthropic", "provider-copilot", "provider-ollama"]
-full = ["all-channels", "all-providers"]
+full = ["all-channels", "all-providers", "peekaboo"]
 
 [dependencies]
-rs_gbrain = { package = "gbrain", path = "../rs_gbrain", optional = true }
+rs_gbrain = { package = "gbrain", version = "0.1", optional = true }
+rs_peekaboo = { version = "0.3", optional = true }
 
 # Async runtime (optimized features only)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }

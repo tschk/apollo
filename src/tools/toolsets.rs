@@ -12,6 +12,7 @@ pub fn toolset_for_tool(name: &str) -> &'static str {
         "list_models" | "doctor" => "sessions",
         "message" => "messaging",
         "skill_manager" => "skills",
+        "peekaboo" => "desktop",
         "mcp" | "create_tool" | "list_custom_tools" | "vibemania" => "advanced",
         _ => "misc",
     }

@@ -205,6 +205,8 @@ pub fn build_base_tools(
         )));
         tools.push(Arc::new(EmbeddingSearchTool::new(provider, memory)));
     }
+    #[cfg(feature = "peekaboo")]
+    tools.push(Arc::new(crate::tools::PeekabooTool));
     #[cfg(feature = "rs-gbrain")]
     if cfg.rs_gbrain.enabled {
         tools.push(Arc::new(crate::tools::rs_gbrain::BrainSearchTool));
