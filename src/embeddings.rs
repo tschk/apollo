@@ -93,10 +93,28 @@ mod tests {
     fn test_cosine_similarity() {
         let a = vec![1.0, 0.0, 0.0];
         let b = vec![1.0, 0.0, 0.0];
-        assert_eq!(cosine_similarity(&a, &b), 1.0);
+        assert!((cosine_similarity(&a, &b) - 1.0).abs() < 1e-6);
 
         let a = vec![1.0, 0.0];
         let b = vec![0.0, 1.0];
-        assert_eq!(cosine_similarity(&a, &b), 0.0);
+        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_edge_cases() {
+        // Empty vectors
+        let a: Vec<f32> = vec![];
+        let b: Vec<f32> = vec![];
+        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
+
+        // Mismatched lengths
+        let a = vec![1.0];
+        let b = vec![1.0, 0.0];
+        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
+
+        // Zero vectors
+        let a = vec![0.0, 0.0];
+        let b = vec![0.0, 0.0];
+        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
     }
 }
