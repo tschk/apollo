@@ -405,4 +405,72 @@ mod tests {
         assert!(tool.denied_over_gateway_http_by_default);
         assert!(tool.approval_required);
     }
+
+    #[test]
+    fn audit_flags_loopback_gateway_without_auth() {
+        let mut cfg = Config::default_config();
+        cfg.gateway.bind = "127.0.0.1:8080".into();
+        cfg.gateway.auth_token = None;
+        let findings = audit_config(&cfg);
+        assert!(findings.iter().any(|f| f.code == "gateway_loopback_no_auth" && f.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn audit_flags_short_auth_token() {
+        let mut cfg = Config::default_config();
+        cfg.gateway.bind = "127.0.0.1:8080".into();
+        cfg.gateway.auth_token = Some("short".into());
+        let findings = audit_config(&cfg);
+        assert!(findings.iter().any(|f| f.code == "gateway_token_short" && f.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn audit_flags_admin_api_enabled_loopback() {
+        let mut cfg = Config::default_config();
+        cfg.gateway.bind = "127.0.0.1:8080".into();
+        cfg.gateway.auth_token = Some("a_very_long_auth_token_string_here_for_testing".into());
+        cfg.gateway.enable_admin_api = true;
+        let findings = audit_config(&cfg);
+        assert!(findings.iter().any(|f| f.code == "gateway_admin_api_enabled" && f.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn audit_flags_admin_api_enabled_non_loopback() {
+        let mut cfg = Config::default_config();
+        cfg.gateway.bind = "0.0.0.0:8080".into();
+        cfg.gateway.auth_token = Some("a_very_long_auth_token_string_here_for_testing".into());
+        cfg.gateway.enable_admin_api = true;
+        let findings = audit_config(&cfg);
+        assert!(findings.iter().any(|f| f.code == "gateway_admin_api_enabled" && f.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn audit_flags_rate_limit_disabled() {
+        let mut cfg = Config::default_config();
+        cfg.gateway.bind = "127.0.0.1:8080".into();
+        cfg.gateway.auth_token = Some("a_very_long_auth_token_string_here_for_testing".into());
+        cfg.gateway.rate_limit_per_minute = 0;
+        let findings = audit_config(&cfg);
+        assert!(findings.iter().any(|f| f.code == "gateway_rate_limit_disabled" && f.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn audit_flags_timeout_high() {
+        let mut cfg = Config::default_config();
+        cfg.gateway.bind = "127.0.0.1:8080".into();
+        cfg.gateway.auth_token = Some("a_very_long_auth_token_string_here_for_testing".into());
+        cfg.gateway.request_timeout_secs = 301;
+        let findings = audit_config(&cfg);
+        assert!(findings.iter().any(|f| f.code == "gateway_timeout_high" && f.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn audit_flags_origins_unrestricted() {
+        let mut cfg = Config::default_config();
+        cfg.gateway.bind = "0.0.0.0:8080".into();
+        cfg.gateway.auth_token = Some("a_very_long_auth_token_string_here_for_testing".into());
+        cfg.gateway.allowed_origins = vec![];
+        let findings = audit_config(&cfg);
+        assert!(findings.iter().any(|f| f.code == "gateway_origins_unrestricted" && f.severity == Severity::Warn));
+    }
 }
