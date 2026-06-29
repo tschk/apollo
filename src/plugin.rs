@@ -309,6 +309,68 @@ impl Default for PluginRegistry {
     }
 }
 
+// ── Built-in shell plugin (argv spawn, no sh -c) ─────────────────────────
+
+/// JSON-RPC plugin exposing `shell` when `policy.allow_plugin_shell` is enabled.
+pub struct ShellPlugin {
+    policy: crate::policy::ExecutionPolicy,
+}
+
+impl ShellPlugin {
+    pub fn new(policy: crate::policy::ExecutionPolicy) -> Self {
+        Self { policy }
+    }
+}
+
+#[async_trait]
+impl Plugin for ShellPlugin {
+    fn name(&self) -> &str {
+        "tools"
+    }
+
+    fn version(&self) -> &str {
+        "0.1.0"
+    }
+
+    fn methods(&self) -> Vec<MethodSpec> {
+        vec![MethodSpec {
+            name: "shell".to_string(),
+            description: "Execute shell command".to_string(),
+            params: {
+                let mut m = HashMap::new();
+                m.insert("cmd".to_string(), "string".to_string());
+                m
+            },
+            returns: "string".to_string(),
+        }]
+    }
+
+    async fn call(&self, method: &str, params: Value) -> Result<Value, PluginError> {
+        if method != "shell" {
+            return Err(PluginError::new(-32601, "Method not found"));
+        }
+        if !self.policy.allow_plugin_shell {
+            return Err(PluginError::new(
+                -32604,
+                "Plugin shell execution is disabled by policy",
+            ));
+        }
+
+        let cmd = params
+            .get("cmd")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| PluginError::new(-32602, "Missing cmd parameter"))?;
+
+        match crate::process_cmd::run_argv_command(cmd, 120).await {
+            Ok((output, ok)) => Ok(serde_json::json!({
+                "stdout": output,
+                "success": ok,
+            })),
+            Err(e) => Err(PluginError::new(-32603, &e.to_string())),
+        }
+    }
+}
+
 // ── Plugin Info ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -426,6 +488,31 @@ mod tests {
                 _ => Err(PluginError::new(-32601, "Method not found")),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn shell_plugin_uses_argv_not_shell_when_allowed() {
+        let policy = crate::policy::ExecutionPolicy {
+            allow_plugin_shell: true,
+            ..Default::default()
+        };
+        let plugin = ShellPlugin::new(policy);
+        let result = plugin
+            .call("shell", json!({ "cmd": "echo plugin_ok" }))
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true);
+        assert!(result["stdout"].as_str().unwrap().contains("plugin_ok"));
+    }
+
+    #[tokio::test]
+    async fn shell_plugin_denied_when_policy_off() {
+        let plugin = ShellPlugin::new(crate::policy::ExecutionPolicy::default());
+        let err = plugin
+            .call("shell", json!({ "cmd": "echo x" }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, -32604);
     }
 
     #[tokio::test]

@@ -17,6 +17,33 @@ impl OllamaProvider {
             base_url: base_url.into(),
         }
     }
+
+    fn build_request_body(&self, request: &ChatRequest<'_>) -> Value {
+        let messages: Vec<Value> = request
+            .messages
+            .iter()
+            .map(|m| serde_json::json!({ "role": &m.role, "content": &m.content }))
+            .collect();
+
+        serde_json::json!({
+            "model": request.model,
+            "messages": messages,
+            "stream": false,
+            "options": {
+                "temperature": request.temperature,
+            }
+        })
+    }
+
+    fn parse_response(&self, data: Value) -> ChatResponse {
+        let text = data["message"]["content"].as_str().map(String::from);
+
+        ChatResponse {
+            text,
+            tool_calls: vec![],
+            usage: None,
+        }
+    }
 }
 
 impl Default for OllamaProvider {
@@ -42,21 +69,7 @@ impl Provider for OllamaProvider {
 
     async fn chat(&self, request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
         let client = reqwest::Client::new();
-
-        let messages: Vec<Value> = request
-            .messages
-            .iter()
-            .map(|m| serde_json::json!({ "role": &m.role, "content": &m.content }))
-            .collect();
-
-        let body = serde_json::json!({
-            "model": request.model,
-            "messages": messages,
-            "stream": false,
-            "options": {
-                "temperature": request.temperature,
-            }
-        });
+        let body = self.build_request_body(request);
 
         let resp = send_with_retry(
             client
@@ -72,12 +85,6 @@ impl Provider for OllamaProvider {
         }
 
         let data: Value = resp.json().await?;
-        let text = data["message"]["content"].as_str().map(String::from);
-
-        Ok(ChatResponse {
-            text,
-            tool_calls: vec![],
-            usage: None,
-        })
+        Ok(self.parse_response(data))
     }
 }

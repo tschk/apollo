@@ -172,49 +172,18 @@ impl ConcurrencyScheduler {
     /// Returns cycles as Vec<Vec<String>> (each cycle is a list of agent IDs)
     pub async fn detect_deadlocks(&self) -> Vec<Vec<String>> {
         let slots = self.active_slots.read().await;
-        let mut cycles = Vec::new();
 
         // Build agent -> waiting_on_agent map
-        let mut wait_map: HashMap<String, String> = HashMap::new();
-        for slot in slots.iter() {
-            if let Some(ref waiting_on) = slot.waiting_on {
-                wait_map.insert(slot.agent_id.clone(), waiting_on.clone());
-            }
-        }
+        let wait_map: HashMap<String, String> = slots
+            .iter()
+            .filter_map(|slot| {
+                slot.waiting_on
+                    .as_ref()
+                    .map(|waiting_on| (slot.agent_id.clone(), waiting_on.clone()))
+            })
+            .collect();
 
-        // DFS cycle detection
-        let mut visited = std::collections::HashSet::new();
-        for start in wait_map.keys() {
-            if visited.contains(start) {
-                continue;
-            }
-
-            let mut path = vec![start.clone()];
-            let mut current = start.clone();
-            let mut path_set = std::collections::HashSet::new();
-            path_set.insert(start.clone());
-
-            while let Some(next) = wait_map.get(&current) {
-                if path_set.contains(next) {
-                    // Found a cycle
-                    let cycle_start = path.iter().position(|p| p == next).unwrap();
-                    cycles.push(path[cycle_start..].to_vec());
-                    break;
-                }
-                if visited.contains(next) {
-                    break;
-                }
-                path.push(next.clone());
-                path_set.insert(next.clone());
-                current = next.clone();
-            }
-
-            for p in &path {
-                visited.insert(p.clone());
-            }
-        }
-
-        cycles
+        find_cycles(&wait_map)
     }
 
     /// Get current state for monitoring
@@ -244,10 +213,94 @@ impl ConcurrencyScheduler {
     }
 }
 
+/// Find cycles in a wait graph using DFS
+fn find_cycles(wait_map: &HashMap<String, String>) -> Vec<Vec<String>> {
+    let mut cycles = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+
+    for start in wait_map.keys() {
+        if visited.contains(start) {
+            continue;
+        }
+
+        let mut path = vec![start.clone()];
+        let mut current = start.clone();
+        let mut path_set = std::collections::HashSet::new();
+        path_set.insert(start.clone());
+
+        while let Some(next) = wait_map.get(&current) {
+            if path_set.contains(next) {
+                // Found a cycle
+                let cycle_start = path.iter().position(|p| p == next).unwrap();
+                cycles.push(path[cycle_start..].to_vec());
+                break;
+            }
+            if visited.contains(next) {
+                break;
+            }
+            path.push(next.clone());
+            path_set.insert(next.clone());
+            current = next.clone();
+        }
+
+        for p in &path {
+            visited.insert(p.clone());
+        }
+    }
+
+    cycles
+}
+
 /// Scheduler status for monitoring
 #[derive(Debug)]
 pub struct SchedulerStatus {
     pub lane_usage: HashMap<Lane, (usize, usize)>, // (active, max)
     pub active_slots: Vec<ExecutionSlot>,
     pub deadlocks: Vec<Vec<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_cycles_no_cycles() {
+        let mut wait_map = HashMap::new();
+        wait_map.insert("A".to_string(), "B".to_string());
+        wait_map.insert("B".to_string(), "C".to_string());
+
+        let cycles = find_cycles(&wait_map);
+        assert!(cycles.is_empty());
+    }
+
+    #[test]
+    fn test_find_cycles_single_cycle() {
+        let mut wait_map = HashMap::new();
+        wait_map.insert("A".to_string(), "B".to_string());
+        wait_map.insert("B".to_string(), "C".to_string());
+        wait_map.insert("C".to_string(), "A".to_string());
+
+        let cycles = find_cycles(&wait_map);
+        assert_eq!(cycles.len(), 1);
+        let cycle = &cycles[0];
+        assert_eq!(cycle.len(), 3);
+        assert!(cycle.contains(&"A".to_string()));
+        assert!(cycle.contains(&"B".to_string()));
+        assert!(cycle.contains(&"C".to_string()));
+    }
+
+    #[test]
+    fn test_find_cycles_disconnected_cycles() {
+        let mut wait_map = HashMap::new();
+        // Cycle 1
+        wait_map.insert("A".to_string(), "B".to_string());
+        wait_map.insert("B".to_string(), "A".to_string());
+        // Cycle 2
+        wait_map.insert("C".to_string(), "D".to_string());
+        wait_map.insert("D".to_string(), "E".to_string());
+        wait_map.insert("E".to_string(), "C".to_string());
+
+        let cycles = find_cycles(&wait_map);
+        assert_eq!(cycles.len(), 2);
+    }
 }

@@ -8,41 +8,36 @@ const DEFAULT_PROMPT: &str = "You are a helpful AI assistant.";
 const ROUTING_GUIDANCE: &str = "## Routing guidance
 In group chats, respond to questions about the assistant, its plugins, settings, commands, upgrades, or transport even without a direct mention. Ignore unrelated ambient chatter unless the message clearly addresses the assistant or requests help.";
 
+const PROMPT_FILES: [(&str, &str, usize); 6] = [
+    ("IDENTITY.md", "## Identity", 12_000),
+    ("SOUL.md", "## Personality & Tone", 12_000),
+    ("USER.md", "## About the User", 12_000),
+    ("AGENTS.md", "## Workspace Rules", 16_000),
+    ("TOOLS.md", "## Tool Notes", 12_000),
+    ("MEMORY.md", "## Long-Term Memory", 8_000),
+];
+
 /// Build the system prompt from workspace context files
 pub async fn build_system_prompt(workspace: &Path) -> String {
-    let files = [
-        ("IDENTITY.md", "## Identity", 12_000usize),
-        ("SOUL.md", "## Personality & Tone", 12_000),
-        ("USER.md", "## About the User", 12_000),
-        ("AGENTS.md", "## Workspace Rules", 16_000),
-        ("TOOLS.md", "## Tool Notes", 12_000),
-        ("MEMORY.md", "## Long-Term Memory", 8_000),
-    ];
-
-    let mut readers = Vec::with_capacity(files.len());
-    for (filename, header, limit) in files {
-        readers.push(async move {
-            read_file(workspace, filename, limit)
-                .await
-                .map(|content| format!("{header}\n{content}"))
-        });
-    }
-
-    let mut parts = Vec::new();
-    for reader in readers {
-        if let Some(content) = reader.await {
-            parts.push(content);
-        }
-    }
-
-    let mut prompt = if parts.is_empty() {
+    let body = load_workspace_sections(workspace, &PROMPT_FILES).await;
+    let mut prompt = if body.is_empty() {
         DEFAULT_PROMPT.to_string()
     } else {
-        parts.join("\n\n---\n\n")
+        body
     };
     prompt.push_str("\n\n");
     prompt.push_str(ROUTING_GUIDANCE);
     prompt
+}
+
+async fn load_workspace_sections(workspace: &Path, files: &[(&str, &str, usize)]) -> String {
+    let mut parts = Vec::new();
+    for &(filename, header, limit) in files {
+        if let Some(content) = read_file(workspace, filename, limit).await {
+            parts.push(format!("{header}\n{content}"));
+        }
+    }
+    parts.join("\n\n---\n\n")
 }
 
 /// Read a file from workspace, return None if missing

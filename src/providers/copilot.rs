@@ -52,12 +52,7 @@ impl CopilotProvider {
         })
     }
 
-    /// Exchange GitHub token for Copilot API token
-    async fn ensure_token(&mut self) -> anyhow::Result<String> {
-        if let Some(ref token) = self.api_token {
-            return Ok(token.clone());
-        }
-
+    async fn fetch_new_token(&self) -> anyhow::Result<String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
@@ -78,6 +73,17 @@ impl CopilotProvider {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("No token in response"))?
             .to_string();
+
+        Ok(token)
+    }
+
+    /// Exchange GitHub token for Copilot API token
+    async fn ensure_token(&mut self) -> anyhow::Result<String> {
+        if let Some(ref token) = self.api_token {
+            return Ok(token.clone());
+        }
+
+        let token = self.fetch_new_token().await?;
 
         self.base_url = derive_base_url(&token);
         self.api_token = Some(token.clone());

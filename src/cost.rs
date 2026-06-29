@@ -163,35 +163,28 @@ impl CostTracker {
 
     /// Update rate limit status from Anthropic API response headers
     pub async fn update_rate_limits(&self, headers: &reqwest::header::HeaderMap) {
+        let parse_usize = |key| {
+            headers
+                .get(key)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok())
+        };
+
+        let parse_string = |key| {
+            headers
+                .get(key)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        };
+
         let status = RateLimitStatus {
-            requests_limit: headers
-                .get("anthropic-ratelimit-requests-limit")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse().ok()),
-            requests_remaining: headers
-                .get("anthropic-ratelimit-requests-remaining")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse().ok()),
-            input_tokens_limit: headers
-                .get("anthropic-ratelimit-input-tokens-limit")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse().ok()),
-            input_tokens_remaining: headers
-                .get("anthropic-ratelimit-input-tokens-remaining")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse().ok()),
-            output_tokens_limit: headers
-                .get("anthropic-ratelimit-output-tokens-limit")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse().ok()),
-            output_tokens_remaining: headers
-                .get("anthropic-ratelimit-output-tokens-remaining")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse().ok()),
-            tokens_reset: headers
-                .get("anthropic-ratelimit-tokens-reset")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
+            requests_limit: parse_usize("anthropic-ratelimit-requests-limit"),
+            requests_remaining: parse_usize("anthropic-ratelimit-requests-remaining"),
+            input_tokens_limit: parse_usize("anthropic-ratelimit-input-tokens-limit"),
+            input_tokens_remaining: parse_usize("anthropic-ratelimit-input-tokens-remaining"),
+            output_tokens_limit: parse_usize("anthropic-ratelimit-output-tokens-limit"),
+            output_tokens_remaining: parse_usize("anthropic-ratelimit-output-tokens-remaining"),
+            tokens_reset: parse_string("anthropic-ratelimit-tokens-reset"),
         };
 
         *self.rate_limit_status.write().await = Some(status);
@@ -258,5 +251,55 @@ mod tests {
         let summary = tracker.summary().await;
         assert_eq!(summary.call_count, 1);
         assert!(summary.total_cost > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_update_rate_limits() {
+        let tracker = CostTracker::new();
+        let mut headers = reqwest::header::HeaderMap::new();
+
+        headers.insert(
+            "anthropic-ratelimit-requests-limit",
+            "1000".parse().unwrap(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-requests-remaining",
+            "999".parse().unwrap(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-input-tokens-limit",
+            "400000".parse().unwrap(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-input-tokens-remaining",
+            "399000".parse().unwrap(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-output-tokens-limit",
+            "100000".parse().unwrap(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-output-tokens-remaining",
+            "99000".parse().unwrap(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-tokens-reset",
+            "2023-11-20T12:00:00Z".parse().unwrap(),
+        );
+
+        tracker.update_rate_limits(&headers).await;
+
+        let status = tracker.get_rate_limits().await.unwrap();
+
+        assert_eq!(status.requests_limit, Some(1000));
+        assert_eq!(status.requests_remaining, Some(999));
+        assert_eq!(status.input_tokens_limit, Some(400000));
+        assert_eq!(status.input_tokens_remaining, Some(399000));
+        assert_eq!(status.output_tokens_limit, Some(100000));
+        assert_eq!(status.output_tokens_remaining, Some(99000));
+        assert_eq!(
+            status.tokens_reset,
+            Some("2023-11-20T12:00:00Z".to_string())
+        );
     }
 }

@@ -74,6 +74,18 @@ impl TeamManager {
         self.storage.get_team_members(team_id).await
     }
 
+    /// Member counts for many teams in one query (avoids N+1 listing).
+    pub async fn member_counts_for(
+        &self,
+        team_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, usize>> {
+        let grouped = self.storage.list_team_members_for_teams(team_ids).await?;
+        Ok(grouped
+            .into_iter()
+            .map(|(id, members)| (id, members.len()))
+            .collect())
+    }
+
     /// Get team by name
     pub async fn get_team_by_name(&self, name: &str) -> Result<Option<Team>> {
         self.storage.get_team_by_name(name).await
@@ -85,6 +97,24 @@ impl TeamManager {
     }
 
     // === Task Board ===
+
+    async fn has_unresolved_dependencies(
+        &self,
+        blocked_by: &[String],
+        ignore_task_id: Option<&str>,
+    ) -> Result<bool> {
+        for blocker_id in blocked_by {
+            if Some(blocker_id.as_str()) == ignore_task_id {
+                continue;
+            }
+            if let Some(blocker) = self.storage.get_team_task(blocker_id).await? {
+                if blocker.status != "done" {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
 
     /// Create a task on the team board
     pub async fn create_task(
@@ -138,17 +168,10 @@ impl TeamManager {
 
         // Check if task is blocked
         if task.status == "blocked" {
-            // Check if blockers are resolved
-            let mut still_blocked = false;
-            for blocker_id in &task.blocked_by {
-                if let Some(blocker) = self.storage.get_team_task(blocker_id).await? {
-                    if blocker.status != "done" {
-                        still_blocked = true;
-                        break;
-                    }
-                }
-            }
-            if still_blocked {
+            if self
+                .has_unresolved_dependencies(&task.blocked_by, None)
+                .await?
+            {
                 bail!("Task '{}' is blocked by incomplete dependencies", task_id);
             }
         }
@@ -170,20 +193,10 @@ impl TeamManager {
         let blocked = self.storage.get_blocked_tasks(&task.team_id).await?;
         for bt in blocked {
             if bt.blocked_by.contains(&task_id.to_string()) {
-                // Check if all blockers are now done
-                let mut all_done = true;
-                for b in &bt.blocked_by {
-                    if b == task_id {
-                        continue; // This one is now done
-                    }
-                    if let Some(blocker) = self.storage.get_team_task(b).await? {
-                        if blocker.status != "done" {
-                            all_done = false;
-                            break;
-                        }
-                    }
-                }
-                if all_done {
+                if !self
+                    .has_unresolved_dependencies(&bt.blocked_by, Some(task_id))
+                    .await?
+                {
                     // Unblock the task (move from blocked to pending)
                     self.storage.unblock_task(&bt.task_id).await?;
                 }
