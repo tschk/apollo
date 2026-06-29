@@ -25,10 +25,17 @@ use crate::tools::{
 };
 
 pub fn load_config(path: &str) -> Config {
+    load_config_workspace(path, None)
+}
+
+pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
     let mut cfg = Config::load(path).unwrap_or_else(|_| {
         tracing::warn!("Config not found at {}, using defaults", path);
         Config::default_config()
     });
+    if let Some(ws) = workspace {
+        crate::plugins::apply_workspace_manifest(&mut cfg, ws);
+    }
 
     if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
         cfg.provider.api_key = Some(key.clone());

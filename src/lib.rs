@@ -31,6 +31,7 @@ pub mod mcp_server;
 pub mod memory;
 pub mod plugin;
 pub mod plugin_hosts;
+pub mod plugins;
 pub mod policy;
 pub mod process_cmd;
 pub mod prompt;

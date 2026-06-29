@@ -2,6 +2,8 @@
 
 use crate::config::ToolsetConfig;
 
+pub const CORE_TOOLSET_GROUPS: &[&str] = &["runtime", "fs", "memory", "sessions", "misc"];
+
 pub fn toolset_for_tool(name: &str) -> &'static str {
     match name {
         "exec" => "runtime",
@@ -15,6 +17,39 @@ pub fn toolset_for_tool(name: &str) -> &'static str {
         "peekaboo" => "desktop",
         "mcp" | "create_tool" | "list_custom_tools" | "vibemania" => "advanced",
         _ => "misc",
+    }
+}
+
+pub fn expand_package(name: &str) -> Vec<&'static str> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "web" => vec!["web"],
+        "browser" => vec!["browser"],
+        "skills" => vec!["skills"],
+        "advanced" => vec!["advanced"],
+        "desktop" => vec!["desktop"],
+        "unthinkclaw-live" | "live" => vec!["web", "browser", "skills", "advanced", "desktop"],
+        "core" | "default" => CORE_TOOLSET_GROUPS.to_vec(),
+        _ => vec![],
+    }
+}
+
+pub fn apply_package_manifest(toolsets: &mut ToolsetConfig, packages: &[String]) {
+    if packages.is_empty() {
+        return;
+    }
+    for g in CORE_TOOLSET_GROUPS {
+        let s = (*g).to_string();
+        if !toolsets.enabled.contains(&s) {
+            toolsets.enabled.push(s);
+        }
+    }
+    for pkg in packages {
+        for g in expand_package(pkg) {
+            let s = g.to_string();
+            if !toolsets.enabled.contains(&s) {
+                toolsets.enabled.push(s);
+            }
+        }
     }
 }
 
@@ -44,5 +79,16 @@ mod tests {
         };
         assert!(is_tool_enabled("memory_search", &cfg));
         assert!(!is_tool_enabled("exec", &cfg));
+    }
+
+    #[test]
+    fn package_live_enables_web() {
+        let mut cfg = ToolsetConfig {
+            enabled: vec![],
+            disabled: Vec::new(),
+        };
+        apply_package_manifest(&mut cfg, &["live".to_string()]);
+        assert!(is_tool_enabled("web_search", &cfg));
+        assert!(cfg.enabled.iter().any(|e| e == "runtime"));
     }
 }

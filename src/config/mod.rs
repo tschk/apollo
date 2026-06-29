@@ -177,6 +177,8 @@ pub struct PolicyConfig {
 #[serde(default)]
 pub struct PluginLayerConfig {
     pub enabled: bool,
+    #[serde(default = "default_manifest_path")]
+    pub manifest_path: PathBuf,
     /// Extra directories to scan for OpenClaw SKILL.md and Hermes plugin.json
     #[serde(default)]
     pub host_plugin_roots: Vec<PathBuf>,
@@ -447,10 +449,15 @@ impl Default for PolicyConfig {
     }
 }
 
+fn default_manifest_path() -> PathBuf {
+    PathBuf::from("plugins/manifest.json")
+}
+
 impl Default for PluginLayerConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            manifest_path: default_manifest_path(),
             host_plugin_roots: Vec::new(),
             hook_events: vec![
                 "before_message".to_string(),
