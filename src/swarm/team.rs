@@ -138,17 +138,7 @@ impl TeamManager {
 
         // Check if task is blocked
         if task.status == "blocked" {
-            // Check if blockers are resolved
-            let mut still_blocked = false;
-            for blocker_id in &task.blocked_by {
-                if let Some(blocker) = self.storage.get_team_task(blocker_id).await? {
-                    if blocker.status != "done" {
-                        still_blocked = true;
-                        break;
-                    }
-                }
-            }
-            if still_blocked {
+            if !self.are_all_blockers_done(&task.blocked_by, None).await? {
                 bail!("Task '{}' is blocked by incomplete dependencies", task_id);
             }
         }
@@ -167,29 +157,44 @@ impl TeamManager {
             .await?
             .ok_or_else(|| anyhow::anyhow!("Task '{}' not found after completion", task_id))?;
 
-        let blocked = self.storage.get_blocked_tasks(&task.team_id).await?;
-        for bt in blocked {
-            if bt.blocked_by.contains(&task_id.to_string()) {
-                // Check if all blockers are now done
-                let mut all_done = true;
-                for b in &bt.blocked_by {
-                    if b == task_id {
-                        continue; // This one is now done
-                    }
-                    if let Some(blocker) = self.storage.get_team_task(b).await? {
-                        if blocker.status != "done" {
-                            all_done = false;
-                            break;
-                        }
-                    }
+        self.unblock_dependent_tasks(&task.team_id, task_id).await?;
+
+        Ok(())
+    }
+
+    /// Helper to check if all blocking tasks are done
+    async fn are_all_blockers_done(
+        &self,
+        blockers: &[String],
+        ignore_task_id: Option<&str>,
+    ) -> Result<bool> {
+        for blocker_id in blockers {
+            if Some(blocker_id.as_str()) == ignore_task_id {
+                continue; // This one is treated as done
+            }
+            if let Some(blocker) = self.storage.get_team_task(blocker_id).await? {
+                if blocker.status != "done" {
+                    return Ok(false);
                 }
-                if all_done {
+            }
+        }
+        Ok(true)
+    }
+
+    /// Helper to unblock tasks whose dependencies are now met
+    async fn unblock_dependent_tasks(&self, team_id: &str, completed_task_id: &str) -> Result<()> {
+        let blocked = self.storage.get_blocked_tasks(team_id).await?;
+        for bt in blocked {
+            if bt.blocked_by.contains(&completed_task_id.to_string()) {
+                if self
+                    .are_all_blockers_done(&bt.blocked_by, Some(completed_task_id))
+                    .await?
+                {
                     // Unblock the task (move from blocked to pending)
                     self.storage.unblock_task(&bt.task_id).await?;
                 }
             }
         }
-
         Ok(())
     }
 
