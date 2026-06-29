@@ -11,13 +11,27 @@ pub struct Embedding {
     pub metadata: serde_json::Value,
 }
 
+#[derive(Deserialize)]
+struct GeminiResponse {
+    embedding: GeminiEmbedding,
+}
+
+#[derive(Deserialize)]
+struct GeminiEmbedding {
+    values: Vec<f32>,
+}
+
 pub struct EmbeddingsClient {
     api_key: String,
+    client: reqwest::Client,
 }
 
 impl EmbeddingsClient {
     pub fn new(api_key: String) -> Self {
-        Self { api_key }
+        Self {
+            api_key,
+            client: reqwest::Client::new(),
+        }
     }
 
     /// Embed text using Gemini text-embedding-004
@@ -33,29 +47,17 @@ impl EmbeddingsClient {
             }
         });
 
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = self
+            .client
             .post(url)
             .header("x-goog-api-key", &self.api_key)
             .json(&request)
             .send()
-            .await?;
+            .await?
+            .error_for_status()?;
 
-        let result: serde_json::Value = resp.json().await?;
-
-        if let Some(embedding) = result
-            .get("embedding")
-            .and_then(|e| e.get("values"))
-            .and_then(|v| v.as_array())
-        {
-            let vector: Vec<f32> = embedding
-                .iter()
-                .filter_map(|v| v.as_f64().map(|f| f as f32))
-                .collect();
-            Ok(vector)
-        } else {
-            Err(anyhow::anyhow!("Failed to extract embedding from response"))
-        }
+        let result: GeminiResponse = resp.json().await?;
+        Ok(result.embedding.values)
     }
 
     /// Embed multiple texts in batch
