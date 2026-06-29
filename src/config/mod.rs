@@ -250,25 +250,20 @@ impl Default for RsGbrainConfig {
 /// Apply a named onboarding permission profile to `cfg` (policy, toolsets, and `permission_profile`).
 pub fn apply_permission_profile(cfg: &mut Config, profile: &str) {
     let p = profile.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+
+    // Apply defaults that are common to all branches
+    cfg.toolsets = ToolsetConfig::default();
+    cfg.agent.permissions = PermissionRulesConfig::default();
+
     match p.as_str() {
         "full" => {
             cfg.agent.permission_profile = "full".to_string();
             cfg.policy.allow_shell = true;
             cfg.policy.allow_dynamic_tools = true;
-            cfg.toolsets = ToolsetConfig::default();
-            cfg.agent.permissions = PermissionRulesConfig::default();
-        }
-        "auto" => {
-            cfg.agent.permission_profile = "auto".to_string();
-            cfg.policy = PolicyConfig::default();
-            cfg.toolsets = ToolsetConfig::default();
-            cfg.agent.permissions = PermissionRulesConfig::default();
         }
         "prompt" => {
             cfg.agent.permission_profile = "prompt".to_string();
             cfg.policy = PolicyConfig::default();
-            cfg.toolsets = ToolsetConfig::default();
-            cfg.agent.permissions = PermissionRulesConfig::default();
         }
         "tools_only" | "tools" => {
             cfg.agent.permission_profile = "tools_only".to_string();
@@ -285,13 +280,10 @@ pub fn apply_permission_profile(cfg: &mut Config, profile: &str) {
                 "create_tool".to_string(),
                 "mcp".to_string(),
             ];
-            cfg.agent.permissions = PermissionRulesConfig::default();
         }
-        _ => {
+        "auto" | _ => {
             cfg.agent.permission_profile = "auto".to_string();
             cfg.policy = PolicyConfig::default();
-            cfg.toolsets = ToolsetConfig::default();
-            cfg.agent.permissions = PermissionRulesConfig::default();
         }
     }
 }
