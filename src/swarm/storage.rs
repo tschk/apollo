@@ -52,6 +52,10 @@ pub trait SwarmStorage: Send + Sync {
     async fn list_teams(&self) -> Result<Vec<Team>>;
     async fn add_team_member(&self, member: &TeamMember) -> Result<()>;
     async fn get_team_members(&self, team_id: &str) -> Result<Vec<TeamMember>>;
+    async fn list_team_members_for_teams(
+        &self,
+        team_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<TeamMember>>>;
     async fn remove_team_member(&self, team_id: &str, agent_id: &str) -> Result<()>;
 
     // === Team Tasks ===
@@ -496,6 +500,27 @@ impl SwarmStorage for SurrealBackend {
             .bind(("id", team_id.to_string()))
             .await?;
         Ok(result.take(0)?)
+    }
+
+    async fn list_team_members_for_teams(
+        &self,
+        team_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<TeamMember>>> {
+        use std::collections::HashMap;
+        if team_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut result = self
+            .db
+            .query("SELECT * FROM team_members WHERE team_id IN $ids")
+            .bind(("ids", team_ids.to_vec()))
+            .await?;
+        let members: Vec<TeamMember> = result.take(0)?;
+        let mut map: HashMap<String, Vec<TeamMember>> = HashMap::new();
+        for m in members {
+            map.entry(m.team_id.clone()).or_default().push(m);
+        }
+        Ok(map)
     }
 
     async fn remove_team_member(&self, team_id: &str, agent_id: &str) -> Result<()> {
