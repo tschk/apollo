@@ -250,3 +250,86 @@ You are coordinating parallel coding agents. Follow these rules:
 - Validate and integrate each agent's output before merging
 - Reassign or handle failed tasks yourself
 - Report the outcome of each agent with status and a brief summary";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_approval() {
+        // Exact matches
+        assert!(is_approval("yes"));
+        assert!(is_approval("y"));
+        assert!(is_approval("go"));
+        assert!(is_approval("ok"));
+        assert!(is_approval("okay"));
+        assert!(is_approval("proceed"));
+        assert!(is_approval("approve"));
+        assert!(is_approval("do it"));
+        assert!(is_approval("looks good"));
+        assert!(is_approval("lgtm"));
+        assert!(is_approval("go ahead"));
+        assert!(is_approval("continue"));
+        assert!(is_approval("run it"));
+        assert!(is_approval("execute"));
+
+        // Case insensitivity
+        assert!(is_approval("YES"));
+        assert!(is_approval("OkAy"));
+        assert!(is_approval("PROCEED"));
+        assert!(is_approval("LGTM"));
+
+        // Leading/trailing whitespace
+        assert!(is_approval("  yes  "));
+        assert!(is_approval("\tgo ahead\n"));
+
+        // Prefix matches
+        assert!(is_approval("yes, do it"));
+        assert!(is_approval("go ahead and run"));
+        assert!(is_approval("looks good to me"));
+        assert!(is_approval("lgtm, go for it"));
+
+        // Negative cases
+        assert!(!is_approval("no"));
+        assert!(!is_approval("yep"));
+        assert!(!is_approval("sure"));
+        assert!(!is_approval(""));
+        assert!(!is_approval("   "));
+        assert!(!is_approval("go ahea")); // not an exact match or prefix
+    }
+
+    #[test]
+    fn test_is_rejection() {
+        // Exact matches
+        assert!(is_rejection("no"));
+        assert!(is_rejection("n"));
+        assert!(is_rejection("nope"));
+        assert!(is_rejection("cancel"));
+        assert!(is_rejection("abort"));
+        assert!(is_rejection("stop"));
+        assert!(is_rejection("nevermind"));
+        assert!(is_rejection("never mind"));
+
+        // Case insensitivity
+        assert!(is_rejection("NO"));
+        assert!(is_rejection("Cancel"));
+        assert!(is_rejection("ABORT"));
+        assert!(is_rejection("STOP"));
+
+        // Leading/trailing whitespace
+        assert!(is_rejection("  no  "));
+        assert!(is_rejection("\tabort\n"));
+
+        // Prefix matches
+        assert!(is_rejection("no, don't do that"));
+        assert!(is_rejection("cancel the operation"));
+        assert!(is_rejection("stop executing"));
+
+        // Negative cases
+        assert!(!is_rejection("yes"));
+        assert!(!is_rejection("not really"));
+        assert!(!is_rejection(""));
+        assert!(!is_rejection("   "));
+        assert!(!is_rejection("stopit")); // starts_with("stop ") has a space
+    }
+}
