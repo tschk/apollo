@@ -346,45 +346,69 @@ fn esc_html(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn try_parse_code(remainder: &str, out: &mut String) -> Option<usize> {
+    if remainder.starts_with('`') {
+        if let Some(j) = remainder[1..].find('`') {
+            out.push_str("<code>");
+            out.push_str(&esc_html(&remainder[1..1 + j]));
+            out.push_str("</code>");
+            return Some(1 + j + 1);
+        }
+    }
+    None
+}
+
+fn try_parse_bold(remainder: &str, out: &mut String) -> Option<usize> {
+    if remainder.starts_with("**") {
+        if let Some(j) = remainder[2..].find("**") {
+            out.push_str("<b>");
+            out.push_str(&esc_html(&remainder[2..2 + j]));
+            out.push_str("</b>");
+            return Some(2 + j + 2);
+        }
+    }
+    None
+}
+
+fn try_parse_link(remainder: &str, out: &mut String) -> Option<usize> {
+    if remainder.starts_with('[') {
+        if let Some(j) = remainder[1..].find("](") {
+            let link_text = &remainder[1..1 + j];
+            let rest = &remainder[1 + j + 2..];
+            if let Some(k) = rest.find(')') {
+                let url = &rest[..k];
+                out.push_str("<a href=\"");
+                out.push_str(url);
+                out.push_str("\">");
+                out.push_str(&esc_html(link_text));
+                out.push_str("</a>");
+                return Some(1 + j + 2 + k + 1);
+            }
+        }
+    }
+    None
+}
+
 fn inline_to_html(text: &str) -> String {
     let mut out = String::new();
-    let bytes = text.as_bytes();
     let mut i = 0;
-    while i < bytes.len() {
-        // Inline code
-        if bytes[i] == b'`' {
-            if let Some(j) = text[i + 1..].find('`') {
-                out.push_str(&format!(
-                    "<code>{}</code>",
-                    esc_html(&text[i + 1..i + 1 + j])
-                ));
-                i = i + 1 + j + 1;
-                continue;
-            }
+    while i < text.len() {
+        let remainder = &text[i..];
+
+        if let Some(len) = try_parse_code(remainder, &mut out) {
+            i += len;
+            continue;
         }
-        // Bold **...**
-        if bytes.get(i) == Some(&b'*') && bytes.get(i + 1) == Some(&b'*') {
-            if let Some(j) = text[i + 2..].find("**") {
-                out.push_str(&format!("<b>{}</b>", esc_html(&text[i + 2..i + 2 + j])));
-                i = i + 2 + j + 2;
-                continue;
-            }
+        if let Some(len) = try_parse_bold(remainder, &mut out) {
+            i += len;
+            continue;
         }
-        // Link [text](url)
-        if bytes[i] == b'[' {
-            if let Some(j) = text[i + 1..].find("](") {
-                let link_text = &text[i + 1..i + 1 + j];
-                let rest = &text[i + 1 + j + 2..];
-                if let Some(k) = rest.find(')') {
-                    let url = &rest[..k];
-                    out.push_str(&format!("<a href=\"{}\">{}</a>", url, esc_html(link_text)));
-                    i = i + 1 + j + 2 + k + 1;
-                    continue;
-                }
-            }
+        if let Some(len) = try_parse_link(remainder, &mut out) {
+            i += len;
+            continue;
         }
-        // Default: escape and emit
-        let c = text[i..].chars().next().unwrap_or(' ');
+
+        let c = remainder.chars().next().unwrap_or(' ');
         out.push_str(&esc_html(&c.to_string()));
         i += c.len_utf8();
     }
