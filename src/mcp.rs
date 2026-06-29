@@ -50,6 +50,7 @@ impl McpClient {
     pub async fn spawn(command: &str, args: &[&str]) -> anyhow::Result<Self> {
         let mut child = Command::new(command)
             .args(args)
+            .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
@@ -72,13 +73,32 @@ impl McpClient {
         })
     }
 
+    async fn next_request_id(&self) -> u64 {
+        let mut counter = self.request_id.lock().await;
+        *counter += 1;
+        *counter
+    }
+
+    async fn send_request(&self, request: &JsonRpcRequest) -> anyhow::Result<()> {
+        let request_json = serde_json::to_string(request)?;
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(request_json.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+
+    async fn read_response(&self) -> anyhow::Result<JsonRpcResponse> {
+        let mut stdout = self.stdout.lock().await;
+        let mut line = String::new();
+        stdout.read_line(&mut line).await?;
+        let response: JsonRpcResponse = serde_json::from_str(&line)?;
+        Ok(response)
+    }
+
     /// Send a request and wait for response
     pub async fn call(&self, method: &str, params: Option<Value>) -> anyhow::Result<Value> {
-        let id = {
-            let mut counter = self.request_id.lock().await;
-            *counter += 1;
-            *counter
-        };
+        let id = self.next_request_id().await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -87,21 +107,8 @@ impl McpClient {
             params,
         };
 
-        // Send request
-        let request_json = serde_json::to_string(&request)?;
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin.write_all(request_json.as_bytes()).await?;
-            stdin.write_all(b"\n").await?;
-            stdin.flush().await?;
-        }
-
-        // Read response
-        let mut stdout = self.stdout.lock().await;
-        let mut line = String::new();
-        stdout.read_line(&mut line).await?;
-
-        let response: JsonRpcResponse = serde_json::from_str(&line)?;
+        self.send_request(&request).await?;
+        let response = self.read_response().await?;
 
         if let Some(error) = response.error {
             anyhow::bail!("MCP error {}: {}", error.code, error.message);

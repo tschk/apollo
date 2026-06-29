@@ -5,14 +5,17 @@ use serde::Deserialize;
 
 use super::traits::*;
 use crate::mcp::CodexClient;
+use tokio::sync::Mutex;
 
 pub struct McpTool {
-    _client: Option<CodexClient>,
+    _client: Mutex<Option<CodexClient>>,
 }
 
 impl McpTool {
     pub fn new() -> Self {
-        Self { _client: None }
+        Self {
+            _client: Mutex::new(None),
+        }
     }
 }
 
@@ -67,11 +70,14 @@ impl Tool for McpTool {
     async fn execute(&self, arguments: &str) -> anyhow::Result<ToolResult> {
         let args: McpArgs = serde_json::from_str(arguments)?;
 
-        // This is a bit hacky since Tool trait doesn't support &mut self
-        // In production, you'd use Arc<Mutex<CodexClient>> or lazy_static
-        // For now, spawn a new client each time
-        let client = CodexClient::spawn().await
-            .map_err(|e| anyhow::anyhow!("Failed to spawn Codex: {}. Install with: cargo install --git https://github.com/atechnology-company/vibemania codex", e))?;
+        let mut client_guard = self._client.lock().await;
+        if client_guard.is_none() {
+            let new_client = CodexClient::spawn().await
+                .map_err(|e| anyhow::anyhow!("Failed to spawn Codex: {}. Install with: cargo install --git https://github.com/atechnology-company/vibemania codex", e))?;
+            *client_guard = Some(new_client);
+        }
+
+        let client = client_guard.as_mut().unwrap();
 
         match args.action.as_str() {
             "run" => {
@@ -82,15 +88,11 @@ impl Tool for McpTool {
 
                 let result = client.run_session(&goal, &path).await?;
 
-                client.shutdown().await.ok(); // Best effort cleanup
-
                 Ok(ToolResult::success(serde_json::to_string_pretty(&result)?))
             }
 
             "list_tools" => {
                 let tools = client.list_tools().await?;
-
-                client.shutdown().await.ok();
 
                 let output = tools
                     .iter()
