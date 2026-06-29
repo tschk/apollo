@@ -250,3 +250,57 @@ You are coordinating parallel coding agents. Follow these rules:
 - Validate and integrate each agent's output before merging
 - Reassign or handle failed tasks yourself
 - Report the outcome of each agent with status and a brief summary";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_mode_from_permission_profile() {
+        // Test "full" mapping to BypassPermissions
+        assert!(matches!(
+            agent_mode_from_permission_profile("full"),
+            AgentMode::BypassPermissions
+        ));
+        // Test whitespace trimming and case insensitivity
+        assert!(matches!(
+            agent_mode_from_permission_profile("  FULL  "),
+            AgentMode::BypassPermissions
+        ));
+
+        // Test "prompt" mapping to Coding with plan_approval true
+        assert!(matches!(
+            agent_mode_from_permission_profile("prompt"),
+            AgentMode::Coding {
+                plan_approval: true,
+                project_path: None
+            }
+        ));
+        // Test whitespace trimming and case insensitivity
+        assert!(matches!(
+            agent_mode_from_permission_profile(" ProMpT\n"),
+            AgentMode::Coding {
+                plan_approval: true,
+                project_path: None
+            }
+        ));
+
+        // Test fallback to Auto for unknown values
+        assert!(matches!(
+            agent_mode_from_permission_profile(""),
+            AgentMode::Auto
+        ));
+        assert!(matches!(
+            agent_mode_from_permission_profile("auto"),
+            AgentMode::Auto
+        ));
+        assert!(matches!(
+            agent_mode_from_permission_profile("unknown-profile"),
+            AgentMode::Auto
+        ));
+        assert!(matches!(
+            agent_mode_from_permission_profile("some profile"),
+            AgentMode::Auto
+        ));
+    }
+}
