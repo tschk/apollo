@@ -12,12 +12,11 @@
 | Host plugin scan | `plugin_hosts.rs` — `.openclaw/plugins`, `.hermes/plugins`, workspace `plugins/` |
 | rs_gbrain | feature `rs-gbrain`, `brain_*` tools, brief inject, dream on heartbeat |
 
-## Gaps vs v2 branch (pick selectively)
+## v2 absorbed on main (partial)
 
-- Feature-gated tool packs (`plugin-web`, `plugin-advanced`, …) — not merged; main still registers most tools unconditionally.
-- `unthinkclaw-install` binary — useful; not on main.
-- `fastembed` local embeddings — optional on v2 only.
-- `vendor/equilibrium` submodule — skip unless needed.
+- Workspace manifest: `.unthinkclaw/plugins/manifest.json` + `apply_package_manifest` (packages: `web`, `live`, `desktop`, …).
+- `unthinkclaw-install` binary.
+- Still not ported: Cargo feature-gated tool modules (`plugin-web`, …), `fastembed`, `vendor/equilibrium`.
 
 ## Gaps vs `feature/computer-use-integration`
 

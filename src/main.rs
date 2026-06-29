@@ -421,9 +421,9 @@ async fn main() -> anyhow::Result<()> {
             discord_token: _discord_token,
             discord_channel_id: _discord_channel_id,
         } => {
-            let cfg = load_config(&config);
+            let workspace = workspace.unwrap_or_else(|| load_config(&config).workspace.clone());
+            let cfg = unthinkclaw::bootstrap::load_config_workspace(&config, Some(&workspace));
             let model = model.unwrap_or(cfg.model.clone());
-            let workspace = workspace.unwrap_or(cfg.workspace.clone());
             let _ = unthinkclaw::workspace_init::ensure_workspace_kit(&workspace);
 
             let provider = build_provider(&cfg);
