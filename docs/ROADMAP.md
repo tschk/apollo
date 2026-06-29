@@ -47,4 +47,4 @@ Last updated: 2026-06-16
 
 - hosted gateway product work
 - web UI and deployment surface
-- multi-user control-plane features that belong on `codex/full-platform`
+- multi-user hosted control-plane (not planned on `main`)

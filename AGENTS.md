@@ -5,9 +5,8 @@ Scope: entire repository.
 ## Branch Posture
 
 - `main` is the device-first runtime branch.
-- Hosted gateway, web UI, and deployment work belong on `codex/full-platform`.
-- Keep this branch focused on the local bot that a user can run on their own
-  machine without the hosted control-plane surface.
+- Keep this branch focused on the local bot a user runs on their own machine.
+- Hosted gateway / web control-plane is out of scope unless revived on a dedicated branch.
 
 ## 1) Project Snapshot
 
