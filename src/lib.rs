@@ -32,6 +32,7 @@ pub mod memory;
 pub mod plugin;
 pub mod plugin_hosts;
 pub mod policy;
+pub mod process_cmd;
 pub mod prompt;
 pub mod providers;
 pub mod scheduler;
