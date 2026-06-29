@@ -250,28 +250,21 @@ impl Default for RsGbrainConfig {
 /// Apply a named onboarding permission profile to `cfg` (policy, toolsets, and `permission_profile`).
 pub fn apply_permission_profile(cfg: &mut Config, profile: &str) {
     let p = profile.trim().to_ascii_lowercase().replace(['-', ' '], "_");
-    match p.as_str() {
+
+    cfg.toolsets = ToolsetConfig::default();
+    cfg.agent.permissions = PermissionRulesConfig::default();
+
+    let profile_name = match p.as_str() {
         "full" => {
-            cfg.agent.permission_profile = "full".to_string();
             cfg.policy.allow_shell = true;
             cfg.policy.allow_dynamic_tools = true;
-            cfg.toolsets = ToolsetConfig::default();
-            cfg.agent.permissions = PermissionRulesConfig::default();
-        }
-        "auto" => {
-            cfg.agent.permission_profile = "auto".to_string();
-            cfg.policy = PolicyConfig::default();
-            cfg.toolsets = ToolsetConfig::default();
-            cfg.agent.permissions = PermissionRulesConfig::default();
+            "full"
         }
         "prompt" => {
-            cfg.agent.permission_profile = "prompt".to_string();
             cfg.policy = PolicyConfig::default();
-            cfg.toolsets = ToolsetConfig::default();
-            cfg.agent.permissions = PermissionRulesConfig::default();
+            "prompt"
         }
         "tools_only" | "tools" => {
-            cfg.agent.permission_profile = "tools_only".to_string();
             cfg.policy.allow_shell = false;
             cfg.policy.allow_dynamic_tools = false;
             cfg.toolsets.enabled = vec![
@@ -285,15 +278,15 @@ pub fn apply_permission_profile(cfg: &mut Config, profile: &str) {
                 "create_tool".to_string(),
                 "mcp".to_string(),
             ];
-            cfg.agent.permissions = PermissionRulesConfig::default();
+            "tools_only"
         }
-        _ => {
-            cfg.agent.permission_profile = "auto".to_string();
+        "auto" | _ => {
             cfg.policy = PolicyConfig::default();
-            cfg.toolsets = ToolsetConfig::default();
-            cfg.agent.permissions = PermissionRulesConfig::default();
+            "auto"
         }
-    }
+    };
+
+    cfg.agent.permission_profile = profile_name.to_string();
 }
 
 impl Config {
