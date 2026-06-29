@@ -346,47 +346,44 @@ fn esc_html(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn inline_to_html(text: &str) -> String {
+fn inline_to_html(mut text: &str) -> String {
     let mut out = String::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        // Inline code
-        if bytes[i] == b'`' {
-            if let Some(j) = text[i + 1..].find('`') {
-                out.push_str(&format!(
-                    "<code>{}</code>",
-                    esc_html(&text[i + 1..i + 1 + j])
-                ));
-                i = i + 1 + j + 1;
+    while !text.is_empty() {
+        if text.starts_with('`') {
+            if let Some(j) = text[1..].find('`') {
+                out.push_str(&format!("<code>{}</code>", esc_html(&text[1..1 + j])));
+                text = &text[1 + j + 1..];
                 continue;
             }
         }
-        // Bold **...**
-        if bytes.get(i) == Some(&b'*') && bytes.get(i + 1) == Some(&b'*') {
-            if let Some(j) = text[i + 2..].find("**") {
-                out.push_str(&format!("<b>{}</b>", esc_html(&text[i + 2..i + 2 + j])));
-                i = i + 2 + j + 2;
+        if text.starts_with("**") {
+            if let Some(j) = text[2..].find("**") {
+                out.push_str(&format!("<b>{}</b>", esc_html(&text[2..2 + j])));
+                text = &text[2 + j + 2..];
                 continue;
             }
         }
-        // Link [text](url)
-        if bytes[i] == b'[' {
-            if let Some(j) = text[i + 1..].find("](") {
-                let link_text = &text[i + 1..i + 1 + j];
-                let rest = &text[i + 1 + j + 2..];
+        if text.starts_with('[') {
+            if let Some(j) = text[1..].find("](") {
+                let link_text = &text[1..1 + j];
+                let rest = &text[1 + j + 2..];
                 if let Some(k) = rest.find(')') {
                     let url = &rest[..k];
                     out.push_str(&format!("<a href=\"{}\">{}</a>", url, esc_html(link_text)));
-                    i = i + 1 + j + 2 + k + 1;
+                    text = &rest[k + 1..];
                     continue;
                 }
             }
         }
-        // Default: escape and emit
-        let c = text[i..].chars().next().unwrap_or(' ');
-        out.push_str(&esc_html(&c.to_string()));
-        i += c.len_utf8();
+
+        let c = text.chars().next().unwrap();
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+        text = &text[c.len_utf8()..];
     }
     out
 }
