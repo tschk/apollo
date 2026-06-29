@@ -50,6 +50,7 @@ impl McpClient {
     pub async fn spawn(command: &str, args: &[&str]) -> anyhow::Result<Self> {
         let mut child = Command::new(command)
             .args(args)
+            .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
