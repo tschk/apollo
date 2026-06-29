@@ -12,6 +12,10 @@ categories = ["command-line-utilities", "web-programming::http-client"]
 name = "unthinkclaw"
 path = "src/main.rs"
 
+[[bin]]
+name = "unthinkclaw-install"
+path = "src/bin/unthinkclaw_install.rs"
+
 [features]
 default = [
     "core",
