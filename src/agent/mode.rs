@@ -250,3 +250,53 @@ You are coordinating parallel coding agents. Follow these rules:
 - Validate and integrate each agent's output before merging
 - Reassign or handle failed tasks yourself
 - Report the outcome of each agent with status and a brief summary";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_approval() {
+        let valid = vec![
+            "yes", "y", "go", "ok", "okay", "proceed", "approve", "do it",
+            "looks good", "lgtm", "go ahead", "continue", "run it", "execute",
+            "  yes  ", " Y ", " GO ", "oK",
+            "yes, please", "go ahead now", "looks good to me", "lgtm, do it",
+        ];
+
+        for text in valid {
+            assert!(is_approval(text), "Failed for approval string: '{}'", text);
+        }
+
+        let invalid = vec![
+            "no", "nope", "cancel", "what", "maybe", "not sure",
+            "yellow", "good", "okeydokey", "go away"
+        ];
+
+        for text in invalid {
+            assert!(!is_approval(text), "Incorrectly approved string: '{}'", text);
+        }
+    }
+
+    #[test]
+    fn test_is_rejection() {
+        let valid = vec![
+            "no", "n", "nope", "cancel", "abort", "stop", "nevermind", "never mind",
+            "  no  ", " N ", " NOPE ", "cAnCeL",
+            "no, please don't", "cancel this", "stop doing that", "stop it",
+        ];
+
+        for text in valid {
+            assert!(is_rejection(text), "Failed for rejection string: '{}'", text);
+        }
+
+        let invalid = vec![
+            "yes", "y", "go", "ok", "maybe", "what",
+            "nothing", "now", "stopper"
+        ];
+
+        for text in invalid {
+            assert!(!is_rejection(text), "Incorrectly rejected string: '{}'", text);
+        }
+    }
+}
