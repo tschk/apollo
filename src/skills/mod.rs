@@ -75,15 +75,22 @@ fn scan_skill_dir(dir: &Path, skills: &mut Vec<Skill>) {
     }
 }
 
+fn extract_frontmatter(content: &str) -> Option<&str> {
+    let rest = content.strip_prefix("---")?;
+    let end = rest.find("---")?;
+    Some(&rest[..end])
+}
+
+fn default_skill_name(path: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Parse YAML-like frontmatter from SKILL.md
 fn parse_skill_frontmatter(content: &str, path: &Path) -> Option<Skill> {
-    if !content.starts_with("---") {
-        return None;
-    }
-
-    let rest = &content[3..];
-    let end = rest.find("---")?;
-    let frontmatter = &rest[..end];
+    let frontmatter = extract_frontmatter(content)?;
 
     let mut name = None;
     let mut description = None;
@@ -99,12 +106,7 @@ fn parse_skill_frontmatter(content: &str, path: &Path) -> Option<Skill> {
     }
 
     Some(Skill {
-        name: name.unwrap_or_else(|| {
-            path.parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        }),
+        name: name.unwrap_or_else(|| default_skill_name(path)),
         description: description.unwrap_or_default(),
         location: path.to_path_buf(),
     })
