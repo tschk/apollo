@@ -305,24 +305,14 @@ impl Config {
 
     pub fn default_config() -> Self {
         Self {
-            provider: ProviderConfig {
-                name: "anthropic".to_string(),
-                api_key: None,
-                base_url: None,
-            },
+            provider: ProviderConfig::default(),
             embeddings: EmbeddingsConfig::default(),
             agent: AgentConfig::default(),
             model: "claude-sonnet-4-6".to_string(),
             system_prompt: "You are a helpful AI assistant.".to_string(),
             workspace: PathBuf::from("."),
             storage: StorageConfig::default(),
-            runtime: RuntimeConfig {
-                kind: "native".to_string(),
-                docker_image: None,
-                memory_limit_mb: None,
-                state_path: None,
-                self_update: SelfUpdateConfig::default(),
-            },
+            runtime: RuntimeConfig::default(),
             hosting: HostingConfig::default(),
             observability: ObservabilityConfig::default(),
             channel: ChannelConfig::default(),
@@ -483,5 +473,49 @@ impl Default for GroupChatConfig {
             rolling_memory_recent_turns: 16,
             ambient_question_window: 24,
         }
+    }
+}
+
+#[cfg(test)]
+mod permission_profile_tests {
+    use super::*;
+
+    #[test]
+    fn full_enables_shell_and_resets_toolsets() {
+        let mut cfg = Config::default();
+        cfg.policy.allow_shell = false;
+        cfg.toolsets.enabled = vec!["browser".into()];
+        apply_permission_profile(&mut cfg, "full");
+        assert_eq!(cfg.agent.permission_profile, "full");
+        assert!(cfg.policy.allow_shell);
+        assert!(cfg.policy.allow_dynamic_tools);
+        assert!(cfg.toolsets.enabled.is_empty());
+    }
+
+    #[test]
+    fn tools_only_disables_shell_and_limits_toolsets() {
+        let mut cfg = Config::default();
+        apply_permission_profile(&mut cfg, "tools-only");
+        assert_eq!(cfg.agent.permission_profile, "tools_only");
+        assert!(!cfg.policy.allow_shell);
+        assert!(!cfg.policy.allow_dynamic_tools);
+        assert_eq!(
+            cfg.toolsets.enabled,
+            vec![
+                "web".to_string(),
+                "memory".to_string(),
+                "sessions".to_string()
+            ]
+        );
+        assert!(cfg.toolsets.disabled.contains(&"browser".to_string()));
+    }
+
+    #[test]
+    fn unknown_profile_falls_back_to_auto_defaults() {
+        let mut cfg = Config::default();
+        cfg.policy.allow_shell = false;
+        apply_permission_profile(&mut cfg, "nope");
+        assert_eq!(cfg.agent.permission_profile, "auto");
+        assert!(cfg.policy.allow_shell);
     }
 }
