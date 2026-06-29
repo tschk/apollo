@@ -25,38 +25,40 @@ impl SelfUpdater {
     }
 
     pub fn start(self) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            if !self.config.enabled {
-                tracing::info!("self-update disabled");
-                return;
-            }
+        tokio::spawn(self.run_loop())
+    }
 
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(self.config.interval_secs));
+    async fn run_loop(self) {
+        if !self.config.enabled {
+            tracing::info!("self-update disabled");
+            return;
+        }
+
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(self.config.interval_secs));
+        interval.tick().await;
+
+        loop {
             interval.tick().await;
-
-            loop {
-                interval.tick().await;
-                match self.run_once().await {
-                    Ok(UpdateOutcome::Updated { restarted }) => {
-                        tracing::info!(restarted, "self-update applied");
-                    }
-                    Ok(UpdateOutcome::AlreadyCurrent) => {
-                        tracing::debug!("self-update: already current");
-                    }
-                    Ok(UpdateOutcome::DirtyWorktree) => {
-                        tracing::warn!("self-update: skipping dirty worktree");
-                    }
-                    Ok(UpdateOutcome::NoRepo) => {
-                        tracing::debug!("self-update: workspace is not a git repo");
-                    }
-                    Ok(UpdateOutcome::Disabled) => break,
-                    Err(error) => {
-                        tracing::warn!(error = %error, "self-update failed");
-                    }
+            match self.run_once().await {
+                Ok(UpdateOutcome::Updated { restarted }) => {
+                    tracing::info!(restarted, "self-update applied");
+                }
+                Ok(UpdateOutcome::AlreadyCurrent) => {
+                    tracing::debug!("self-update: already current");
+                }
+                Ok(UpdateOutcome::DirtyWorktree) => {
+                    tracing::warn!("self-update: skipping dirty worktree");
+                }
+                Ok(UpdateOutcome::NoRepo) => {
+                    tracing::debug!("self-update: workspace is not a git repo");
+                }
+                Ok(UpdateOutcome::Disabled) => break,
+                Err(error) => {
+                    tracing::warn!(error = %error, "self-update failed");
                 }
             }
-        })
+        }
     }
 
     pub async fn run_once(&self) -> anyhow::Result<UpdateOutcome> {
