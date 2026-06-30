@@ -24,10 +24,18 @@ default = [
     "provider-anthropic",
     "provider-ollama",
     "rs-gbrain",
+    "plugin-web",
+    "plugin-skills",
 ]
 
 # Core (always needed)
 core = []
+
+# Optional tool packs (compile-time; also filter via toolsets/manifest)
+plugin-web = []
+plugin-browser = []
+plugin-skills = []
+plugin-advanced = []
 
 # Channels — pick what you need
 channel-cli = []
@@ -58,7 +66,9 @@ peekaboo = ["dep:rs_peekaboo"]
 # Bundles
 all-channels = ["channel-cli", "channel-telegram", "channel-discord", "channel-slack", "channel-whatsapp", "channel-signal", "channel-matrix", "channel-irc", "channel-googlechat", "channel-msteams"]
 all-providers = ["provider-anthropic", "provider-copilot", "provider-ollama"]
-full = ["all-channels", "all-providers", "peekaboo"]
+desktop = ["plugin-browser", "peekaboo"]
+all-plugins = ["plugin-web", "plugin-browser", "plugin-skills", "plugin-advanced", "peekaboo"]
+full = ["all-channels", "all-providers", "all-plugins", "swarm"]
 
 [dependencies]
 rs_gbrain = { package = "gbrain", version = "0.1", optional = true }

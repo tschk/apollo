@@ -18,11 +18,12 @@ use crate::providers::Provider;
 use crate::tools::embeddings::{EmbeddingSearchTool, EmbeddingStatusTool, EmbeddingStoreTool};
 use crate::tools::file_ops::{FileReadTool, FileWriteTool};
 use crate::tools::shell::ShellTool;
+#[cfg(feature = "plugin-skills")]
 use crate::tools::skill_manager::SkillManagerTool;
 use crate::tools::toolsets::is_tool_enabled;
-use crate::tools::{
-    BriefTool, ConfigTool, SleepTool, TodoWriteTool, Tool, VibemaniaTool, WorktreeTool,
-};
+use crate::tools::{BriefTool, ConfigTool, SleepTool, TodoWriteTool, Tool};
+#[cfg(feature = "plugin-advanced")]
+use crate::tools::{VibemaniaTool, WorktreeTool};
 
 pub fn load_config(path: &str) -> Config {
     load_config_workspace(path, None)
@@ -183,17 +184,12 @@ pub fn build_base_tools(
         Arc::new(MemorySearchTool::new(workspace.to_path_buf())),
         Arc::new(MemoryGetTool::new(workspace.to_path_buf())),
         Arc::new(SessionSearchTool::new(Arc::clone(&memory))),
-        Arc::new(crate::tools::web_search::WebSearchTool::new()),
-        Arc::new(crate::tools::web_fetch::WebFetchTool::new()),
         Arc::new(crate::tools::doctor::DoctorTool::new()),
         Arc::new(crate::tools::session::ListModelsTool::new()),
         Arc::new(crate::tools::dynamic::CreateToolTool::new(Arc::clone(
             &policy,
         ))),
         Arc::new(crate::tools::dynamic::ListCustomToolsTool::new()),
-        Arc::new(crate::tools::browser::BrowserTool::new()),
-        Arc::new(crate::tools::mcp::McpTool::new()),
-        Arc::new(SkillManagerTool::new(workspace.to_path_buf())),
         Arc::new(BriefTool::new(
             Arc::clone(&provider),
             cfg.agent.fast_model.clone(),
@@ -201,9 +197,22 @@ pub fn build_base_tools(
         Arc::new(ConfigTool::new(workspace.join("unthinkclaw.json"))),
         Arc::new(SleepTool),
         Arc::new(TodoWriteTool::new(workspace.to_path_buf())),
-        Arc::new(VibemaniaTool::new(workspace.to_path_buf())),
-        Arc::new(WorktreeTool::new(workspace.to_path_buf())),
     ];
+    #[cfg(feature = "plugin-web")]
+    {
+        tools.push(Arc::new(crate::tools::web_search::WebSearchTool::new()));
+        tools.push(Arc::new(crate::tools::web_fetch::WebFetchTool::new()));
+    }
+    #[cfg(feature = "plugin-browser")]
+    tools.push(Arc::new(crate::tools::browser::BrowserTool::new()));
+    #[cfg(feature = "plugin-advanced")]
+    {
+        tools.push(Arc::new(crate::tools::mcp::McpTool::new()));
+        tools.push(Arc::new(VibemaniaTool::new(workspace.to_path_buf())));
+        tools.push(Arc::new(WorktreeTool::new(workspace.to_path_buf())));
+    }
+    #[cfg(feature = "plugin-skills")]
+    tools.push(Arc::new(SkillManagerTool::new(workspace.to_path_buf())));
     if let Some(provider) = embedding_provider {
         tools.push(Arc::new(EmbeddingStatusTool::new(Arc::clone(&provider))));
         tools.push(Arc::new(EmbeddingStoreTool::new(

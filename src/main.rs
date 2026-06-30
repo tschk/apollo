@@ -528,11 +528,12 @@ async fn main() -> anyhow::Result<()> {
                 cfg.agent.permissions.allow.clone(),
             )));
 
-            // Add tools that need runner reference
+            #[cfg(feature = "swarm")]
             runner_arc
-                .add_tool(Arc::new(
-                    unthinkclaw::tools::coding_swarm::CodingSwarmTool::new(runner_arc.clone(), 3),
-                ))
+                .add_tool(Arc::new(unthinkclaw::tools::CodingSwarmTool::new(
+                    runner_arc.clone(),
+                    3,
+                )))
                 .await;
             runner_arc
                 .add_tool(Arc::new(

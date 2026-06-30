@@ -16,7 +16,8 @@
 
 - Workspace manifest: `.unthinkclaw/plugins/manifest.json` + `apply_package_manifest` (packages: `web`, `live`, `desktop`, …).
 - `unthinkclaw-install` binary.
-- Still not ported: Cargo feature-gated tool modules (`plugin-web`, …), `fastembed`, `vendor/equilibrium`.
+- Cargo feature-gated tools: `plugin-web`, `plugin-browser`, `plugin-skills`, `plugin-advanced` (+ `peekaboo`, `swarm`).
+- Still not ported: `fastembed`, `vendor/equilibrium`.
 
 ## Gaps vs `feature/computer-use-integration`
 

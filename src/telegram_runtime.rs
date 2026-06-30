@@ -12,6 +12,7 @@ use crate::channels::Channel;
 use crate::channels::IncomingMessage;
 use crate::config::ChannelConfig;
 use crate::memory::MemoryBackend;
+#[cfg(feature = "channel-telegram")]
 use crate::tools::message::MessageTool;
 
 pub struct TelegramChatRun<'a> {
