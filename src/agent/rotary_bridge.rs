@@ -433,6 +433,101 @@ impl RotaryAgentBridge {
     }
 }
 
+// ── Skill bridge ─────────────────────────────────────────────────────────
+
+/// Build an `rx4::SkillEngine` configured with unthinkclaw's skill directories.
+///
+/// Unthinkclaw discovers skills from 3 directories:
+/// 1. `~/.npm-global/lib/node_modules/openclaw/skills` (legacy)
+/// 2. `~/.openclaw/workspace/skills` (shared workspace skills)
+/// 3. `{workspace}/.unthinkclaw/skills` (project-local managed skills)
+///
+/// This maps to rx4's `SkillEngine` with the primary dir set to the managed
+/// skills directory and the other two as `extra_dirs`.
+///
+/// After calling this, use `engine.load()` to populate skills from disk,
+/// then `engine.search()` for keyword matching (replaces unthinkclaw's
+/// `match_skill()`).
+///
+/// Note: unthinkclaw's template variable substitution and inline shell
+/// preprocessing (`preprocess_skill_content`) are not part of rx4's
+/// SkillEngine and remain in unthinkclaw's `skills` module. Use
+/// `skills::preprocess_skill_content()` on the matched skill's instructions
+/// before injecting into the system prompt.
+pub fn build_rx4_skill_engine(workspace: &std::path::Path) -> rx4::SkillEngine {
+    let home = dirs::home_dir().unwrap_or_default();
+
+    // Primary dir: managed skills in the workspace
+    let managed_dir = workspace.join(".unthinkclaw/skills");
+
+    let mut engine = rx4::SkillEngine::new(managed_dir);
+
+    // Extra dirs: legacy openclaw skills and shared workspace skills
+    let openclaw_skills = home.join(".npm-global/lib/node_modules/openclaw/skills");
+    engine.add_extra_dir(openclaw_skills);
+
+    let shared_skills = home.join(".openclaw/workspace/skills");
+    engine.add_extra_dir(shared_skills);
+
+    engine
+}
+
+/// Match a skill using rx4's SkillEngine keyword search.
+///
+/// This replaces unthinkclaw's `skills::match_skill()` when using the rx4
+/// bridge path. Returns the best-matching skill's name and instructions
+/// (raw, unpreprocessed).
+///
+/// The caller should preprocess the instructions using
+/// `unthinkclaw::skills::preprocess_skill_content()` before injecting
+/// into the system prompt, as rx4's SkillEngine does not perform template
+/// variable substitution or inline shell expansion.
+pub fn match_skill_via_rx4(
+    engine: &rx4::SkillEngine,
+    user_message: &str,
+) -> Option<(String, String)> {
+    let results = engine.search(user_message);
+    if results.is_empty() {
+        return None;
+    }
+
+    // Pick the first result (rx4's search returns matches sorted by relevance)
+    let skill = results[0];
+    Some((skill.name.clone(), skill.instructions.clone()))
+}
+
+/// Discover skills using rx4's SkillEngine, returning unthinkclaw-compatible
+/// Skill structs for backward compatibility with existing code that expects
+/// the `Vec<skills::Skill>` type.
+///
+/// This loads skills from disk via rx4's SkillEngine (which handles both
+/// JSON and SKILL.md formats with YAML frontmatter), then converts them to
+/// unthinkclaw's Skill type.
+pub fn discover_skills_via_rx4(
+    workspace: &std::path::Path,
+) -> Vec<crate::skills::Skill> {
+    let mut engine = build_rx4_skill_engine(workspace);
+    if engine.load().is_err() {
+        tracing::warn!("rx4 SkillEngine load failed, returning empty skill list");
+        return Vec::new();
+    }
+
+    engine
+        .list()
+        .into_iter()
+        .map(|rx4_skill| {
+            let location = engine
+                .skills_dir()
+                .join(format!("{}.json", rx4_skill.id));
+            crate::skills::Skill {
+                name: rx4_skill.name.clone(),
+                description: rx4_skill.description.clone(),
+                location,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +584,23 @@ mod tests {
         let back = rx4_message_to_chat(&rx4_msg);
         assert_eq!(back.role, "user");
         assert_eq!(back.content, "roundtrip test");
+    }
+
+    #[test]
+    fn test_build_rx4_skill_engine() {
+        // Just verify it doesn't panic with a temp dir
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_rx4_skill_engine(tmp.path());
+        assert!(engine.skills_dir().exists() || engine.skills_dir() == tmp.path().join(".unthinkclaw/skills"));
+    }
+
+    #[test]
+    fn test_match_skill_via_rx4_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut engine = build_rx4_skill_engine(tmp.path());
+        let _ = engine.load();
+        // No skills in empty dir, should return None
+        let result = match_skill_via_rx4(&engine, "test query");
+        assert!(result.is_none());
     }
 }
