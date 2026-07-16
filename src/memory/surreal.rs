@@ -118,6 +118,11 @@ const SCHEMA_SQL: &str = r#"
     DEFINE FIELD IF NOT EXISTS created_at ON embeddings TYPE string;
     DEFINE INDEX IF NOT EXISTS embedding_lookup_idx ON embeddings FIELDS namespace, key UNIQUE;
     DEFINE INDEX IF NOT EXISTS embedding_namespace_idx ON embeddings FIELDS namespace;
+    -- TODO: define an MTREE index on `vector` for ANN-accelerated KNN when
+    -- the embedding dimension is fixed at deploy time. MTREE requires a
+    -- fixed DIMENSION, so it cannot be used while the table stores vectors
+    -- from multiple providers (e.g. OpenAI 1536-dim, Gemini 768-dim).
+    -- Example: DEFINE INDEX embedding_vector_mtree ON embeddings FIELDS vector MTREE DIMENSION 1536 DISTANCE COSINE;
 
     DEFINE TABLE IF NOT EXISTS files SCHEMALESS;
     DEFINE FIELD IF NOT EXISTS path ON files TYPE string;
@@ -450,9 +455,48 @@ impl MemoryBackend for SurrealMemory {
         query_vector: &[f32],
         limit: usize,
     ) -> Result<Vec<EmbeddingEntry>> {
-        // Load all embeddings for the namespace and do cosine search in-process.
-        // SurrealDB v2 doesn't have built-in ANN yet — the HNSW index handles
-        // this at a higher layer. This is the raw storage fallback.
+        // Use SurrealDB's built-in KNN vector search (<| |> operator).
+        // This performs a server-side nearest-neighbour scan and avoids
+        // loading every embedding into the client. When an MTREE index is
+        // defined on the vector field the query planner uses it; otherwise
+        // it falls back to a brute-force scan inside the database engine.
+        //
+        // If the KNN query fails (e.g. dimension mismatch, empty table) we
+        // fall back to the in-process cosine similarity scan below.
+        let knn_result = self
+            .db
+            .query(
+                "SELECT * FROM embeddings
+                 WHERE namespace = $namespace
+                   AND vector <| $query_vector |>
+                 LIMIT $limit",
+            )
+            .bind(("namespace", namespace.to_string()))
+            .bind(("query_vector", query_vector.to_vec()))
+            .bind(("limit", limit as i64))
+            .await;
+
+        if let Ok(mut result) = knn_result {
+            let rows: std::result::Result<Vec<EmbeddingRow>, _> = result.take(0);
+            if let Ok(rows) = rows {
+                if !rows.is_empty() {
+                    return Ok(rows
+                        .into_iter()
+                        .map(|row| EmbeddingEntry {
+                            namespace: row.namespace,
+                            key: row.key,
+                            vector: row.vector,
+                            text: row.text,
+                            created_at: parse_timestamp(&row.created_at),
+                        })
+                        .collect());
+                }
+            }
+        }
+
+        // Fallback: load all embeddings for the namespace and do cosine
+        // search in-process. This handles mixed-dimension vectors or any
+        // case where the KNN operator is unavailable.
         let mut result = self
             .db
             .query("SELECT * FROM embeddings WHERE namespace = $namespace")

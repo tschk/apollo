@@ -5,7 +5,6 @@ pub mod brief;
 pub mod context_inject;
 pub mod embeddings;
 pub mod graph;
-pub mod hnsw;
 pub mod principal;
 pub mod recall;
 pub mod search;
