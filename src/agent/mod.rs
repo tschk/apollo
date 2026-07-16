@@ -19,7 +19,7 @@ pub use mode::{agent_mode_from_permission_profile, AgentMode, NullChannel, Pendi
 pub use rotary_bridge::{
     build_rx4_skill_engine, chat_message_to_rx4, chat_messages_to_rx4,
     discover_skills_via_rx4, match_skill_via_rx4, register_unthinkclaw_tools,
-    rx4_message_to_chat, RotaryAgentBridge, RotaryBridgeConfig, RotaryProviderAdapter,
-    tool_specs_to_rx4_json,
+    rx4_message_to_chat, RotaryAgentBridge, RotaryBridgeConfig, RotaryMemoryBridge,
+    RotaryProviderAdapter, tool_specs_to_rx4_json,
 };
 pub use streaming::{stream_channel, StreamChunk, StreamReceiver, StreamSender};

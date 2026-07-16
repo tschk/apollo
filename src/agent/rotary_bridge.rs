@@ -528,6 +528,127 @@ pub fn discover_skills_via_rx4(
         .collect()
 }
 
+// ── Memory bridge ────────────────────────────────────────────────────────
+
+/// Bridge that wraps rx4's GraphMemory for agent memory (concepts, decisions,
+/// patterns, bugs) while keeping unthinkclaw's SurrealDB for channel state,
+/// swarm coordination, and cron scheduling.
+///
+/// rx4's GraphMemory is an in-memory knowledge graph with PageRank, community
+/// detection, and JSON persistence. It does not require SQLite (unlike rx4's
+/// MemoryStore which uses rusqlite 0.37, conflicting with gbrain's rusqlite
+/// 0.32).
+///
+/// This bridge provides:
+/// - Graph-based agent memory via rx4::GraphMemory (concepts, decisions, patterns)
+/// - Conversation extraction via rx4::ConversationExtractor
+/// - JSON persistence for the graph
+///
+/// TODO: When the rusqlite version conflict between gbrain and rx4 is resolved,
+/// enable rx4's `memory` feature to also get SQLite FTS5 full-text search
+/// via rx4::MemoryStore. For now, unthinkclaw's SurrealDB backend remains
+/// the primary persistent memory for conversation history and key-value store.
+pub struct RotaryMemoryBridge {
+    graph: rx4::GraphMemory,
+    extractor: rx4::ConversationExtractor,
+    /// Path for JSON persistence of the graph
+    graph_path: Option<std::path::PathBuf>,
+}
+
+impl RotaryMemoryBridge {
+    /// Create a new memory bridge rooted at the given workspace.
+    pub fn new(workspace: &std::path::Path) -> Self {
+        let graph = rx4::GraphMemory::from_workspace(workspace);
+        let graph_path = workspace.join(".unthinkclaw/graph_memory.json");
+        Self {
+            graph,
+            extractor: rx4::ConversationExtractor::new(),
+            graph_path: Some(graph_path),
+        }
+    }
+
+    /// Create a new memory bridge with an empty graph (no workspace).
+    pub fn empty() -> Self {
+        Self {
+            graph: rx4::GraphMemory::new(),
+            extractor: rx4::ConversationExtractor::new(),
+            graph_path: None,
+        }
+    }
+
+    /// Extract memory nodes and edges from a conversation and add them to
+    /// the graph.
+    ///
+    /// This uses rx4's ConversationExtractor to identify concepts, decisions,
+    /// and patterns from the conversation, then adds them as nodes in the
+    /// GraphMemory.
+    pub fn extract_conversation(
+        &mut self,
+        conversation: &[rx4::graph_memory::ConversationTurn],
+    ) -> rx4::ExtractionResult {
+        let result = self.extractor.extract(conversation);
+
+        // Add extracted nodes to the graph
+        for node in &result.nodes {
+            self.graph.add_node(node.clone());
+        }
+        for edge in &result.edges {
+            let _ = self.graph.add_edge(edge.clone());
+        }
+
+        result
+    }
+
+    /// Search the graph memory for nodes matching the query.
+    pub fn search(&self, query: &str) -> Vec<&rx4::GraphMemoryNode> {
+        self.graph.search(query)
+    }
+
+    /// Get PageRank scores for all nodes (identifies the most important
+    /// concepts/decisions in the agent's memory).
+    pub fn pagerank(&self) -> Vec<(String, f64)> {
+        self.graph.pagerank()
+    }
+
+    /// Get graph statistics (node count, edge count, etc.)
+    pub fn stats(&self) -> rx4::graph_memory::GraphStats {
+        self.graph.stats()
+    }
+
+    /// Save the graph to disk (JSON format).
+    pub fn save(&self) -> Result<(), rx4::GraphMemoryError> {
+        if let Some(path) = &self.graph_path {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            self.graph.save(path)?;
+            tracing::debug!("graph memory saved to {:?}", self.graph_path);
+        }
+        Ok(())
+    }
+
+    /// Load the graph from disk (JSON format).
+    pub fn load(&mut self) -> Result<(), rx4::GraphMemoryError> {
+        if let Some(path) = &self.graph_path {
+            if path.exists() {
+                self.graph = rx4::GraphMemory::load(path)?;
+                tracing::debug!("graph memory loaded from {:?}", self.graph_path);
+            }
+        }
+        Ok(())
+    }
+
+    /// Get a reference to the inner GraphMemory.
+    pub fn graph(&self) -> &rx4::GraphMemory {
+        &self.graph
+    }
+
+    /// Get a mutable reference to the inner GraphMemory.
+    pub fn graph_mut(&mut self) -> &mut rx4::GraphMemory {
+        &mut self.graph
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,5 +723,29 @@ mod tests {
         // No skills in empty dir, should return None
         let result = match_skill_via_rx4(&engine, "test query");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_rotary_memory_bridge_empty() {
+        let bridge = RotaryMemoryBridge::empty();
+        let stats = bridge.stats();
+        assert_eq!(stats.node_count, 0);
+    }
+
+    #[test]
+    fn test_rotary_memory_bridge_search_empty() {
+        let bridge = RotaryMemoryBridge::empty();
+        let results = bridge.search("test");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_rotary_memory_bridge_save_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut bridge = RotaryMemoryBridge::new(tmp.path());
+        // Save and load should work even with empty graph
+        bridge.save().unwrap();
+        bridge.load().unwrap();
+        assert_eq!(bridge.stats().node_count, 0);
     }
 }
