@@ -13,8 +13,8 @@ pub struct ExecutionPolicy {
 impl Default for ExecutionPolicy {
     fn default() -> Self {
         Self {
-            allow_shell: true,
-            allow_dynamic_tools: true,
+            allow_shell: false,
+            allow_dynamic_tools: false,
             allow_plugin_shell: false,
             allow_plugin_git: false,
         }
@@ -33,5 +33,28 @@ impl ExecutionPolicy {
 
     pub fn deny(message: &str) -> anyhow::Result<crate::tools::ToolResult> {
         Ok(crate::tools::ToolResult::error(message))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_execution_policy_defaults_to_deny_shell() {
+        let policy = ExecutionPolicy::default();
+        assert!(
+            !policy.allow_shell,
+            "ExecutionPolicy::default() must deny shell to be secure by default"
+        );
+    }
+
+    #[test]
+    fn test_execution_policy_defaults_to_deny_dynamic_tools() {
+        let policy = ExecutionPolicy::default();
+        assert!(
+            !policy.allow_dynamic_tools,
+            "ExecutionPolicy::default() must deny dynamic tools to be secure by default"
+        );
     }
 }
