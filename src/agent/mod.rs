@@ -1,14 +1,24 @@
 //! Agent — the autonomous agent loop.
 //! Receives messages, uses tools, responds via channels.
 //! Inspired by HiClaw's Manager/Worker pattern.
+//!
+//! The core agent loop can run via either:
+//! - `AgentRunner` — unthinkclaw's built-in loop (default, legacy)
+//! - `RotaryAgentBridge` — delegates to rx4 (rotary) agent harness engine
 
 pub mod compaction;
 pub mod hooks;
 pub mod loop_runner;
 pub mod mode;
+pub mod rotary_bridge;
 pub mod stream;
 pub mod streaming;
 
 pub use loop_runner::AgentRunner;
 pub use mode::{agent_mode_from_permission_profile, AgentMode, NullChannel, PendingPlan};
+pub use rotary_bridge::{
+    chat_message_to_rx4, chat_messages_to_rx4, register_unthinkclaw_tools,
+    rx4_message_to_chat, RotaryAgentBridge, RotaryBridgeConfig, RotaryProviderAdapter,
+    tool_specs_to_rx4_json,
+};
 pub use streaming::{stream_channel, StreamChunk, StreamReceiver, StreamSender};
