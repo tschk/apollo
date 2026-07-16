@@ -74,6 +74,12 @@ full = ["all-channels", "all-providers", "all-plugins", "swarm"]
 rs_gbrain = { package = "gbrain", version = "0.1", optional = true }
 rs_peekaboo = { version = "0.3", optional = true }
 
+# Rotary (rx4) — agent harness engine providing the core agent loop, tools,
+# providers, sessions, skills, memory, guardrails, and MCP support.
+# Used as a path dependency during the migration from unthinkclaw's built-in
+# agent loop to rx4's harness.
+rx4 = { path = "../rotary", default-features = false, features = ["ipc", "builtin-tools", "providers", "mcp", "pi-compat"] }
+
 # Async runtime (optimized features only)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }
 async-trait = "0.1"
