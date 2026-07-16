@@ -13,11 +13,23 @@ Scope: entire repository.
 unthinkclaw is a lean, fast Rust AI agent runtime — Telegram-first, trait-driven, and using SurrealDB + RocksDB as the primary state layer.
 
 Goals:
-- Small binary (<10MB), fast startup (<10ms), low RAM (<10MB)
+- Fast startup (<10ms), low RAM (<10MB)
 - Async-first (tokio), no blocking on the runtime thread
 - Swappable providers, channels, tools via traits
 - Persistent memory with FTS5 + vector hybrid search
 - Agent swarm support (parallel sub-agents)
+
+> **Binary size:** The original <10MB target is no longer achievable with the
+> current dependency tree (SurrealDB + RocksDB + rx4 + reqwest + axum). Size
+> optimizations (`opt-level = "z"`, LTO, strip, `panic = abort`) remain enabled
+> but the release binary exceeds 10MB. Treat <10MB as aspirational, not a gate.
+
+> **rx4 migration:** unthinkclaw is migrating its built-in agent loop to the
+> `rx4` (rotary) harness engine. `rx4` is a path dependency
+> (`../rotary`) providing the core agent loop, tools, providers, sessions,
+> skills, memory, guardrails, and MCP support. The bridge lives in
+> `src/agent/rotary_bridge.rs`. Until the migration completes, both the
+> legacy loop and the rx4 bridge coexist.
 
 Key extension points:
 - `src/providers/traits.rs` — AI model providers
@@ -47,9 +59,10 @@ src/
   skills/              — skill loading, template vars, inline shell, curator
   cost.rs              — token cost tracking
   embeddings.rs        — embedding provider trait
-  gateway/             — webhook server
-  runtime/             — native runtime adapter
 ```
+
+> **Note:** `src/gateway/` exists on disk but is not declared as a module in
+> `lib.rs` — it is dormant code from the hosted-gateway era. Do not rely on it.
 
 ## 3) Engineering Principles
 
@@ -68,6 +81,7 @@ src/
 
 ### 3.4 Secure by Default
 - Deny-by-default for channel allowlists
+- `ExecutionPolicy::default()` denies shell and dynamic tools; only explicit opt-in (config or CLI/autonomous profiles) enables them
 - Never log tokens, API keys, or message content
 - Filesystem access scoped to workspace
 
@@ -109,16 +123,16 @@ src/
 
 | Channel | Status | Notes |
 |---------|--------|-------|
-| Telegram | ✅ Primary | Full support |
-| Discord | ✅ | Native markdown |
-| Slack | ✅ | |
-| CLI | ✅ | Dev/testing |
-| WhatsApp | ✅ | |
-| Matrix | ✅ | |
-| Signal | ✅ | |
-| IRC | ✅ | |
-| Google Chat | ✅ | |
-| MS Teams | ✅ | |
+| Telegram | ✅ Default | Full support (default feature) |
+| CLI | ✅ Default | Dev/testing (default feature) |
+| Discord | ⚠️ Opt-in | `channel-discord` feature |
+| Slack | ⚠️ Opt-in | `channel-slack` feature |
+| WhatsApp | ⚠️ Opt-in | `channel-whatsapp` feature |
+| Matrix | ⚠️ Opt-in | `channel-matrix` feature |
+| Signal | ⚠️ Opt-in | `channel-signal` feature |
+| IRC | ⚠️ Opt-in | `channel-irc` feature |
+| Google Chat | ⚠️ Opt-in | `channel-googlechat` feature |
+| MS Teams | ⚠️ Opt-in | `channel-msteams` feature |
 
 ## 6) Providers
 
@@ -163,7 +177,7 @@ cargo test
 
 - Work on feature branches, not main
 - Small focused commits
-- `cargo build --release` before pushing — verify binary size stays <10MB
+- `cargo build --release` before pushing — verify binary size stays reasonable
 - No blocking calls on async runtime
 - No secrets in commits
 
