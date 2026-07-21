@@ -32,8 +32,6 @@ pub mod network;
 pub mod peekaboo;
 #[cfg(feature = "computer-use-praefectus")]
 pub mod praefectus;
-#[cfg(feature = "rs-gbrain")]
-pub mod rs_gbrain;
 pub mod sandbox;
 pub mod session;
 pub mod shell;
@@ -54,6 +52,8 @@ pub mod web_fetch;
 pub mod web_search;
 #[cfg(feature = "plugin-advanced")]
 pub mod worktree;
+#[cfg(feature = "zkr-memory")]
+pub mod zkr;
 
 pub use brief::BriefTool;
 #[cfg(feature = "swarm")]
@@ -62,8 +62,6 @@ pub use config_tool::ConfigTool;
 pub use cron_tool::CronTool;
 #[cfg(feature = "peekaboo")]
 pub use peekaboo::PeekabooTool;
-#[cfg(feature = "rs-gbrain")]
-pub use rs_gbrain::{BrainGetTool, BrainPutTool, BrainQueryTool, BrainSearchTool};
 pub use sleep_tool::SleepTool;
 pub use todo_write::TodoWriteTool;
 pub use tool_search::ToolSearchTool;

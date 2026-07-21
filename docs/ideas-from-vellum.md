@@ -14,7 +14,7 @@ Lean copies for `main` — no hosted control plane, no 8-type memory taxonomy.
 | Heartbeat delivery target | `config.memory.heartbeat_chat_id` |
 | Workspace identity kit | `src/workspace_init.rs` |
 | Graph memory (ideas + links + dream nodes) | `src/memory/graph.rs`, Surreal tables |
-| gbrain vendor slot | `vendor/gbrain/README.md`, `scripts/vendor-gbrain.sh` |
+| zkr evidence-backed temporal memory | `src/memory/zkr.rs`, feature `zkr-memory` |
 
 ## Deferred (YAGNI)
 
@@ -33,6 +33,15 @@ Lean copies for `main` — no hosted control plane, no 8-type memory taxonomy.
     "heartbeat_chat_id": "123456789",
     "dream_on_heartbeat": false
   },
+  "zkr": {
+    "enabled": true,
+    "database": ".unthinkclaw/zkr.db",
+    "tenant_id": "unthinkclaw",
+    "person_id": "local",
+    "auto_capture": true,
+    "inject_recall": true,
+    "recall_limit": 5
+  },
   "channel": {
     "allowed_chat_ids": ["123456789"],
     "allowed_sender_ids": ["987654321"]
@@ -41,13 +50,3 @@ Lean copies for `main` — no hosted control plane, no 8-type memory taxonomy.
 ```
 
 Brief KV: namespace `brief`, keys `open_loops` / `time_contexts` (markdown bullet lists).
-
-## gbrain
-
-Clone upstream into `vendor/gbrain/` when you have a URL:
-
-```bash
-./scripts/vendor-gbrain.sh https://github.com/<org>/<gbrain-repo>.git
-```
-
-Wire adapters in Rust only at boundaries; do not reimplement graph logic in-tree unless the vendor is absent.

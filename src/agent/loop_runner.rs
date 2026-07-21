@@ -71,8 +71,10 @@ pub struct AgentRunner {
     trajectories: Arc<RwLock<HashMap<String, Trajectory>>>,
     memory_ideas: crate::config::MemoryIdeasConfig,
     group_chat: crate::config::GroupChatConfig,
-    #[cfg(feature = "rs-gbrain")]
-    rs_gbrain: crate::config::RsGbrainConfig,
+    #[cfg(feature = "zkr-memory")]
+    zkr: Option<Arc<crate::memory::zkr::ZkrStore>>,
+    #[cfg(feature = "zkr-memory")]
+    zkr_config: crate::config::ZkrConfig,
     session_note_workspace: Option<PathBuf>,
 }
 
@@ -111,8 +113,10 @@ impl AgentRunner {
             trajectories: Arc::new(RwLock::new(HashMap::new())),
             memory_ideas: crate::config::MemoryIdeasConfig::default(),
             group_chat: crate::config::GroupChatConfig::default(),
-            #[cfg(feature = "rs-gbrain")]
-            rs_gbrain: crate::config::RsGbrainConfig::default(),
+            #[cfg(feature = "zkr-memory")]
+            zkr: None,
+            #[cfg(feature = "zkr-memory")]
+            zkr_config: crate::config::ZkrConfig::default(),
             session_note_workspace: None,
         }
     }
@@ -189,9 +193,14 @@ impl AgentRunner {
         self
     }
 
-    #[cfg(feature = "rs-gbrain")]
-    pub fn with_rs_gbrain(mut self, cfg: crate::config::RsGbrainConfig) -> Self {
-        self.rs_gbrain = cfg;
+    #[cfg(feature = "zkr-memory")]
+    pub fn with_zkr(
+        mut self,
+        store: Option<Arc<crate::memory::zkr::ZkrStore>>,
+        cfg: crate::config::ZkrConfig,
+    ) -> Self {
+        self.zkr = store;
+        self.zkr_config = cfg;
         self
     }
 
@@ -685,10 +694,17 @@ impl AgentRunner {
                 user_turn = format!("{user_turn}\n\n{}", blocks.join("\n\n"));
             }
         }
-        #[cfg(feature = "rs-gbrain")]
-        if self.rs_gbrain.enabled && self.rs_gbrain.inject_brief {
-            if let Ok(Ok(Some(xml))) = tokio::task::spawn_blocking(rs_gbrain_brief_xml).await {
-                user_turn = format!("{user_turn}\n\n{xml}");
+        #[cfg(feature = "zkr-memory")]
+        if self.zkr_config.inject_recall {
+            if let Some(store) = &self.zkr {
+                match store
+                    .context(&effective_text, self.zkr_config.recall_limit)
+                    .await
+                {
+                    Ok(Some(context)) => user_turn = format!("{user_turn}\n\n{context}"),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!("zkr recall failed: {error}"),
+                }
             }
         }
         messages.push(ChatMessage::user(&user_turn));
@@ -1430,6 +1446,23 @@ impl AgentRunner {
                 (&msg.chat_id, "assistant", "assistant", response),
             ])
             .await?;
+        #[cfg(feature = "zkr-memory")]
+        if self.zkr_config.auto_capture {
+            if let Some(store) = &self.zkr {
+                if let Err(error) = store
+                    .capture_turn(
+                        &msg.chat_id,
+                        &msg.id,
+                        &msg.text,
+                        response,
+                        msg.timestamp.timestamp(),
+                    )
+                    .await
+                {
+                    tracing::warn!("zkr turn capture failed: {error}");
+                }
+            }
+        }
         if msg.is_group {
             self.update_group_memory(msg, response).await?;
         }
@@ -1642,36 +1675,6 @@ impl AgentRunner {
         }
         Ok(())
     }
-}
-
-#[cfg(feature = "rs-gbrain")]
-fn rs_gbrain_brief_xml() -> anyhow::Result<Option<String>> {
-    let e = rs_gbrain::BrainEngine::open_default()?;
-    let b = e.load_brief()?;
-    if b.open_loops.is_empty() && b.time_contexts.is_empty() {
-        return Ok(None);
-    }
-    let mut out = String::from("<memory_brief>\n");
-    if !b.time_contexts.is_empty() {
-        out.push_str("  <time_contexts>\n");
-        for line in &b.time_contexts {
-            out.push_str("    - ");
-            out.push_str(line);
-            out.push('\n');
-        }
-        out.push_str("  </time_contexts>\n");
-    }
-    if !b.open_loops.is_empty() {
-        out.push_str("  <open_loops>\n");
-        for line in &b.open_loops {
-            out.push_str("    - ");
-            out.push_str(line);
-            out.push('\n');
-        }
-        out.push_str("  </open_loops>\n");
-    }
-    out.push_str("</memory_brief>");
-    Ok(Some(out))
 }
 
 // ── Helper ──

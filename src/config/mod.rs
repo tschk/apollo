@@ -24,7 +24,7 @@ pub struct Config {
     pub toolsets: ToolsetConfig,
     pub memory: MemoryIdeasConfig,
     #[serde(default)]
-    pub rs_gbrain: RsGbrainConfig,
+    pub zkr: ZkrConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,19 +233,26 @@ impl Default for MemoryIdeasConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct RsGbrainConfig {
+pub struct ZkrConfig {
     pub enabled: bool,
-    pub inject_brief: bool,
-    /// Run rs_gbrain nightly dream on heartbeat tick (when memory.dream_on_heartbeat)
-    pub dream_on_heartbeat: bool,
+    pub database: PathBuf,
+    pub tenant_id: String,
+    pub person_id: String,
+    pub auto_capture: bool,
+    pub inject_recall: bool,
+    pub recall_limit: u32,
 }
 
-impl Default for RsGbrainConfig {
+impl Default for ZkrConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            inject_brief: true,
-            dream_on_heartbeat: true,
+            database: PathBuf::from(".unthinkclaw/zkr.db"),
+            tenant_id: "unthinkclaw".to_string(),
+            person_id: "local".to_string(),
+            auto_capture: true,
+            inject_recall: true,
+            recall_limit: 5,
         }
     }
 }
@@ -327,7 +334,7 @@ impl Config {
             group_chat: GroupChatConfig::default(),
             toolsets: ToolsetConfig::default(),
             memory: MemoryIdeasConfig::default(),
-            rs_gbrain: RsGbrainConfig::default(),
+            zkr: ZkrConfig::default(),
         }
     }
 }

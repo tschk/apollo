@@ -13,7 +13,6 @@ pub struct HeartbeatConfig {
     pub workspace: PathBuf,
     /// Deliver synthetic heartbeat to this chat_id (else "heartbeat").
     pub deliver_chat_id: Option<String>,
-    pub dream_on_heartbeat: bool,
 }
 
 impl Default for HeartbeatConfig {
@@ -24,7 +23,6 @@ impl Default for HeartbeatConfig {
             quiet_end_hour: 8,
             workspace: PathBuf::from("."),
             deliver_chat_id: None,
-            dream_on_heartbeat: false,
         }
     }
 }
@@ -101,15 +99,6 @@ pub fn start_heartbeat(
                 break;
             }
 
-            #[cfg(feature = "rs-gbrain")]
-            if config.dream_on_heartbeat {
-                let ws = config.workspace.clone();
-                if let Err(e) = tokio::task::spawn_blocking(move || run_rs_gbrain_dream(&ws)).await
-                {
-                    tracing::warn!("Heartbeat dream task failed: {e}");
-                }
-            }
-
             update_heartbeat_state(&config.workspace);
         }
     })
@@ -136,16 +125,3 @@ fn update_heartbeat_state(workspace: &Path) {
 }
 
 use chrono::Timelike;
-
-#[cfg(feature = "rs-gbrain")]
-fn run_rs_gbrain_dream(workspace: &Path) -> anyhow::Result<()> {
-    let e = rs_gbrain::BrainEngine::open_default()?;
-    let _ = rs_gbrain::sync_workspace_brief(workspace, &e);
-    let r = rs_gbrain::run_nightly_cycle(&e, &rs_gbrain::HashEmbedder)?;
-    tracing::info!(
-        "rs_gbrain dream: hypotheses={} vectors={}",
-        r.hypothesis_pages,
-        r.chunks_indexed
-    );
-    Ok(())
-}

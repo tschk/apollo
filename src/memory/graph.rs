@@ -1,4 +1,4 @@
-//! Idea graph — nodes, edges, low-confidence "dream" hypotheses (gbrain-shaped, Surreal-native).
+//! Idea graph — nodes, edges, low-confidence "dream" hypotheses (Surreal-native).
 
 use anyhow::Result;
 use chrono::Utc;

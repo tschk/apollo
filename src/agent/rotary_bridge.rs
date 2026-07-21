@@ -547,16 +547,14 @@ pub fn discover_skills_via_rx4(workspace: &std::path::Path) -> Vec<crate::skills
 ///
 /// rx4's GraphMemory is an in-memory knowledge graph with PageRank, community
 /// detection, and JSON persistence. It does not require SQLite (unlike rx4's
-/// MemoryStore which uses rusqlite 0.37, conflicting with gbrain's rusqlite
-/// 0.32).
+/// MemoryStore which uses rusqlite 0.37).
 ///
 /// This bridge provides:
 /// - Graph-based agent memory via rx4::GraphMemory (concepts, decisions, patterns)
 /// - Conversation extraction via rx4::ConversationExtractor
 /// - JSON persistence for the graph
 ///
-/// TODO: When the rusqlite version conflict between gbrain and rx4 is resolved,
-/// enable rx4's `memory` feature to also get SQLite FTS5 full-text search
+/// TODO: Enable rx4's `memory` feature to also get SQLite FTS5 full-text search
 /// via rx4::MemoryStore. For now, unthinkclaw's SurrealDB backend remains
 /// the primary persistent memory for conversation history and key-value store.
 pub struct RotaryMemoryBridge {

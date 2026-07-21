@@ -23,7 +23,7 @@ default = [
     "channel-telegram",
     "provider-anthropic",
     "provider-ollama",
-    "rs-gbrain",
+    "zkr-memory",
     "plugin-web",
     "plugin-skills",
 ]
@@ -57,8 +57,8 @@ provider-ollama = []
 # Swarm mode (distributed agent coordination)
 swarm = []
 
-# Local SQLite brain (gbrain / rs_gbrain on crates.io)
-rs-gbrain = ["dep:rs_gbrain"]
+# Evidence-backed temporal memory (zkr on crates.io)
+zkr-memory = ["dep:zkr"]
 
 # Desktop automation (rs_peekaboo on crates.io)
 peekaboo = ["dep:rs_peekaboo"]
@@ -72,7 +72,6 @@ full = ["all-channels", "all-providers", "all-plugins", "swarm"]
 computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 
 [dependencies]
-rs_gbrain = { package = "gbrain", version = "0.1", optional = true }
 rs_peekaboo = { version = "0.3", optional = true }
 
 # Rotary (rx4) — agent harness engine providing the core agent loop, tools,
@@ -138,6 +137,7 @@ regex = "1"
 dirs = "5.0"
 praefectus = { version = "0.1.0", optional = true }
 ed25519-dalek = { version = "2.1", features = ["rand_core"], optional = true }
+zkr = { version = "0.2.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

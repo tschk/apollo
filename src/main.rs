@@ -444,7 +444,24 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Discovered {} skills", discovered_skills.len());
             }
 
+            // Build shared zkr memory store (used by both the zkr tool and the runner)
+            #[cfg(feature = "zkr-memory")]
+            let zkr_store = unthinkclaw::bootstrap::build_zkr_store(&workspace, &cfg)
+                .ok()
+                .flatten();
+
             // Register tools (including memory search/get)
+            #[cfg(feature = "zkr-memory")]
+            let mut tools = build_base_tools(
+                &workspace,
+                Arc::clone(&policy),
+                memory.clone(),
+                embedding_provider,
+                Arc::clone(&provider),
+                &cfg,
+                zkr_store.clone(),
+            );
+            #[cfg(not(feature = "zkr-memory"))]
             let mut tools = build_base_tools(
                 &workspace,
                 Arc::clone(&policy),
@@ -491,24 +508,14 @@ async fn main() -> anyhow::Result<()> {
                     .with_group_chat(cfg.group_chat.clone())
                     .with_skills(discovered_skills.clone())
                     .await;
-            #[cfg(feature = "rs-gbrain")]
+            #[cfg(feature = "zkr-memory")]
             {
-                runner = runner.with_rs_gbrain(cfg.rs_gbrain.clone());
+                runner = runner.with_zkr(zkr_store, cfg.zkr.clone());
             }
 
             {
                 let mut host_reg = unthinkclaw::plugin::PluginRegistry::new();
                 host_reg.ingest_host_plugins(&workspace, &cfg.plugin_layer.host_plugin_roots);
-                #[cfg(feature = "rs-gbrain")]
-                if cfg.rs_gbrain.enabled {
-                    let ws = workspace.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if let Ok(e) = rs_gbrain::BrainEngine::open_default() {
-                            let _ = rs_gbrain::sync_workspace_brief(&ws, &e);
-                        }
-                    })
-                    .await;
-                }
                 runner = runner.with_plugin_registry(host_reg).await;
             }
 
@@ -612,9 +619,6 @@ async fn main() -> anyhow::Result<()> {
                     let heartbeat_cfg = HeartbeatConfig {
                         workspace: workspace.clone(),
                         deliver_chat_id: cfg.memory.heartbeat_chat_id.clone(),
-                        dream_on_heartbeat: cfg.memory.dream_on_heartbeat
-                            && cfg.rs_gbrain.enabled
-                            && cfg.rs_gbrain.dream_on_heartbeat,
                         ..Default::default()
                     };
                     let (hb_tx, hb_rx) = tokio::sync::mpsc::channel(16);
@@ -740,6 +744,21 @@ async fn main() -> anyhow::Result<()> {
             let memory = build_memory_backend(&workspace, &cfg).await?;
             let embedding_provider = build_embedding_provider(&cfg)?;
 
+            #[cfg(feature = "zkr-memory")]
+            let zkr_store = unthinkclaw::bootstrap::build_zkr_store(&workspace, &cfg)
+                .ok()
+                .flatten();
+            #[cfg(feature = "zkr-memory")]
+            let tools = build_base_tools(
+                &workspace,
+                Arc::clone(&policy),
+                Arc::clone(&memory),
+                embedding_provider,
+                Arc::clone(&provider),
+                &cfg,
+                zkr_store,
+            );
+            #[cfg(not(feature = "zkr-memory"))]
             let tools = build_base_tools(
                 &workspace,
                 Arc::clone(&policy),

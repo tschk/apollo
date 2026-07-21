@@ -10,7 +10,7 @@
 | hermes-rs streaming parser | `streaming_parser.rs` |
 | OpenClaw auth paths | `~/.openclaw/...` in `bootstrap.rs`, `copilot.rs` |
 | Host plugin scan | `plugin_hosts.rs` — `.openclaw/plugins`, `.hermes/plugins`, workspace `plugins/` |
-| rs_gbrain | feature `rs-gbrain`, `brain_*` tools, brief inject, dream on heartbeat |
+| zkr | feature `zkr-memory`, `zkr_memory` tool, recall inject, auto capture |
 
 ## v2 absorbed on main (partial)
 
@@ -23,12 +23,12 @@
 
 - Do **not** merge Zig `computer_use` tree — use **rs_peekaboo** (crates.io) via `peekaboo` tool + feature `peekaboo`.
 
-## rs_gbrain integration
+## zkr integration
 
-- Crate: **gbrain** on crates.io (`rs-gbrain` dep alias).
-- Config: `[rs_gbrain]` — `enabled`, `inject_brief`, `dream_on_heartbeat`.
-- Tools: `brain_search`, `brain_query`, `brain_put`, `brain_get`.
-- Host can also run `rs_gbrain serve` (MCP stdio) alongside in-process tools.
+- Crate: **zkr** `0.2` on crates.io, feature `zkr-memory`.
+- Config: `[zkr]` — `enabled`, `database`, `tenant_id`, `person_id`, `auto_capture`, `inject_recall`, `recall_limit`.
+- Tool: `zkr_memory` — `remember`, `search`, `get`, `correct`, `delete`, `profiles`.
+- Evidence-backed temporal memory with citations; replaces the former rs_gbrain integration.
 
 ## rs_peekaboo integration
 

@@ -11,5 +11,7 @@ pub mod search;
 pub mod session_note;
 pub mod surreal;
 pub mod traits;
+#[cfg(feature = "zkr-memory")]
+pub mod zkr;
 
 pub use traits::MemoryBackend;

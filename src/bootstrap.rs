@@ -174,6 +174,7 @@ pub fn build_base_tools(
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     provider: Arc<dyn Provider>,
     cfg: &Config,
+    #[cfg(feature = "zkr-memory")] zkr_store: Option<Arc<crate::memory::zkr::ZkrStore>>,
 ) -> Vec<Arc<dyn Tool>> {
     let toolsets = &cfg.toolsets;
     let mut tools: Vec<Arc<dyn Tool>> = vec![
@@ -228,12 +229,9 @@ pub fn build_base_tools(
         Ok(tool) => tools.push(Arc::new(tool)),
         Err(error) => tracing::error!("failed to initialize Praefectus: {error}"),
     }
-    #[cfg(feature = "rs-gbrain")]
-    if cfg.rs_gbrain.enabled {
-        tools.push(Arc::new(crate::tools::rs_gbrain::BrainSearchTool));
-        tools.push(Arc::new(crate::tools::rs_gbrain::BrainQueryTool));
-        tools.push(Arc::new(crate::tools::rs_gbrain::BrainPutTool));
-        tools.push(Arc::new(crate::tools::rs_gbrain::BrainGetTool));
+    #[cfg(feature = "zkr-memory")]
+    if let Some(store) = zkr_store {
+        tools.push(Arc::new(crate::tools::zkr::ZkrTool::new(store)));
     }
     tools
         .into_iter()
@@ -255,6 +253,26 @@ pub fn build_embedding_provider(
 
     let provider = create_embedding_provider(&provider_name, api_key, model, base_url)?;
     Ok(Some(provider))
+}
+
+#[cfg(feature = "zkr-memory")]
+pub fn build_zkr_store(
+    workspace: &Path,
+    cfg: &Config,
+) -> anyhow::Result<Option<Arc<crate::memory::zkr::ZkrStore>>> {
+    if !cfg.zkr.enabled {
+        return Ok(None);
+    }
+    let person_id = cfg
+        .memory
+        .principal_id
+        .as_deref()
+        .unwrap_or(&cfg.zkr.person_id);
+    Ok(Some(Arc::new(crate::memory::zkr::ZkrStore::open(
+        &workspace.join(&cfg.zkr.database),
+        cfg.zkr.tenant_id.clone(),
+        person_id.to_string(),
+    )?)))
 }
 
 pub async fn build_memory_backend(
