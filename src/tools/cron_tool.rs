@@ -10,11 +10,24 @@ use crate::cron_scheduler::CronScheduler;
 
 pub struct CronTool {
     scheduler: Arc<CronScheduler>,
+    channel: String,
+    chat_id: String,
+    model: String,
 }
 
 impl CronTool {
-    pub fn new(scheduler: Arc<CronScheduler>) -> Self {
-        Self { scheduler }
+    pub fn new(
+        scheduler: Arc<CronScheduler>,
+        channel: impl Into<String>,
+        chat_id: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            scheduler,
+            channel: channel.into(),
+            chat_id: chat_id.into(),
+            model: model.into(),
+        }
     }
 }
 
@@ -25,6 +38,8 @@ struct CronArgs {
     /// Cron expression (required for schedule)
     #[serde(default)]
     cron: String,
+    #[serde(default)]
+    run_at: String,
     /// Goal/task description (required for schedule)
     #[serde(default)]
     goal: String,
@@ -65,6 +80,10 @@ impl Tool for CronTool {
                         "type": "string",
                         "description": "Cron expression (e.g. '0 9 * * MON' = every Monday at 9am)"
                     },
+                    "run_at": {
+                        "type": "string",
+                        "description": "RFC3339 timestamp for a one-shot task"
+                    },
                     "goal": {
                         "type": "string",
                         "description": "What the agent should do when this schedule fires"
@@ -90,23 +109,44 @@ impl Tool for CronTool {
 
         match args.action.as_str() {
             "schedule" => {
-                if args.cron.is_empty() {
-                    return Ok(ToolResult::error("cron expression is required"));
+                if args.cron.is_empty() && args.run_at.is_empty() {
+                    return Ok(ToolResult::error("cron or run_at is required"));
+                }
+                if !args.cron.is_empty() && !args.run_at.is_empty() {
+                    return Ok(ToolResult::error("provide cron or run_at, not both"));
                 }
                 if args.goal.is_empty() {
                     return Ok(ToolResult::error("goal is required"));
                 }
-                match self
-                    .scheduler
-                    .add(
-                        "agent_task",
-                        &args.cron,
-                        &args.goal,
-                        "cli",
-                        "claude-sonnet-4-5",
-                    )
-                    .await
-                {
+                let result = if args.run_at.is_empty() {
+                    self.scheduler
+                        .add(
+                            "agent_task",
+                            &args.cron,
+                            &args.goal,
+                            &self.channel,
+                            &self.chat_id,
+                            &self.model,
+                        )
+                        .await
+                } else {
+                    match chrono::DateTime::parse_from_rfc3339(&args.run_at) {
+                        Ok(run_at) => {
+                            self.scheduler
+                                .add_once(
+                                    "agent_task",
+                                    run_at.with_timezone(&chrono::Utc),
+                                    &args.goal,
+                                    &self.channel,
+                                    &self.chat_id,
+                                    &self.model,
+                                )
+                                .await
+                        }
+                        Err(error) => Err(anyhow::anyhow!("invalid run_at: {error}")),
+                    }
+                };
+                match result {
                     Ok(id) => Ok(ToolResult::success(format!(
                         "Scheduled '{}' with id={} (cron: {})",
                         args.goal, id, args.cron
@@ -127,7 +167,7 @@ impl Tool for CronTool {
                         format!(
                             "- [{}] id={} cron='{}' goal='{}' enabled={}",
                             if j.enabled { "✓" } else { "✗" },
-                            &id,
+                            id,
                             j.schedule,
                             j.task,
                             j.enabled
@@ -183,7 +223,7 @@ mod tests {
     #[tokio::test]
     async fn schedule_and_list() {
         let scheduler = Arc::new(CronScheduler::new_noop());
-        let tool = CronTool::new(scheduler);
+        let tool = CronTool::new(scheduler, "cli", "cli", "test-model");
 
         let r = tool
             .execute(r#"{"action":"schedule","cron":"0 0 9 * * * *","goal":"daily standup"}"#)
@@ -196,9 +236,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_shot_schedule_is_stored() {
+        let scheduler = Arc::new(CronScheduler::new_noop());
+        let tool = CronTool::new(scheduler.clone(), "cli", "cli", "test-model");
+        let run_at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let result = tool
+            .execute(&format!(
+                r#"{{"action":"schedule","run_at":"{run_at}","goal":"remind me"}}"#
+            ))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output);
+        assert!(scheduler.list().await.unwrap()[0].one_shot);
+    }
+
+    #[tokio::test]
     async fn invalid_cron_fails() {
         let scheduler = Arc::new(CronScheduler::new_noop());
-        let tool = CronTool::new(scheduler);
+        let tool = CronTool::new(scheduler, "cli", "cli", "test-model");
         let r = tool
             .execute(r#"{"action":"schedule","cron":"not-valid","goal":"test"}"#)
             .await

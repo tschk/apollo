@@ -30,6 +30,8 @@ pub mod mode_switch;
 pub mod network;
 #[cfg(feature = "peekaboo")]
 pub mod peekaboo;
+#[cfg(feature = "computer-use-praefectus")]
+pub mod praefectus;
 #[cfg(feature = "rs-gbrain")]
 pub mod rs_gbrain;
 pub mod sandbox;

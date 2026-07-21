@@ -22,11 +22,11 @@ impl DiscordChannel {
     }
 
     /// Send message to Discord
-    async fn send_message(&self, text: &str) -> anyhow::Result<()> {
+    async fn send_message(&self, channel_id: &str, text: &str) -> anyhow::Result<()> {
         let formatted = format_outgoing_text(FormatTarget::Discord, text);
         let url = format!(
             "https://discordapp.com/api/channels/{}/messages",
-            self.channel_id
+            channel_id
         );
         let _resp = reqwest::Client::new()
             .post(&url)
@@ -57,7 +57,12 @@ impl Channel for DiscordChannel {
     }
 
     async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
-        self.send_message(&message.text).await?;
+        let channel_id = if message.chat_id.is_empty() {
+            &self.channel_id
+        } else {
+            &message.chat_id
+        };
+        self.send_message(channel_id, &message.text).await?;
         Ok(None)
     }
 

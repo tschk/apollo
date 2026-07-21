@@ -69,6 +69,7 @@ all-providers = ["provider-anthropic", "provider-copilot", "provider-ollama"]
 desktop = ["plugin-browser", "peekaboo"]
 all-plugins = ["plugin-web", "plugin-browser", "plugin-skills", "plugin-advanced", "peekaboo"]
 full = ["all-channels", "all-providers", "all-plugins", "swarm"]
+computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 
 [dependencies]
 rs_gbrain = { package = "gbrain", version = "0.1", optional = true }
@@ -76,9 +77,9 @@ rs_peekaboo = { version = "0.3", optional = true }
 
 # Rotary (rx4) — agent harness engine providing the core agent loop, tools,
 # providers, sessions, skills, memory, guardrails, and MCP support.
-# Used as a path dependency during the migration from unthinkclaw's built-in
-# agent loop to rx4's harness.
-rx4 = { path = "../rotary", default-features = false, features = ["ipc", "builtin-tools", "providers", "mcp", "skills", "graph-memory"] }
+# Used during the migration from unthinkclaw's built-in agent loop to rx4's
+# harness.
+rx4 = { version = "0.3.20", default-features = false, features = ["ipc", "builtin-tools", "providers", "mcp", "skills", "graph-memory"] }
 
 # Async runtime (optimized features only)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }
@@ -135,6 +136,8 @@ regex = "1"
 
 # Home directory resolution
 dirs = "5.0"
+praefectus = { version = "0.1.0", optional = true }
+ed25519-dalek = { version = "2.1", features = ["rand_core"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -19,7 +19,9 @@
 
 use std::sync::Arc;
 
-use rx4::provider::{Message, Provider as Rx4Provider, ProviderError as Rx4ProviderError, Role, StreamEvent};
+use rx4::provider::{
+    Message, Provider as Rx4Provider, ProviderError as Rx4ProviderError, Role, StreamEvent,
+};
 
 use crate::providers::{ChatMessage, ChatRequest, Provider as UnthinkclawProvider};
 use crate::tools::{Tool as UnthinkclawTool, ToolSpec};
@@ -142,7 +144,10 @@ impl Rx4Provider for RotaryProviderAdapter {
                     .and_then(|d| d.as_str())
                     .unwrap_or("")
                     .to_string();
-                let parameters = t.get("parameters").cloned().unwrap_or(serde_json::Value::Null);
+                let parameters = t
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 Some(ToolSpec {
                     name,
                     description,
@@ -240,7 +245,7 @@ pub fn register_unthinkclaw_tools(
                     },
                     Err(e) => rx4::ToolResult {
                         id: String::new(),
-                        content: format!("Tool error: {e}"),
+                        content: crate::redaction::redact_text(&format!("Tool error: {e}")),
                         is_error: true,
                     },
                 }
@@ -301,7 +306,9 @@ impl RotaryAgentBridge {
         agent.max_tool_iterations = config.max_tool_iterations;
 
         // Register unthinkclaw's tools into rx4's tool registry
-        register_unthinkclaw_tools(&mut agent.tools, &config.tools);
+        let mut tool_registry = rx4::ToolRegistry::new();
+        register_unthinkclaw_tools(&mut tool_registry, &config.tools);
+        agent.tools = Arc::new(tool_registry);
 
         // Use rx4's guardrails for loop detection (replaces unthinkclaw's
         // ToolGuardrails in the main loop path)
@@ -414,7 +421,11 @@ impl RotaryAgentBridge {
 
     /// Register additional tools at runtime.
     pub fn register_tools(&mut self, tools: &[Arc<dyn UnthinkclawTool>]) {
-        register_unthinkclaw_tools(&mut self.agent.tools, tools);
+        if let Some(registry) = Arc::get_mut(&mut self.agent.tools) {
+            register_unthinkclaw_tools(registry, tools);
+        } else {
+            tracing::warn!("cannot register rx4 tools while the registry is shared");
+        }
     }
 
     /// Get the list of registered tool names.
@@ -423,7 +434,11 @@ impl RotaryAgentBridge {
             .tools
             .definitions()
             .iter()
-            .filter_map(|d| d.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+            .filter_map(|d| {
+                d.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect()
     }
 
@@ -503,9 +518,7 @@ pub fn match_skill_via_rx4(
 /// This loads skills from disk via rx4's SkillEngine (which handles both
 /// JSON and SKILL.md formats with YAML frontmatter), then converts them to
 /// unthinkclaw's Skill type.
-pub fn discover_skills_via_rx4(
-    workspace: &std::path::Path,
-) -> Vec<crate::skills::Skill> {
+pub fn discover_skills_via_rx4(workspace: &std::path::Path) -> Vec<crate::skills::Skill> {
     let mut engine = build_rx4_skill_engine(workspace);
     if engine.load().is_err() {
         tracing::warn!("rx4 SkillEngine load failed, returning empty skill list");
@@ -516,9 +529,7 @@ pub fn discover_skills_via_rx4(
         .list()
         .into_iter()
         .map(|rx4_skill| {
-            let location = engine
-                .skills_dir()
-                .join(format!("{}.json", rx4_skill.id));
+            let location = engine.skills_dir().join(format!("{}.json", rx4_skill.id));
             crate::skills::Skill {
                 name: rx4_skill.name.clone(),
                 description: rx4_skill.description.clone(),
@@ -712,7 +723,10 @@ mod tests {
         // Just verify it doesn't panic with a temp dir
         let tmp = tempfile::tempdir().unwrap();
         let engine = build_rx4_skill_engine(tmp.path());
-        assert!(engine.skills_dir().exists() || engine.skills_dir() == tmp.path().join(".unthinkclaw/skills"));
+        assert!(
+            engine.skills_dir().exists()
+                || engine.skills_dir() == tmp.path().join(".unthinkclaw/skills")
+        );
     }
 
     #[test]

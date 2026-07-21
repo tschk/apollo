@@ -256,7 +256,7 @@ pub fn expand_inline_shell(content: &str, cwd: Option<&Path>, _timeout_secs: u64
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     format!(
                         "[inline-shell error: {}]",
-                        &stderr.trim().chars().take(120).collect::<String>()
+                        stderr.trim().chars().take(120).collect::<String>()
                     )
                 }
                 Err(e) => format!("[inline-shell error: {}]", e),

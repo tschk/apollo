@@ -167,13 +167,12 @@ impl TeamManager {
         }
 
         // Check if task is blocked
-        if task.status == "blocked" {
-            if self
+        if task.status == "blocked"
+            && self
                 .has_unresolved_dependencies(&task.blocked_by, None)
                 .await?
-            {
-                bail!("Task '{}' is blocked by incomplete dependencies", task_id);
-            }
+        {
+            bail!("Task '{}' is blocked by incomplete dependencies", task_id);
         }
 
         self.storage.claim_team_task(task_id, agent_id).await
@@ -192,14 +191,13 @@ impl TeamManager {
 
         let blocked = self.storage.get_blocked_tasks(&task.team_id).await?;
         for bt in blocked {
-            if bt.blocked_by.contains(&task_id.to_string()) {
-                if !self
+            if bt.blocked_by.contains(&task_id.to_string())
+                && !self
                     .has_unresolved_dependencies(&bt.blocked_by, Some(task_id))
                     .await?
-                {
-                    // Unblock the task (move from blocked to pending)
-                    self.storage.unblock_task(&bt.task_id).await?;
-                }
+            {
+                // Unblock the task (move from blocked to pending)
+                self.storage.unblock_task(&bt.task_id).await?;
             }
         }
 

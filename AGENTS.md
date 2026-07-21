@@ -25,8 +25,8 @@ Goals:
 > but the release binary exceeds 10MB. Treat <10MB as aspirational, not a gate.
 
 > **rx4 migration:** unthinkclaw is migrating its built-in agent loop to the
-> `rx4` (rotary) harness engine. `rx4` is a path dependency
-> (`../rotary`) providing the core agent loop, tools, providers, sessions,
+> `rx4` (rotary) harness engine. `rx4` is a crates.io dependency providing
+> the core agent loop, tools, providers, sessions,
 > skills, memory, guardrails, and MCP support. The bridge lives in
 > `src/agent/rotary_bridge.rs`. Until the migration completes, both the
 > legacy loop and the rx4 bridge coexist.
@@ -81,7 +81,7 @@ src/
 
 ### 3.4 Secure by Default
 - Deny-by-default for channel allowlists
-- `ExecutionPolicy::default()` denies shell and dynamic tools; only explicit opt-in (config or CLI/autonomous profiles) enables them
+- Privileged capabilities are enabled by default and remain individually configurable through runtime policy and onboarding profiles
 - Never log tokens, API keys, or message content
 - Filesystem access scoped to workspace
 

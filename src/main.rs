@@ -253,6 +253,9 @@ enum CronAction {
         #[arg(long, default_value = "cli")]
         channel: String,
 
+        #[arg(long, default_value = "cli")]
+        chat_id: String,
+
         /// Model override
         #[arg(long, default_value = "")]
         model: String,
@@ -556,19 +559,33 @@ async fn main() -> anyhow::Result<()> {
                 .await;
 
             // Start cron scheduler background task and add tool
+            let scheduled_chat_id = match channel.as_str() {
+                "telegram" => telegram_chat_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+                "discord" => _discord_channel_id.clone().unwrap_or_default(),
+                _ => "cli".to_string(),
+            };
+            let mut cron_runtime = None;
             if let Some(surreal_mem) = memory
                 .as_any()
                 .downcast_ref::<unthinkclaw::memory::surreal::SurrealMemory>()
             {
                 let cron_sched = Arc::new(CronScheduler::new(Arc::new(surreal_mem.clone())));
-                let (_cron_rx, _cron_shutdown) =
-                    unthinkclaw::cron_scheduler::start_cron_ticker(cron_sched.clone());
+                let (cron_rx, cron_shutdown) = unthinkclaw::cron_scheduler::start_cron_ticker(
+                    cron_sched.clone(),
+                    channel.clone(),
+                );
 
                 runner_arc
                     .add_tool(Arc::new(unthinkclaw::tools::cron_tool::CronTool::new(
-                        cron_sched,
+                        cron_sched.clone(),
+                        channel.clone(),
+                        scheduled_chat_id.clone(),
+                        cfg.model.clone(),
                     )))
                     .await;
+                cron_runtime = Some((cron_rx, cron_shutdown, cron_sched));
             }
 
             let _self_update_handle = self_updater.start();
@@ -604,7 +621,14 @@ async fn main() -> anyhow::Result<()> {
                     let _heartbeat_handle = heartbeat::start_heartbeat(heartbeat_cfg, hb_tx);
 
                     let mut ch = CliChannel::new();
-                    runner_arc.run_with_extra_rx(&mut ch, hb_rx).await?;
+                    if let Some((cron_rx, cron_shutdown, cron_sched)) = cron_runtime.take() {
+                        runner_arc
+                            .run_with_runtime_rx(&mut ch, hb_rx, cron_rx, cron_sched)
+                            .await?;
+                        cron_shutdown.notify_waiters();
+                    } else {
+                        runner_arc.run_with_extra_rx(&mut ch, hb_rx).await?;
+                    }
                 }
                 #[cfg(feature = "channel-telegram")]
                 "telegram" => {
@@ -621,6 +645,7 @@ async fn main() -> anyhow::Result<()> {
                         skills_count: discovered_skills.len(),
                         workspace: workspace.clone(),
                         channel_cfg: &cfg.channel,
+                        cron_runtime: cron_runtime.take(),
                     })
                     .await?;
                 }
@@ -636,7 +661,15 @@ async fn main() -> anyhow::Result<()> {
                     println!("   Listening for messages...");
 
                     let mut ch = DiscordChannel::new(token, channel_id);
-                    runner_arc.run(&mut ch).await?;
+                    if let Some((cron_rx, cron_shutdown, cron_sched)) = cron_runtime.take() {
+                        let (_extra_tx, extra_rx) = tokio::sync::mpsc::channel(1);
+                        runner_arc
+                            .run_with_runtime_rx(&mut ch, extra_rx, cron_rx, cron_sched)
+                            .await?;
+                        cron_shutdown.notify_waiters();
+                    } else {
+                        runner_arc.run(&mut ch).await?;
+                    }
                 }
                 other => {
                     anyhow::bail!(
@@ -1140,10 +1173,11 @@ async fn main() -> anyhow::Result<()> {
                         schedule,
                         task,
                         channel,
+                        chat_id,
                         model,
                     } => {
                         let id = scheduler
-                            .add(&name, &schedule, &task, &channel, &model)
+                            .add(&name, &schedule, &task, &channel, &chat_id, &model)
                             .await?;
                         println!("Added cron job: {} (id: {})", name, id);
                     }
@@ -1376,12 +1410,7 @@ async fn main() -> anyhow::Result<()> {
                             println!("No pending tasks.");
                         } else {
                             for t in &tasks {
-                                println!(
-                                    "[{:?}] {} — {}",
-                                    t.priority,
-                                    t.title,
-                                    t.status.to_string()
-                                );
+                                println!("[{:?}] {} — {}", t.priority, t.title, t.status);
                             }
                         }
                     }

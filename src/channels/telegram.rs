@@ -248,6 +248,10 @@ except Exception as e:
 
     /// Send a message and return its message_id (of the last chunk if split)
     pub async fn send_message(&self, text: &str) -> anyhow::Result<i64> {
+        self.send_message_to(self.chat_id, text).await
+    }
+
+    async fn send_message_to(&self, chat_id: i64, text: &str) -> anyhow::Result<i64> {
         let formatted = format_outgoing_text(FormatTarget::Telegram, text);
         let chunks = chunk_outgoing_text(FormatTarget::Telegram, &formatted, TELEGRAM_MAX_LEN);
 
@@ -259,7 +263,7 @@ except Exception as e:
                 .client
                 .post(self.api_url("sendMessage"))
                 .json(&serde_json::json!({
-                    "chat_id": self.chat_id,
+                    "chat_id": chat_id,
                     "text": chunk,
                     "parse_mode": "Markdown",
                 }))
@@ -276,7 +280,7 @@ except Exception as e:
                     .client
                     .post(self.api_url("sendMessage"))
                     .json(&serde_json::json!({
-                        "chat_id": self.chat_id,
+                        "chat_id": chat_id,
                         "text": chunk,
                     }))
                     .send()
@@ -504,7 +508,8 @@ impl Channel for TelegramChannel {
     }
 
     async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
-        let msg_id = self.send_message(&message.text).await?;
+        let chat_id = message.chat_id.parse::<i64>()?;
+        let msg_id = self.send_message_to(chat_id, &message.text).await?;
         if msg_id > 0 {
             Ok(Some(msg_id.to_string()))
         } else {
@@ -512,12 +517,13 @@ impl Channel for TelegramChannel {
         }
     }
 
-    async fn send_typing(&self, _chat_id: &str) -> anyhow::Result<()> {
+    async fn send_typing(&self, chat_id: &str) -> anyhow::Result<()> {
+        let chat_id = chat_id.parse::<i64>()?;
         let _ = self
             .client
             .post(self.api_url("sendChatAction"))
             .json(&serde_json::json!({
-                "chat_id": self.chat_id,
+                "chat_id": chat_id,
                 "action": "typing",
             }))
             .send()

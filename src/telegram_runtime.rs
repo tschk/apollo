@@ -24,6 +24,11 @@ pub struct TelegramChatRun<'a> {
     pub skills_count: usize,
     pub workspace: PathBuf,
     pub channel_cfg: &'a ChannelConfig,
+    pub cron_runtime: Option<(
+        tokio::sync::mpsc::Receiver<crate::cron_scheduler::DueJob>,
+        Arc<tokio::sync::Notify>,
+        Arc<crate::cron_scheduler::CronScheduler>,
+    )>,
 }
 
 pub async fn run_telegram_chat(run: TelegramChatRun<'_>) -> anyhow::Result<()> {
@@ -36,6 +41,7 @@ pub async fn run_telegram_chat(run: TelegramChatRun<'_>) -> anyhow::Result<()> {
         skills_count,
         workspace,
         channel_cfg,
+        cron_runtime,
     } = run;
     let ingress = TelegramIngressFilter {
         allowed_chat_ids: channel_cfg.allowed_chat_ids.clone(),
@@ -61,6 +67,65 @@ pub async fn run_telegram_chat(run: TelegramChatRun<'_>) -> anyhow::Result<()> {
         .with_ingress_filter(ingress);
     let mut rx = ch.start().await?;
 
+    let cron_shutdown = cron_runtime
+        .as_ref()
+        .map(|(_, shutdown, _)| Arc::clone(shutdown));
+    let _cron_handle = cron_runtime.map(|(mut cron_rx, _, scheduler)| {
+        let runner = Arc::clone(&runner);
+        let channel = ch.clone();
+        tokio::spawn(async move {
+            while let Some(due) = cron_rx.recv().await {
+                let job = due.job;
+                let job_id = job.id.clone().unwrap_or_default();
+                let run_token = job.run_token.clone().unwrap_or_default();
+                if job.channel != channel.name() {
+                    let _ = scheduler.release_run(&job_id, &run_token).await;
+                    continue;
+                }
+                let msg = IncomingMessage {
+                    id: format!("cron-{job_id}"),
+                    sender_id: "scheduler".to_string(),
+                    sender_name: Some("Scheduler".to_string()),
+                    chat_id: job.chat_id.clone(),
+                    text: job.task.clone(),
+                    is_group: false,
+                    reply_to: None,
+                    timestamp: chrono::Utc::now(),
+                };
+                match runner
+                    .handle_message_with_model(
+                        &msg,
+                        &channel,
+                        (!job.model.is_empty()).then_some(job.model.as_str()),
+                    )
+                    .await
+                {
+                    Ok(response) => {
+                        let delivery = channel
+                            .send(crate::channels::OutgoingMessage {
+                                chat_id: job.chat_id,
+                                text: response,
+                                reply_to: None,
+                            })
+                            .await;
+                        if let Err(error) = delivery {
+                            let _ = scheduler
+                                .fail_run(&job_id, &run_token, &error.to_string())
+                                .await;
+                        } else {
+                            let _ = scheduler.mark_run(&job_id, &run_token, &job.schedule).await;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = scheduler
+                            .fail_run(&job_id, &run_token, &error.to_string())
+                            .await;
+                    }
+                }
+            }
+        })
+    });
+
     let (cli_tx, mut cli_rx) = tokio::sync::mpsc::channel::<IncomingMessage>(32);
     spawn_local_message_bridge(cli_tx, chat_id);
 
@@ -72,6 +137,10 @@ pub async fn run_telegram_chat(run: TelegramChatRun<'_>) -> anyhow::Result<()> {
             Some(msg) = cli_rx.recv() => msg,
             else => break,
         };
+        if msg.chat_id != chat_id.to_string() {
+            tracing::warn!("Ignoring Telegram message for unbound chat {}", msg.chat_id);
+            continue;
+        }
         let text = msg.text.trim();
 
         if processing.load(std::sync::atomic::Ordering::SeqCst) && !text.starts_with('/') {
@@ -106,6 +175,9 @@ pub async fn run_telegram_chat(run: TelegramChatRun<'_>) -> anyhow::Result<()> {
         processing.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
+    if let Some(shutdown) = cron_shutdown {
+        shutdown.notify_waiters();
+    }
     Ok(())
 }
 

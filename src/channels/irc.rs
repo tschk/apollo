@@ -126,11 +126,11 @@ impl Channel for IrcChannel {
         Ok(rx)
     }
 
-    async fn send(&self, _message: OutgoingMessage) -> anyhow::Result<()> {
+    async fn send(&self, _message: OutgoingMessage) -> anyhow::Result<Option<String>> {
         // IRC send would need a shared writer handle
         // For now, log the message
         tracing::info!("IRC send: {}", _message.text);
-        Ok(())
+        Ok(None)
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {

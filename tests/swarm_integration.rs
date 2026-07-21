@@ -436,7 +436,7 @@ async fn test_team_messaging() {
         .get_unread(&team.team_id, &id2)
         .await
         .unwrap();
-    assert!(unread.len() >= 1);
+    assert!(!unread.is_empty());
 }
 
 // === Handoff ===

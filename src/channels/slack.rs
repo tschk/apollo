@@ -52,7 +52,7 @@ impl Channel for SlackChannel {
 
                 let resp = client
                     .get("https://slack.com/api/conversations.history")
-                    .header("Authorization", format!("Bearer {}", &bot_token))
+                    .header("Authorization", format!("Bearer {}", bot_token))
                     .query(&[("limit", "5")])
                     .send()
                     .await;
@@ -103,7 +103,7 @@ impl Channel for SlackChannel {
         Ok(rx)
     }
 
-    async fn send(&self, message: OutgoingMessage) -> anyhow::Result<()> {
+    async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
         let client = reqwest::Client::new();
 
         let mut body = serde_json::json!({
@@ -117,7 +117,7 @@ impl Channel for SlackChannel {
 
         let resp = client
             .post("https://slack.com/api/chat.postMessage")
-            .header("Authorization", format!("Bearer {}", &self.bot_token))
+            .header("Authorization", format!("Bearer {}", self.bot_token))
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -127,7 +127,7 @@ impl Channel for SlackChannel {
             anyhow::bail!("Slack send failed: {}", resp.status());
         }
 
-        Ok(())
+        Ok(None)
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {

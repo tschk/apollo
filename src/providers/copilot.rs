@@ -6,23 +6,22 @@ use serde_json::Value;
 
 use super::traits::*;
 use crate::text::truncate_chars;
-use crate::tools::ToolSpec;
 
 const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const DEFAULT_COPILOT_API_BASE: &str = "https://api.individual.githubcopilot.com";
 
 pub struct CopilotProvider {
     github_token: String,
-    api_token: Option<String>,
-    base_url: String,
+    api_token: tokio::sync::RwLock<Option<String>>,
+    base_url: tokio::sync::RwLock<String>,
 }
 
 impl CopilotProvider {
     pub fn new(github_token: impl Into<String>) -> Self {
         Self {
             github_token: github_token.into(),
-            api_token: None,
-            base_url: DEFAULT_COPILOT_API_BASE.to_string(),
+            api_token: tokio::sync::RwLock::new(None),
+            base_url: tokio::sync::RwLock::new(DEFAULT_COPILOT_API_BASE.to_string()),
         }
     }
 
@@ -47,8 +46,8 @@ impl CopilotProvider {
 
         Ok(Self {
             github_token: String::new(),
-            api_token: Some(token.to_string()),
-            base_url,
+            api_token: tokio::sync::RwLock::new(Some(token.to_string())),
+            base_url: tokio::sync::RwLock::new(base_url),
         })
     }
 
@@ -60,7 +59,7 @@ impl CopilotProvider {
         let resp = client
             .get(COPILOT_TOKEN_URL)
             .header("Accept", "application/json")
-            .header("Authorization", format!("Bearer {}", &self.github_token))
+            .header("Authorization", format!("Bearer {}", self.github_token))
             .send()
             .await?;
 
@@ -78,15 +77,15 @@ impl CopilotProvider {
     }
 
     /// Exchange GitHub token for Copilot API token
-    async fn ensure_token(&mut self) -> anyhow::Result<String> {
-        if let Some(ref token) = self.api_token {
-            return Ok(token.clone());
+    async fn ensure_token(&self) -> anyhow::Result<String> {
+        if let Some(token) = self.api_token.read().await.clone() {
+            return Ok(token);
         }
 
         let token = self.fetch_new_token().await?;
 
-        self.base_url = derive_base_url(&token);
-        self.api_token = Some(token.clone());
+        *self.base_url.write().await = derive_base_url(&token);
+        *self.api_token.write().await = Some(token.clone());
 
         Ok(token)
     }
@@ -123,10 +122,8 @@ impl Provider for CopilotProvider {
     }
 
     async fn chat(&self, request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
-        let token = self
-            .api_token
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No Copilot token available"))?;
+        let token = self.ensure_token().await?;
+        let base_url = self.base_url.read().await.clone();
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
@@ -165,7 +162,7 @@ impl Provider for CopilotProvider {
         }
 
         let resp = client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(format!("{}/chat/completions", base_url))
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/json")
             .header("Copilot-Integration-Id", "aclaw")

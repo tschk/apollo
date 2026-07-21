@@ -248,7 +248,7 @@ impl Provider for AnthropicProvider {
 
         if is_oauth {
             req_builder = req_builder
-                .header("Authorization", format!("Bearer {}", &self.api_key))
+                .header("Authorization", format!("Bearer {}", self.api_key))
                 .header(
                     "anthropic-beta",
                     "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",

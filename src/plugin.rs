@@ -401,7 +401,8 @@ impl LifecycleHook for SessionNoteLifecycleHook {
 
     async fn on_event(&self, event: &LifecycleEvent) -> anyhow::Result<()> {
         if let LifecycleEvent::AgentDone(chat_id, response) = event {
-            let preview: String = response.chars().take(200).collect();
+            let redacted = crate::redaction::redact_text(response);
+            let preview: String = redacted.chars().take(200).collect();
             if !preview.is_empty() {
                 let _ = crate::memory::session_note::append_session_note(
                     &self.workspace,
@@ -426,8 +427,7 @@ impl LifecycleHook for LoggingLifecycleHook {
     async fn on_event(&self, event: &LifecycleEvent) -> anyhow::Result<()> {
         match event {
             LifecycleEvent::BeforeToolCall(name, args) => {
-                let preview: String = args.chars().take(80).collect();
-                tracing::debug!("[hook] before_tool {} args:{}", name, preview);
+                tracing::debug!("[hook] before_tool {} args_len:{}", name, args.len());
             }
             LifecycleEvent::AfterToolCall(name, _args, result) => {
                 tracing::debug!(
@@ -444,12 +444,14 @@ impl LifecycleHook for LoggingLifecycleHook {
                 tracing::info!("[hook] session_end {}", id);
             }
             LifecycleEvent::AgentStart(chat_id, msg) => {
-                let preview: String = msg.chars().take(80).collect();
-                tracing::debug!("[hook] agent_start {} msg:{}", chat_id, preview);
+                tracing::debug!("[hook] agent_start {} msg_len:{}", chat_id, msg.len());
             }
             LifecycleEvent::AgentDone(chat_id, response) => {
-                let preview: String = response.chars().take(80).collect();
-                tracing::debug!("[hook] agent_done {} response:{}", chat_id, preview);
+                tracing::debug!(
+                    "[hook] agent_done {} response_len:{}",
+                    chat_id,
+                    response.len()
+                );
             }
         }
         Ok(())
@@ -507,7 +509,10 @@ mod tests {
 
     #[tokio::test]
     async fn shell_plugin_denied_when_policy_off() {
-        let plugin = ShellPlugin::new(crate::policy::ExecutionPolicy::default());
+        let plugin = ShellPlugin::new(crate::policy::ExecutionPolicy {
+            allow_plugin_shell: false,
+            ..Default::default()
+        });
         let err = plugin
             .call("shell", json!({ "cmd": "echo x" }))
             .await

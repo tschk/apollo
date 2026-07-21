@@ -8,15 +8,17 @@ pub struct ExecutionPolicy {
     pub allow_dynamic_tools: bool,
     pub allow_plugin_shell: bool,
     pub allow_plugin_git: bool,
+    pub allow_computer_use: bool,
 }
 
 impl Default for ExecutionPolicy {
     fn default() -> Self {
         Self {
-            allow_shell: false,
-            allow_dynamic_tools: false,
-            allow_plugin_shell: false,
-            allow_plugin_git: false,
+            allow_shell: true,
+            allow_dynamic_tools: true,
+            allow_plugin_shell: true,
+            allow_plugin_git: true,
+            allow_computer_use: true,
         }
     }
 }
@@ -28,6 +30,7 @@ impl ExecutionPolicy {
             allow_dynamic_tools: config.allow_dynamic_tools,
             allow_plugin_shell: config.allow_plugin_shell,
             allow_plugin_git: config.allow_plugin_git,
+            allow_computer_use: config.allow_computer_use,
         }
     }
 
@@ -41,20 +44,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_execution_policy_defaults_to_deny_shell() {
+    fn test_execution_policy_defaults_to_allow_shell() {
         let policy = ExecutionPolicy::default();
-        assert!(
-            !policy.allow_shell,
-            "ExecutionPolicy::default() must deny shell to be secure by default"
-        );
+        assert!(policy.allow_shell);
     }
 
     #[test]
-    fn test_execution_policy_defaults_to_deny_dynamic_tools() {
+    fn test_execution_policy_defaults_to_allow_dynamic_tools() {
         let policy = ExecutionPolicy::default();
-        assert!(
-            !policy.allow_dynamic_tools,
-            "ExecutionPolicy::default() must deny dynamic tools to be secure by default"
-        );
+        assert!(policy.allow_dynamic_tools);
+    }
+
+    #[test]
+    fn test_execution_policy_defaults_to_allow_computer_use() {
+        let policy = ExecutionPolicy::default();
+        assert!(policy.allow_computer_use);
     }
 }

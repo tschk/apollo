@@ -43,14 +43,14 @@ impl Channel for MatrixChannel {
             let mut since = String::new();
 
             loop {
-                let mut url = format!("{}/_matrix/client/r0/sync?timeout=30000", &homeserver);
+                let mut url = format!("{}/_matrix/client/r0/sync?timeout=30000", homeserver);
                 if !since.is_empty() {
-                    url.push_str(&format!("&since={}", &since));
+                    url.push_str(&format!("&since={}", since));
                 }
 
                 let resp = client
                     .get(&url)
-                    .header("Authorization", format!("Bearer {}", &token))
+                    .header("Authorization", format!("Bearer {}", token))
                     .send()
                     .await;
 
@@ -104,7 +104,7 @@ impl Channel for MatrixChannel {
         Ok(rx)
     }
 
-    async fn send(&self, message: OutgoingMessage) -> anyhow::Result<()> {
+    async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
         let client = reqwest::Client::new();
         let txn_id = uuid::Uuid::new_v4().to_string();
 
@@ -116,14 +116,14 @@ impl Channel for MatrixChannel {
         client
             .put(format!(
                 "{}/_matrix/client/r0/rooms/{}/send/m.room.message/{}",
-                &self.homeserver, &message.chat_id, &txn_id
+                self.homeserver, message.chat_id, txn_id
             ))
-            .header("Authorization", format!("Bearer {}", &self.access_token))
+            .header("Authorization", format!("Bearer {}", self.access_token))
             .json(&body)
             .send()
             .await?;
 
-        Ok(())
+        Ok(None)
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {

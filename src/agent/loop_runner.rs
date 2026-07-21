@@ -409,12 +409,125 @@ impl AgentRunner {
         Ok(())
     }
 
+    pub async fn run_with_runtime_rx(
+        &self,
+        channel: &mut dyn Channel,
+        mut extra_rx: mpsc::Receiver<IncomingMessage>,
+        mut cron_rx: mpsc::Receiver<crate::cron_scheduler::DueJob>,
+        scheduler: Arc<crate::cron_scheduler::CronScheduler>,
+    ) -> anyhow::Result<()> {
+        let mut rx = channel.start().await?;
+        loop {
+            enum RuntimeInput {
+                Message(IncomingMessage),
+                Cron(crate::cron_scheduler::DueJob),
+            }
+            let input = tokio::select! {
+                Some(msg) = rx.recv() => RuntimeInput::Message(msg),
+                Some(msg) = extra_rx.recv() => RuntimeInput::Message(msg),
+                Some(job) = cron_rx.recv() => RuntimeInput::Cron(job),
+                else => break,
+            };
+            match input {
+                RuntimeInput::Message(msg) => {
+                    let _ = channel.send_typing(&msg.chat_id).await;
+                    match self.handle_message(&msg, channel).await {
+                        Ok(response) if !response.trim().is_empty() => {
+                            channel
+                                .send(OutgoingMessage {
+                                    chat_id: msg.chat_id,
+                                    text: response,
+                                    reply_to: Some(msg.id),
+                                })
+                                .await?;
+                        }
+                        Ok(_) => {}
+                        Err(error) if msg.sender_id != "system" => {
+                            channel
+                                .send(OutgoingMessage {
+                                    chat_id: msg.chat_id,
+                                    text: format!("Error: {error}"),
+                                    reply_to: Some(msg.id),
+                                })
+                                .await?;
+                        }
+                        Err(error) => tracing::error!("Error handling message: {error}"),
+                    }
+                }
+                RuntimeInput::Cron(due) => {
+                    let job = due.job;
+                    let job_id = job.id.clone().unwrap_or_default();
+                    let run_token = job.run_token.clone().unwrap_or_default();
+                    if job.channel != channel.name() {
+                        scheduler.release_run(&job_id, &run_token).await?;
+                        continue;
+                    }
+                    let msg = IncomingMessage {
+                        id: format!("cron-{job_id}"),
+                        sender_id: "scheduler".to_string(),
+                        sender_name: Some("Scheduler".to_string()),
+                        chat_id: job.chat_id.clone(),
+                        text: job.task.clone(),
+                        is_group: false,
+                        reply_to: None,
+                        timestamp: chrono::Utc::now(),
+                    };
+                    match self
+                        .handle_message_with_model(
+                            &msg,
+                            channel,
+                            (!job.model.is_empty()).then_some(job.model.as_str()),
+                        )
+                        .await
+                    {
+                        Ok(response) => {
+                            if !response.trim().is_empty() {
+                                if let Err(error) = channel
+                                    .send(OutgoingMessage {
+                                        chat_id: job.chat_id,
+                                        text: response,
+                                        reply_to: None,
+                                    })
+                                    .await
+                                {
+                                    scheduler
+                                        .fail_run(&job_id, &run_token, &error.to_string())
+                                        .await?;
+                                    continue;
+                                }
+                            }
+                            scheduler
+                                .mark_run(&job_id, &run_token, &job.schedule)
+                                .await?;
+                        }
+                        Err(error) => {
+                            scheduler
+                                .fail_run(&job_id, &run_token, &error.to_string())
+                                .await?
+                        }
+                    }
+                }
+            }
+        }
+        channel.stop().await?;
+        Ok(())
+    }
+
     // ── Handle single message ──
 
     pub async fn handle_message(
         &self,
         msg: &IncomingMessage,
         channel: &dyn Channel,
+    ) -> anyhow::Result<String> {
+        self.handle_message_with_model(msg, channel, None).await
+    }
+
+    pub async fn handle_message_with_model(
+        &self,
+        msg: &IncomingMessage,
+        channel: &dyn Channel,
+        model: Option<&str>,
     ) -> anyhow::Result<String> {
         let stream = self.stream_sink();
         emit(
@@ -583,7 +696,9 @@ impl AgentRunner {
         let tool_specs: Vec<crate::tools::ToolSpec> =
             self.tools.read().await.iter().map(|t| t.spec()).collect();
         let tools_snapshot: Vec<Arc<dyn Tool>> = self.tools.read().await.iter().cloned().collect();
-        let main_model = self.model.read().unwrap().clone();
+        let main_model = model
+            .map(str::to_string)
+            .unwrap_or_else(|| self.model.read().unwrap().clone());
 
         // ═══════════════════════════════════════════════════════
         // STATE MACHINE: Planning → Executing → Summarizing
@@ -638,7 +753,7 @@ impl AgentRunner {
                 User request: {request}",
                 swarm_choice = swarm_model_choice,
                 tools = tool_specs.iter().map(|t| format!("{} ({})", t.name, t.description.chars().take(50).collect::<String>())).collect::<Vec<_>>().join(", "),
-                request = &effective_text
+                request = effective_text
             );
 
             let plan_messages = [ChatMessage::user(&plan_prompt)];

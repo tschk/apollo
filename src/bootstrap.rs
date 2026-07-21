@@ -223,6 +223,11 @@ pub fn build_base_tools(
     }
     #[cfg(feature = "peekaboo")]
     tools.push(Arc::new(crate::tools::PeekabooTool));
+    #[cfg(feature = "computer-use-praefectus")]
+    match crate::tools::praefectus::PraefectusTool::new(workspace, Arc::clone(&policy)) {
+        Ok(tool) => tools.push(Arc::new(tool)),
+        Err(error) => tracing::error!("failed to initialize Praefectus: {error}"),
+    }
     #[cfg(feature = "rs-gbrain")]
     if cfg.rs_gbrain.enabled {
         tools.push(Arc::new(crate::tools::rs_gbrain::BrainSearchTool));

@@ -75,7 +75,7 @@ impl Channel for TeamsChannel {
         Ok(rx)
     }
 
-    async fn send(&self, message: OutgoingMessage) -> anyhow::Result<()> {
+    async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
         let client = reqwest::Client::new();
 
         // Get Bot Framework token
@@ -101,14 +101,14 @@ impl Channel for TeamsChannel {
         client
             .post(format!(
                 "https://smba.trafficmanager.net/teams/v3/conversations/{}/activities",
-                &message.chat_id
+                message.chat_id
             ))
             .header("Authorization", format!("Bearer {}", token))
             .json(&body)
             .send()
             .await?;
 
-        Ok(())
+        Ok(None)
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {

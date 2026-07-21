@@ -36,6 +36,7 @@ pub mod policy;
 pub mod process_cmd;
 pub mod prompt;
 pub mod providers;
+pub mod redaction;
 pub mod scheduler;
 pub mod self_update;
 pub mod skills;

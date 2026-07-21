@@ -22,13 +22,13 @@ pub struct ToolResult {
 impl ToolResult {
     pub fn success(output: impl Into<String>) -> Self {
         Self {
-            output: output.into(),
+            output: crate::redaction::redact_text(&output.into()),
             is_error: false,
         }
     }
     pub fn error(output: impl Into<String>) -> Self {
         Self {
-            output: output.into(),
+            output: crate::redaction::redact_text(&output.into()),
             is_error: true,
         }
     }

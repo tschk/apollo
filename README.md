@@ -35,7 +35,8 @@ SiliconFlow, Cerebras, MiniMax, Vercel, Cloudflare
 ### Tools
 shell, file_ops (read/write/list), edit, web_search, web_fetch, vibemania (subspace
 coding agent), dynamic tools, MCP bridge, session management, cron scheduling,
-browser automation, message send, config management, mode switching, brief summary
+browser automation, message send, config management, mode switching, brief summary,
+and feature-gated signed desktop actions through Praefectus
 
 ### Memory
 - SurrealDB + RocksDB backend with conversation history, FTS5, vector embeddings
@@ -51,7 +52,7 @@ browser automation, message send, config management, mode switching, brief summa
 - **Trajectory export** — ReAct step serialization (thought→action→observation)
   for RL training data
 - **Agent swarm** — parallel sub-agent spawning for distributed task execution
-- **Cron scheduler** — SurrealDB-backed recurring tasks with in-memory fallback
+- **Cron scheduler** — SurrealDB-backed recurring and one-shot tasks with execution leases, retries, and in-memory fallback
 - **Plugin system** — JSON-RPC 2.0 + lifecycle hooks (pre/post tool, session events)
 - **Hot-reloadable tools, skills, and system prompt**
 - **Self-update** — git poll + rebuild + optional restart

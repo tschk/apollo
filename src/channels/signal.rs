@@ -43,7 +43,7 @@ impl Channel for SignalChannel {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
                 let resp = client
-                    .get(format!("{}/v1/receive/{}", &api_url, &phone))
+                    .get(format!("{}/v1/receive/{}", api_url, phone))
                     .send()
                     .await;
 
@@ -83,7 +83,7 @@ impl Channel for SignalChannel {
         Ok(rx)
     }
 
-    async fn send(&self, message: OutgoingMessage) -> anyhow::Result<()> {
+    async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
         let client = reqwest::Client::new();
 
         let body = serde_json::json!({
@@ -93,12 +93,12 @@ impl Channel for SignalChannel {
         });
 
         client
-            .post(format!("{}/v2/send", &self.api_url))
+            .post(format!("{}/v2/send", self.api_url))
             .json(&body)
             .send()
             .await?;
 
-        Ok(())
+        Ok(None)
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {

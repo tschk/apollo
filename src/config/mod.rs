@@ -171,6 +171,7 @@ pub struct PolicyConfig {
     pub allow_dynamic_tools: bool,
     pub allow_plugin_shell: bool,
     pub allow_plugin_git: bool,
+    pub allow_computer_use: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +258,7 @@ pub fn apply_permission_profile(cfg: &mut Config, profile: &str) {
             cfg.agent.permission_profile = "full".to_string();
             cfg.policy.allow_shell = true;
             cfg.policy.allow_dynamic_tools = true;
+            cfg.policy.allow_computer_use = true;
             cfg.toolsets = ToolsetConfig::default();
             cfg.agent.permissions = PermissionRulesConfig::default();
         }
@@ -276,6 +278,7 @@ pub fn apply_permission_profile(cfg: &mut Config, profile: &str) {
             cfg.agent.permission_profile = "tools_only".to_string();
             cfg.policy.allow_shell = false;
             cfg.policy.allow_dynamic_tools = false;
+            cfg.policy.allow_computer_use = false;
             cfg.toolsets.enabled = vec![
                 "web".to_string(),
                 "memory".to_string(),
@@ -443,8 +446,9 @@ impl Default for PolicyConfig {
         Self {
             allow_shell: true,
             allow_dynamic_tools: true,
-            allow_plugin_shell: false,
-            allow_plugin_git: false,
+            allow_plugin_shell: true,
+            allow_plugin_git: true,
+            allow_computer_use: true,
         }
     }
 }
