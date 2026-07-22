@@ -1,6 +1,6 @@
 [package]
 name = "unthinkclaw"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Local-first Rust AI agent runtime — Telegram-first, trait-driven, SurrealDB + RocksDB state layer."
 license = "MIT"
@@ -73,7 +73,7 @@ computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 # providers, sessions, skills, memory, guardrails, and MCP support.
 # Used during the migration from unthinkclaw's built-in agent loop to rx4's
 # harness.
-rx4 = { version = "0.3.21", default-features = false, features = ["ipc", "builtin-tools", "providers", "mcp", "skills", "graph-memory"] }
+rx4 = { version = "0.3.23", default-features = false, features = ["ipc", "builtin-tools", "providers", "mcp", "skills", "graph-memory"] }
 
 # Async runtime (optimized features only)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }
