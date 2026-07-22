@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use zkr::{ClaimInput, MemoryProcessingState, MemoryTier};
 
 use super::{Tool, ToolResult, ToolSpec};
 use crate::memory::zkr::{claim_kind, source_kind, ZkrStore};
@@ -79,17 +80,17 @@ impl Tool for ZkrTool {
                     .text
                     .ok_or_else(|| anyhow::anyhow!("text is required"))?;
                 let claim = match (args.subject, args.predicate, args.value, args.claim_kind) {
-                    (Some(subject), Some(predicate), Some(value), Some(kind)) => {
-                        Some(zkr::ClaimInput {
-                            subject,
-                            predicate,
-                            value,
-                            kind: claim_kind(&kind)?,
-                            valid_from: args
-                                .valid_from
-                                .unwrap_or_else(|| chrono::Utc::now().timestamp()),
-                        })
-                    }
+                    (Some(subject), Some(predicate), Some(value), Some(kind)) => Some(ClaimInput {
+                        subject,
+                        predicate,
+                        value,
+                        kind: claim_kind(&kind)?,
+                        valid_from: args
+                            .valid_from
+                            .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                        tier: MemoryTier::LongTerm,
+                        processing_state: MemoryProcessingState::Processed,
+                    }),
                     (None, None, None, None) => None,
                     _ => anyhow::bail!(
                         "subject, predicate, value, and claim_kind must be provided together"
