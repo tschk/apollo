@@ -110,6 +110,7 @@ impl PraefectusRuntime {
                     protocol_version: PROTOCOL_VERSION,
                     action_version: 1,
                     target_version: 1,
+                    verification_version: PROTOCOL_VERSION,
                     operation_id: operation_id.clone(),
                     subject: "local-user".to_string(),
                     session_id: "unthinkclaw".to_string(),
