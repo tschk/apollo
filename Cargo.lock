@@ -4091,9 +4091,9 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rx4"
-version = "0.3.20"
+version = "0.3.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6eb3e67a978bf412532432399529042762188e677622758c5685dbd9c741ee9b"
+checksum = "11f111d9be4f4882f5d836338e79b344b1bb23666fc4433129441d2d160e1e08"
 dependencies = [
  "async-trait",
  "cancellation-token",
