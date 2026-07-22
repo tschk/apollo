@@ -4,9 +4,10 @@
 //! lifecycle hooks.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
@@ -566,12 +567,11 @@ impl AgentRunner {
         {
             let mut trajs = self.trajectories.write().await;
             if !trajs.contains_key(&msg.chat_id) {
-                let mut t = Trajectory::new(
+                let t = Trajectory::new(
                     format!("traj_{}", chrono::Utc::now().timestamp()),
                     msg.chat_id.clone(),
                     self.get_model(),
                 );
-                t.metadata.insert("task".to_string(), msg.text.clone());
                 trajs.insert(msg.chat_id.clone(), t);
             }
         }
@@ -1666,10 +1666,9 @@ impl AgentRunner {
     }
 
     /// Save trajectory to disk
-    pub async fn save_trajectory(&self, chat_id: &str, dir: &PathBuf) -> anyhow::Result<()> {
+    pub async fn save_trajectory(&self, chat_id: &str, dir: &Path) -> anyhow::Result<()> {
         if let Some(traj) = self.get_trajectory(chat_id).await {
-            std::fs::create_dir_all(dir)?;
-            let path = dir.join(format!("traj_{}.json", chat_id));
+            let path = dir.join(trajectory_filename(chat_id));
             traj.save_to_file(&path)?;
             tracing::info!("Trajectory saved: {:?}", path);
         }
@@ -1678,6 +1677,10 @@ impl AgentRunner {
 }
 
 // ── Helper ──
+
+fn trajectory_filename(chat_id: &str) -> String {
+    format!("traj_{:x}.json", Sha256::digest(chat_id.as_bytes()))
+}
 
 fn extract_tool_hint(name: &str, arguments: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
@@ -1722,7 +1725,25 @@ fn automatic_retry_allowed(tool: &str, output: &str) -> bool {
 
 #[cfg(test)]
 mod retry_tests {
-    use super::automatic_retry_allowed;
+    use std::path::Path;
+
+    use super::{automatic_retry_allowed, trajectory_filename};
+
+    #[test]
+    fn trajectory_filename_confines_external_chat_ids() {
+        let filename = trajectory_filename("x/../../outside");
+        assert_eq!(
+            Path::new(&filename).parent(),
+            Some(Path::new("")),
+            "trajectory filename must be one path component"
+        );
+        assert_eq!(filename.len(), "traj_".len() + 64 + ".json".len());
+        assert!(filename.starts_with("traj_"));
+        assert!(filename.ends_with(".json"));
+        assert!(!filename.contains(".."));
+        assert!(!filename.contains('/'));
+        assert!(!filename.contains('\\'));
+    }
 
     #[test]
     fn praefectus_uncertainty_is_not_automatically_retried() {

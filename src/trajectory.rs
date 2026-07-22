@@ -9,6 +9,10 @@
 //! large-scale training pipelines need direct export.
 
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::io::Write;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -95,7 +99,8 @@ impl Trajectory {
     }
 
     /// Add a ReAct step to the trajectory.
-    pub fn add_step(&mut self, step: TrajectoryStep) {
+    pub fn add_step(&mut self, mut step: TrajectoryStep) {
+        redact_step(&mut step);
         if step.action.is_some() {
             self.tool_calls += 1;
         }
@@ -124,13 +129,14 @@ impl Trajectory {
 
     /// Record the final text response for the current step (used by loop_runner).
     pub fn record_response(&mut self, response: String) {
+        let response_len = response.len();
         // Record as a message
         self.add_message("assistant", &response, None, None);
-        self.total_tokens += response.len();
+        self.total_tokens += response_len;
 
         // Also update the last step's response if applicable
         if let Some(step) = self.steps.last_mut() {
-            step.response = Some(response);
+            step.response = Some("[REDACTED]".to_string());
         }
     }
 
@@ -144,7 +150,7 @@ impl Trajectory {
     ) {
         self.messages.push(TrajectoryMessage {
             role: role.to_string(),
-            content: content.to_string(),
+            content: redacted(content),
             tool_call_id: tool_call_id.map(|s| s.to_string()),
             tool_name: tool_name.map(|s| s.to_string()),
         });
@@ -152,7 +158,18 @@ impl Trajectory {
 
     /// Serialize to pretty JSON.
     pub fn to_json(&self) -> anyhow::Result<String> {
-        Ok(serde_json::to_string_pretty(self)?)
+        let mut trajectory = self.clone();
+        trajectory
+            .metadata
+            .values_mut()
+            .for_each(|value| *value = "[REDACTED]".to_string());
+        trajectory.steps.iter_mut().for_each(redact_step);
+        trajectory.messages.iter_mut().for_each(|message| {
+            if !message.content.is_empty() {
+                message.content = "[REDACTED]".to_string();
+            }
+        });
+        Ok(serde_json::to_string_pretty(&trajectory)?)
     }
 
     /// Save to a JSON file (alias for save). Creates parent directories.
@@ -162,13 +179,7 @@ impl Trajectory {
 
     /// Save to a JSON file. Creates parent directories.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        let json = self.to_json()?;
-        std::fs::write(path, &json)?;
+        save_private(path, self.to_json()?.as_bytes())?;
         tracing::info!(
             "Trajectory saved to {:?} ({} steps, {} tokens, {} msgs)",
             path,
@@ -203,7 +214,7 @@ impl TrajectoryCollector {
             step: self.trajectory.steps.len() + 1,
             thought: None,
             action: Some(action.to_string()),
-            action_args: Some(action_args.to_string()),
+            action_args: Some(redacted(action_args)),
             observation: None,
             response: None,
             success: false,
@@ -214,7 +225,7 @@ impl TrajectoryCollector {
     /// Complete the current step with an observation.
     pub fn complete_step(&mut self, observation: &str, success: bool) {
         if let Some(mut step) = self.current_step.take() {
-            step.observation = Some(observation.to_string());
+            step.observation = Some(redacted(observation));
             step.success = success;
             self.trajectory.add_step(step);
         }
@@ -223,7 +234,7 @@ impl TrajectoryCollector {
     /// Mark the current step as failed.
     pub fn fail_step(&mut self, error: &str) {
         if let Some(mut step) = self.current_step.take() {
-            step.observation = Some(format!("Error: {}", error));
+            step.observation = Some(redacted(error));
             step.success = false;
             self.trajectory.add_step(step);
         }
@@ -232,14 +243,14 @@ impl TrajectoryCollector {
     /// Attach a thought to the current step.
     pub fn set_thought(&mut self, thought: &str) {
         if let Some(ref mut step) = self.current_step {
-            step.thought = Some(thought.to_string());
+            step.thought = Some(redacted(thought));
         }
     }
 
     /// Attach a final response to the current step.
     pub fn set_response(&mut self, response: &str) {
         if let Some(ref mut step) = self.current_step {
-            step.response = Some(response.to_string());
+            step.response = Some(redacted(response));
         }
     }
 
@@ -271,6 +282,79 @@ impl TrajectoryCollector {
     pub fn to_json(&self) -> anyhow::Result<String> {
         self.trajectory.to_json()
     }
+}
+
+fn redact_step(step: &mut TrajectoryStep) {
+    for value in [
+        &mut step.thought,
+        &mut step.action_args,
+        &mut step.observation,
+        &mut step.response,
+    ] {
+        if value.as_deref().is_some_and(|value| !value.is_empty()) {
+            *value = Some("[REDACTED]".to_string());
+        }
+    }
+}
+
+fn redacted(value: &str) -> String {
+    if value.is_empty() {
+        String::new()
+    } else {
+        "[REDACTED]".to_string()
+    }
+}
+
+#[cfg(unix)]
+fn save_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("trajectory path requires a private parent directory"))?;
+    match std::fs::symlink_metadata(parent) {
+        Ok(metadata) => validate_private_directory(&metadata)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(parent)?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            validate_private_directory(&std::fs::symlink_metadata(parent)?)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let mut options = OpenOptions::new();
+    options
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW);
+    let mut file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
+        anyhow::bail!("trajectory file is not private");
+    }
+    file.set_len(0)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_private_directory(metadata: &std::fs::Metadata) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.mode() & 0o077 != 0 {
+        anyhow::bail!("trajectory directory is not private");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn save_private(_path: &Path, _contents: &[u8]) -> anyhow::Result<()> {
+    anyhow::bail!("private trajectory persistence is unavailable on this platform")
 }
 
 #[cfg(test)]
@@ -342,5 +426,93 @@ mod tests {
         let parsed: Trajectory = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.steps.len(), 1);
         assert_eq!(parsed.tool_calls, 1);
+    }
+
+    #[test]
+    fn trajectory_json_redacts_all_freeform_text() {
+        let mut trajectory = Trajectory::new("test-4", "session-4", "model");
+        trajectory
+            .metadata
+            .insert("task".to_string(), "clipboard secret".to_string());
+        trajectory.add_step(TrajectoryStep {
+            step: 1,
+            thought: Some("credential thought".to_string()),
+            action: Some("praefectus".to_string()),
+            action_args: Some(r#"{"value":"typed secret"}"#.to_string()),
+            observation: Some("private selector".to_string()),
+            response: Some("repeated secret".to_string()),
+            success: false,
+        });
+        trajectory.add_message("user", "raw task secret", None, None);
+
+        let json = trajectory.to_json().expect("trajectory should serialize");
+        for secret in [
+            "clipboard secret",
+            "credential thought",
+            "typed secret",
+            "private selector",
+            "repeated secret",
+            "raw task secret",
+        ] {
+            assert!(!json.contains(secret));
+        }
+        assert!(json.contains("[REDACTED]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trajectory_save_creates_private_durable_storage() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temporary directory should open");
+        let path = root.path().join("private").join("trajectory.json");
+        Trajectory::new("test-5", "session-5", "model")
+            .save(&path)
+            .expect("private trajectory should save");
+
+        assert_eq!(
+            std::fs::metadata(path.parent().expect("parent should exist"))
+                .expect("directory metadata should load")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("file metadata should load")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trajectory_save_rejects_public_or_linked_storage() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().expect("temporary directory should open");
+        let public = root.path().join("public");
+        std::fs::create_dir(&public).expect("public directory should create");
+        std::fs::set_permissions(&public, std::fs::Permissions::from_mode(0o755))
+            .expect("public permissions should set");
+        let trajectory = Trajectory::new("test-6", "session-6", "model");
+        assert!(trajectory.save(&public.join("trajectory.json")).is_err());
+
+        let private = root.path().join("private");
+        std::fs::create_dir(&private).expect("private directory should create");
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+            .expect("private permissions should set");
+        let destination = private.join("destination.json");
+        std::fs::write(&destination, "existing").expect("destination should create");
+        let linked = private.join("trajectory.json");
+        symlink(&destination, &linked).expect("link should create");
+        assert!(trajectory.save(&linked).is_err());
+        assert_eq!(
+            std::fs::read_to_string(destination).expect("destination should remain readable"),
+            "existing"
+        );
     }
 }

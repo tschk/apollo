@@ -118,6 +118,7 @@ rand = "0.8"
 
 # Faster synchronization primitives
 parking_lot = "0.12"
+libc = "0.2"
 
 # File system watcher (hot reload for tools/skills/memory)
 notify = { version = "6", features = ["serde"] }

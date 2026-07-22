@@ -21,9 +21,14 @@ use crate::policy::ExecutionPolicy;
 
 const ACTION_WINDOW_MS: i64 = 30_000;
 
+#[cfg(test)]
+type BeforeCore = Arc<dyn Fn(&CancellationToken) + Send + Sync>;
+
 pub struct PraefectusTool {
     runtime: Arc<PraefectusRuntime>,
     policy: Arc<ExecutionPolicy>,
+    #[cfg(test)]
+    before_core: Option<BeforeCore>,
 }
 
 struct PraefectusRuntime {
@@ -73,6 +78,39 @@ struct RuntimeOutput {
     is_error: bool,
 }
 
+struct HostCancellation(Option<CancellationToken>);
+
+impl HostCancellation {
+    fn new(token: CancellationToken) -> Self {
+        Self(Some(token))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for HostCancellation {
+    fn drop(&mut self) {
+        if let Some(token) = self.0.take() {
+            token.cancel();
+        }
+    }
+}
+
+async fn run_cancellable_operation<F>(operation: F) -> anyhow::Result<RuntimeOutput>
+where
+    F: FnOnce(&CancellationToken) -> anyhow::Result<RuntimeOutput> + Send + 'static,
+{
+    let cancellation = CancellationToken::default();
+    let mut host_cancellation = HostCancellation::new(cancellation.clone());
+    let result = tokio::task::spawn_blocking(move || operation(&cancellation)).await;
+    if result.is_ok() {
+        host_cancellation.disarm();
+    }
+    result?
+}
+
 impl PraefectusTool {
     pub fn new(workspace: &Path, policy: Arc<ExecutionPolicy>) -> anyhow::Result<Self> {
         let workspace = std::fs::canonicalize(workspace)?;
@@ -97,12 +135,18 @@ impl PraefectusTool {
                 session_id: format!("workspace:{}", value_hash(&workspace.to_string_lossy())),
             }),
             policy,
+            #[cfg(test)]
+            before_core: None,
         })
     }
 }
 
 impl PraefectusRuntime {
-    fn execute(&self, args: PraefectusArgs) -> anyhow::Result<RuntimeOutput> {
+    fn execute(
+        &self,
+        args: PraefectusArgs,
+        cancellation: &CancellationToken,
+    ) -> anyhow::Result<RuntimeOutput> {
         match args {
             PraefectusArgs::Capabilities {} => Ok(RuntimeOutput {
                 output: serde_json::to_string(&self.engine.capabilities()?)?,
@@ -112,7 +156,7 @@ impl PraefectusRuntime {
                 let deadline_at_ms = now_ms()?.saturating_add(ACTION_WINDOW_MS);
                 let observation = self
                     .observer
-                    .observe_semantic(&CancellationToken::default(), deadline_at_ms)?;
+                    .observe_semantic(cancellation, deadline_at_ms)?;
                 Ok(RuntimeOutput {
                     output: serde_json::to_string(&tool_observation(&observation)?)?,
                     is_error: false,
@@ -139,9 +183,7 @@ impl PraefectusRuntime {
                     &self.signing_key,
                     &self.session_id,
                 )?;
-                let report = self
-                    .engine
-                    .execute(&request, &CancellationToken::default())?;
+                let report = self.engine.execute(&request, cancellation)?;
                 let is_error = !report_succeeded(&report);
                 let output = serde_json::to_string(&json!({
                     "report": report,
@@ -366,7 +408,17 @@ impl Tool for PraefectusTool {
         }
         let args: PraefectusArgs = serde_json::from_str(arguments)?;
         let runtime = Arc::clone(&self.runtime);
-        match tokio::task::spawn_blocking(move || runtime.execute(args)).await? {
+        #[cfg(test)]
+        let before_core = self.before_core.clone();
+        match run_cancellable_operation(move |cancellation| {
+            #[cfg(test)]
+            if let Some(before_core) = before_core {
+                before_core(cancellation);
+            }
+            runtime.execute(args, cancellation)
+        })
+        .await
+        {
             Ok(output) if output.is_error => Ok(ToolResult::error(output.output)),
             Ok(output) => Ok(ToolResult::success(output.output)),
             Err(error) => Ok(ToolResult::error(error.to_string())),
@@ -442,6 +494,64 @@ mod tests {
             .await
             .expect("policy denial should be a tool result");
         assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn aborted_host_execution_cancels_the_active_core_token() {
+        let dir = tempfile::tempdir().expect("temporary directory should open");
+        let mut tool = PraefectusTool::new(dir.path(), Arc::new(ExecutionPolicy::default()))
+            .expect("tool should initialize");
+        let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel();
+        tool.before_core = Some(Arc::new(move |cancellation| {
+            token_tx
+                .send(cancellation.clone())
+                .expect("host should receive core token");
+            while !cancellation.is_cancelled() {
+                std::thread::yield_now();
+            }
+        }));
+        let tool = Arc::new(tool);
+        let execution =
+            tokio::spawn(async move { tool.execute(r#"{"action":"capabilities"}"#).await });
+        let core_token = token_rx
+            .recv()
+            .await
+            .expect("blocking execution should expose its core token");
+
+        execution.abort();
+        let join_error = match execution.await {
+            Ok(_) => panic!("host execution should abort"),
+            Err(error) => error,
+        };
+        assert!(join_error.is_cancelled(), "host future must be cancelled");
+        assert!(core_token.is_cancelled());
+    }
+
+    #[test]
+    fn host_cancellation_reaches_praefectus_before_effect() {
+        let dir = tempfile::tempdir().expect("temporary directory should open");
+        let tool = PraefectusTool::new(dir.path(), Arc::new(ExecutionPolicy::default()))
+            .expect("tool should initialize");
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let result = tool
+            .runtime
+            .execute(
+                PraefectusArgs::Execute {
+                    operation_id: "cancelled:operation".to_string(),
+                    deadline_at_ms: now_ms()
+                        .expect("time should resolve")
+                        .saturating_add(ACTION_WINDOW_MS),
+                    interaction_mode: InteractionMode::Interactive,
+                    desktop_action: Action::Invoke,
+                    target: target(),
+                },
+                &cancellation,
+            )
+            .expect("cancellation should produce a terminal report");
+
+        assert!(result.is_error);
+        assert!(result.output.contains("cancelled_before_effect"));
     }
 
     #[test]
