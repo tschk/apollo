@@ -28,8 +28,6 @@ pub mod mcp;
 pub mod message;
 pub mod mode_switch;
 pub mod network;
-#[cfg(feature = "peekaboo")]
-pub mod peekaboo;
 #[cfg(feature = "computer-use-praefectus")]
 pub mod praefectus;
 pub mod sandbox;
@@ -60,8 +58,6 @@ pub use brief::BriefTool;
 pub use coding_swarm::CodingSwarmTool;
 pub use config_tool::ConfigTool;
 pub use cron_tool::CronTool;
-#[cfg(feature = "peekaboo")]
-pub use peekaboo::PeekabooTool;
 pub use sleep_tool::SleepTool;
 pub use todo_write::TodoWriteTool;
 pub use tool_search::ToolSearchTool;

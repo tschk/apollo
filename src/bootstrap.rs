@@ -222,8 +222,6 @@ pub fn build_base_tools(
         )));
         tools.push(Arc::new(EmbeddingSearchTool::new(provider, memory)));
     }
-    #[cfg(feature = "peekaboo")]
-    tools.push(Arc::new(crate::tools::PeekabooTool));
     #[cfg(feature = "computer-use-praefectus")]
     match crate::tools::praefectus::PraefectusTool::new(workspace, Arc::clone(&policy)) {
         Ok(tool) => tools.push(Arc::new(tool)),

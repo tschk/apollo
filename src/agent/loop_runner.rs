@@ -1222,8 +1222,8 @@ impl AgentRunner {
                         t.record_tool_step(
                             response.text.clone(),
                             tc.name.clone(),
-                            tc.arguments.clone(),
-                            result.output.clone(),
+                            crate::redaction::redact_tool_payload(&tc.name, &tc.arguments),
+                            crate::redaction::redact_tool_payload(&tc.name, &result.output),
                             !result.is_error,
                         );
                     }
@@ -1247,7 +1247,7 @@ impl AgentRunner {
                 }
 
                 // ── Self-healing: track tool errors for re-prompt ──
-                if result.is_error {
+                if result.is_error && automatic_retry_allowed(&tc.name, &result.output) {
                     tool_errors.push(format!(
                         "'{}' failed: {}",
                         tc.name,
@@ -1710,4 +1710,31 @@ fn extract_tool_hint(name: &str, arguments: &str) -> String {
         }
     })
     .unwrap_or_default()
+}
+
+fn automatic_retry_allowed(tool: &str, output: &str) -> bool {
+    tool != "praefectus"
+        || serde_json::from_str::<serde_json::Value>(output)
+            .ok()
+            .and_then(|value| value.get("retry_safe")?.as_bool())
+            == Some(true)
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::automatic_retry_allowed;
+
+    #[test]
+    fn praefectus_uncertainty_is_not_automatically_retried() {
+        assert!(!automatic_retry_allowed(
+            "praefectus",
+            r#"{"retry_safe":false}"#
+        ));
+        assert!(!automatic_retry_allowed("praefectus", "unstructured error"));
+        assert!(automatic_retry_allowed(
+            "praefectus",
+            r#"{"retry_safe":true}"#
+        ));
+        assert!(automatic_retry_allowed("shell", "failed"));
+    }
 }

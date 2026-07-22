@@ -1,19 +1,25 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ed25519_dalek::{Signer, SigningKey};
+use praefectus::semantic::{SemanticObservation, SemanticTargetRef};
 use praefectus::{
-    canonical_authority_bytes, normalized_action_hash, Action, ActionRequest, AuthorityGrant,
-    CancellationToken, Ed25519AuthorityVerifier, Engine, NativeExecutor, SafetyClass,
-    SignedAuthority, TargetRef, VerificationPolicy, PROTOCOL_VERSION,
+    canonical_authority_bytes, normalized_action_hash, AckState, Action, ActionRequest,
+    AuthorityGrant, CancellationToken, Ed25519AuthorityVerifier, Engine, ExecuteReport,
+    InteractionMode, NativeExecutor, SafetyClass, SignedAuthority, TargetRef, Terminal,
+    VerificationPolicy, PROTOCOL_VERSION,
 };
 use rand::rngs::OsRng;
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use super::{Tool, ToolResult, ToolSpec};
 use crate::policy::ExecutionPolicy;
+
+const ACTION_WINDOW_MS: i64 = 30_000;
 
 pub struct PraefectusTool {
     runtime: Arc<PraefectusRuntime>,
@@ -24,39 +30,71 @@ struct PraefectusRuntime {
     engine: Engine<NativeExecutor>,
     observer: NativeExecutor,
     signing_key: SigningKey,
+    session_id: String,
 }
 
 #[derive(Deserialize)]
-struct PraefectusArgs {
-    action: String,
-    x: Option<i64>,
-    y: Option<i64>,
-    operation_id: Option<String>,
-    desktop_action: Option<Value>,
-    target: Option<Value>,
-    verification: Option<Value>,
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum PraefectusArgs {
+    Capabilities {},
+    Observe {},
+    Execute {
+        operation_id: String,
+        deadline_at_ms: i64,
+        interaction_mode: InteractionMode,
+        desktop_action: Action,
+        target: SemanticTargetRef,
+    },
+}
+
+#[derive(Serialize)]
+struct SemanticToolObservation {
+    protocol_version: u16,
+    observation_id: String,
+    generation: u64,
+    provenance_hash: String,
+    observed_at_ms: i64,
+    expires_at_ms: i64,
+    truncated: bool,
+    elements: Vec<SemanticToolElement>,
+}
+
+#[derive(Serialize)]
+struct SemanticToolElement {
+    tag: String,
+    role: String,
+    name: Option<String>,
+    actionability: praefectus::semantic::Actionability,
+    target: SemanticTargetRef,
+}
+
+struct RuntimeOutput {
+    output: String,
+    is_error: bool,
 }
 
 impl PraefectusTool {
     pub fn new(workspace: &Path, policy: Arc<ExecutionPolicy>) -> anyhow::Result<Self> {
-        let state_dir = workspace.join(".unthinkclaw");
-        std::fs::create_dir_all(&state_dir)?;
+        let workspace = std::fs::canonicalize(workspace)?;
         let signing_key = SigningKey::generate(&mut OsRng);
         let verifier = Ed25519AuthorityVerifier::new([(
             "unthinkclaw".to_string(),
-            "runtime".to_string(),
-            "1".to_string(),
+            "host-process".to_string(),
+            "computer-use-enabled-v2".to_string(),
             signing_key.verifying_key(),
-        )]);
+        )])?;
         Ok(Self {
             runtime: Arc::new(PraefectusRuntime {
                 engine: Engine::new(
                     NativeExecutor::default(),
-                    state_dir.join("praefectus-operations.jsonl"),
+                    workspace
+                        .join(".unthinkclaw")
+                        .join("praefectus-operations.jsonl"),
                     verifier,
                 ),
                 observer: NativeExecutor::default(),
                 signing_key,
+                session_id: format!("workspace:{}", value_hash(&workspace.to_string_lossy())),
             }),
             policy,
         })
@@ -64,91 +102,174 @@ impl PraefectusTool {
 }
 
 impl PraefectusRuntime {
-    fn execute(&self, args: PraefectusArgs) -> anyhow::Result<String> {
-        match args.action.as_str() {
-            "capabilities" => Ok(serde_json::to_string_pretty(&self.engine.capabilities()?)?),
-            "observe_coordinates" => Ok(serde_json::to_string_pretty(
-                &self.observer.observe_coordinates()?,
-            )?),
-            "observe_element" => {
-                let target = self.observer.observe_element_at(
-                    args.x.ok_or_else(|| anyhow::anyhow!("x is required"))?,
-                    args.y.ok_or_else(|| anyhow::anyhow!("y is required"))?,
-                )?;
-                Ok(serde_json::to_string_pretty(&target)?)
+    fn execute(&self, args: PraefectusArgs) -> anyhow::Result<RuntimeOutput> {
+        match args {
+            PraefectusArgs::Capabilities {} => Ok(RuntimeOutput {
+                output: serde_json::to_string(&self.engine.capabilities()?)?,
+                is_error: false,
+            }),
+            PraefectusArgs::Observe {} => {
+                let deadline_at_ms = now_ms()?.saturating_add(ACTION_WINDOW_MS);
+                let observation = self
+                    .observer
+                    .observe_semantic(&CancellationToken::default(), deadline_at_ms)?;
+                Ok(RuntimeOutput {
+                    output: serde_json::to_string(&tool_observation(&observation)?)?,
+                    is_error: false,
+                })
             }
-            "execute" => {
-                let action: Action = serde_json::from_value(
-                    args.desktop_action
-                        .ok_or_else(|| anyhow::anyhow!("desktop_action is required"))?,
-                )?;
-                if !matches!(
-                    action,
-                    Action::Click { .. } | Action::Move | Action::SetValue { .. }
-                ) {
-                    anyhow::bail!("praefectus native execution only permits fenced click, move, and set_value actions");
+            PraefectusArgs::Execute {
+                operation_id,
+                deadline_at_ms,
+                interaction_mode,
+                desktop_action,
+                target,
+            } => {
+                if !matches!(desktop_action, Action::Invoke | Action::SetValue { .. }) {
+                    anyhow::bail!(
+                        "praefectus execution only permits semantic invoke and set_value actions"
+                    );
                 }
-                let safety = match &action {
-                    Action::Move => SafetyClass::Reversible,
-                    Action::Click { .. } | Action::SetValue { .. } => SafetyClass::External,
-                    _ => unreachable!(),
-                };
-                let target: TargetRef = serde_json::from_value(
-                    args.target
-                        .ok_or_else(|| anyhow::anyhow!("target is required"))?,
-                )?;
-                let verification = args
-                    .verification
-                    .map(serde_json::from_value)
-                    .transpose()?
-                    .unwrap_or(VerificationPolicy::SnapshotChanged);
-                let now = chrono::Utc::now().timestamp_millis();
-                let operation_id = args
-                    .operation_id
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                let mut request = ActionRequest {
-                    protocol_version: PROTOCOL_VERSION,
-                    action_version: 1,
-                    target_version: 1,
-                    verification_version: PROTOCOL_VERSION,
-                    operation_id: operation_id.clone(),
-                    subject: "local-user".to_string(),
-                    session_id: "unthinkclaw".to_string(),
-                    authority: SignedAuthority {
-                        grant: AuthorityGrant {
-                            protocol_version: PROTOCOL_VERSION,
-                            issuer: "unthinkclaw".to_string(),
-                            key_id: "runtime".to_string(),
-                            operation_id,
-                            subject: "local-user".to_string(),
-                            session_id: "unthinkclaw".to_string(),
-                            risk: safety,
-                            expires_at_ms: now + 30_000,
-                            policy_generation: "1".to_string(),
-                            action_hash: String::new(),
-                        },
-                        signature: String::new(),
-                    },
-                    action,
+                let request = signed_request(
+                    desktop_action,
                     target,
-                    deadline_at_ms: now + 30_000,
-                    verification,
-                    safety,
-                };
-                request.authority.grant.action_hash = normalized_action_hash(&request)?;
-                let signature = self
-                    .signing_key
-                    .sign(&canonical_authority_bytes(&request.authority.grant)?);
-                request.authority.signature = encode_hex(&signature.to_bytes());
-                Ok(serde_json::to_string_pretty(
-                    &self
-                        .engine
-                        .execute(&request, &CancellationToken::default())?,
-                )?)
+                    operation_id,
+                    deadline_at_ms,
+                    interaction_mode,
+                    &self.signing_key,
+                    &self.session_id,
+                )?;
+                let report = self
+                    .engine
+                    .execute(&request, &CancellationToken::default())?;
+                let is_error = !report_succeeded(&report);
+                let output = serde_json::to_string(&json!({
+                    "report": report,
+                    "retry_safe": report_is_retry_safe(&report),
+                }))?;
+                Ok(RuntimeOutput { output, is_error })
             }
-            other => anyhow::bail!("unknown praefectus action: {other}"),
         }
     }
+}
+
+fn tool_observation(observation: &SemanticObservation) -> anyhow::Result<SemanticToolObservation> {
+    observation.validate(now_ms()?)?;
+    Ok(SemanticToolObservation {
+        protocol_version: observation.protocol_version,
+        observation_id: observation.observation_id.clone(),
+        generation: observation.generation,
+        provenance_hash: observation.provenance_hash()?,
+        observed_at_ms: observation.observed_at_ms,
+        expires_at_ms: observation.expires_at_ms,
+        truncated: observation.truncated,
+        elements: observation
+            .elements
+            .iter()
+            .map(|element| {
+                Ok(SemanticToolElement {
+                    tag: element.tag.clone(),
+                    role: element.role.clone(),
+                    name: element.name.clone(),
+                    actionability: element.actionability,
+                    target: observation.target(&element.tag)?,
+                })
+            })
+            .collect::<Result<_, praefectus::semantic::SemanticError>>()?,
+    })
+}
+
+fn signed_request(
+    action: Action,
+    target: SemanticTargetRef,
+    operation_id: String,
+    deadline_at_ms: i64,
+    interaction_mode: InteractionMode,
+    signing_key: &SigningKey,
+    session_id: &str,
+) -> anyhow::Result<ActionRequest> {
+    let safety = SafetyClass::External;
+    let subject = "local-host-user".to_string();
+    let authority_expires_at_ms = deadline_at_ms.min(now_ms()?.saturating_add(ACTION_WINDOW_MS));
+    let mut request = ActionRequest {
+        protocol_version: PROTOCOL_VERSION,
+        action_version: PROTOCOL_VERSION,
+        target_version: PROTOCOL_VERSION,
+        verification_version: PROTOCOL_VERSION,
+        operation_id: operation_id.clone(),
+        subject: subject.clone(),
+        session_id: session_id.to_string(),
+        authority: SignedAuthority {
+            grant: AuthorityGrant {
+                protocol_version: PROTOCOL_VERSION,
+                issuer: "unthinkclaw".to_string(),
+                key_id: "host-process".to_string(),
+                operation_id,
+                subject,
+                session_id: session_id.to_string(),
+                risk: safety,
+                expires_at_ms: authority_expires_at_ms,
+                policy_generation: "computer-use-enabled-v2".to_string(),
+                action_hash: String::new(),
+            },
+            signature: String::new(),
+        },
+        verification: match &action {
+            Action::SetValue { value } => VerificationPolicy::TargetValueHash {
+                sha256: value_hash(value),
+            },
+            Action::Invoke => VerificationPolicy::None,
+            _ => anyhow::bail!("action has no authorized semantic route"),
+        },
+        action,
+        target: TargetRef::Element { target },
+        interaction_mode,
+        deadline_at_ms,
+        safety,
+    };
+    request.authority.grant.action_hash = normalized_action_hash(&request)?;
+    request.authority.signature = encode_hex(
+        &signing_key
+            .sign(&canonical_authority_bytes(&request.authority.grant)?)
+            .to_bytes(),
+    );
+    Ok(request)
+}
+
+fn report_succeeded(report: &ExecuteReport) -> bool {
+    let mut terminals = report
+        .acknowledgements
+        .iter()
+        .filter_map(|acknowledgement| match &acknowledgement.state {
+            AckState::Terminal { terminal } => Some(&**terminal),
+            _ => None,
+        });
+    matches!(terminals.next(), Some(Terminal::Succeeded { .. })) && terminals.next().is_none()
+}
+
+fn report_is_retry_safe(report: &ExecuteReport) -> bool {
+    let mut terminals = report
+        .acknowledgements
+        .iter()
+        .filter_map(|acknowledgement| match &acknowledgement.state {
+            AckState::Terminal { terminal } => Some(&**terminal),
+            _ => None,
+        });
+    let Some(first) = terminals.next() else {
+        return false;
+    };
+    terminal_proves_no_effect(first) && terminals.all(terminal_proves_no_effect)
+}
+
+fn terminal_proves_no_effect(terminal: &Terminal) -> bool {
+    matches!(
+        terminal,
+        Terminal::Rejected { .. } | Terminal::CancelledBeforeEffect | Terminal::ExpiredBeforeEffect
+    )
+}
+
+fn value_hash(value: &str) -> String {
+    encode_hex(&Sha256::digest(value.as_bytes()))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -161,6 +282,13 @@ fn encode_hex(bytes: &[u8]) -> String {
     output
 }
 
+fn now_ms() -> anyhow::Result<i64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?)
+}
+
 #[async_trait]
 impl Tool for PraefectusTool {
     fn name(&self) -> &str {
@@ -170,31 +298,77 @@ impl Tool for PraefectusTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.name().to_string(),
-            description: "Inspect desktop capabilities and execute signed, durable, fenced desktop actions through Praefectus.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["capabilities", "observe_coordinates", "observe_element", "execute"] },
-                    "x": { "type": "integer" },
-                    "y": { "type": "integer" },
-                    "operation_id": { "type": "string" },
-                    "desktop_action": { "type": "object" },
-                    "target": { "type": "object" },
-                    "verification": { "type": "object" }
-                },
-                "required": ["action"]
+            description: "Inspect desktop capabilities, observe semantic elements, and request host-authorized fenced actions through Praefectus.".to_string(),
+            parameters: json!({
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": { "action": { "const": "capabilities" } },
+                        "required": ["action"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": { "action": { "const": "observe" } },
+                        "required": ["action"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": { "const": "execute" },
+                            "operation_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                            "deadline_at_ms": { "type": "integer" },
+                            "interaction_mode": { "type": "string", "enum": ["interactive", "background_only"] },
+                            "desktop_action": {
+                                "oneOf": [
+                                    {
+                                        "type": "object",
+                                        "properties": { "kind": { "const": "invoke" } },
+                                        "required": ["kind"],
+                                        "additionalProperties": false
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "kind": { "const": "set_value" },
+                                            "value": { "type": "string", "maxLength": 16384 }
+                                        },
+                                        "required": ["kind", "value"],
+                                        "additionalProperties": false
+                                    }
+                                ]
+                            },
+                            "target": {
+                                "type": "object",
+                                "properties": {
+                                    "observation_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                                    "generation": { "type": "integer", "minimum": 1 },
+                                    "provenance_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                                    "element_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                                    "fingerprint_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                                },
+                                "required": ["observation_id", "generation", "provenance_hash", "element_id", "fingerprint_hash"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": ["action", "operation_id", "deadline_at_ms", "interaction_mode", "desktop_action", "target"],
+                        "additionalProperties": false
+                    }
+                ]
             }),
         }
     }
 
     async fn execute(&self, arguments: &str) -> anyhow::Result<ToolResult> {
         if !self.policy.allow_computer_use {
-            return ExecutionPolicy::deny("Computer use is disabled by policy");
+            return ExecutionPolicy::deny("Computer use is disabled by host policy");
         }
         let args: PraefectusArgs = serde_json::from_str(arguments)?;
         let runtime = Arc::clone(&self.runtime);
         match tokio::task::spawn_blocking(move || runtime.execute(args)).await? {
-            Ok(output) => Ok(ToolResult::success(output)),
+            Ok(output) if output.is_error => Ok(ToolResult::error(output.output)),
+            Ok(output) => Ok(ToolResult::success(output.output)),
             Err(error) => Ok(ToolResult::error(error.to_string())),
         }
     }
@@ -202,22 +376,180 @@ impl Tool for PraefectusTool {
 
 #[cfg(test)]
 mod tests {
+    use praefectus::{
+        ActionAck, ContextPreservation, DeliveryRoute, Effect, FailureCode, Receipt,
+        SessionIsolation,
+    };
+
     use super::*;
 
+    fn target() -> SemanticTargetRef {
+        SemanticTargetRef {
+            observation_id: "1".repeat(64),
+            generation: 1,
+            provenance_hash: "2".repeat(64),
+            element_id: "3".repeat(64),
+            fingerprint_hash: "4".repeat(64),
+        }
+    }
+
+    fn receipt(effect: Effect) -> Receipt {
+        Receipt {
+            protocol_version: PROTOCOL_VERSION,
+            action_name: "invoke".to_string(),
+            action_hash: "0".repeat(64),
+            started_at_ms: 1,
+            finished_at_ms: 2,
+            backend: "test".to_string(),
+            fallback_chain: Vec::new(),
+            delivery_route: DeliveryRoute::TargetAddressed,
+            session_isolation: SessionIsolation::SharedDesktop,
+            interaction_mode: InteractionMode::Interactive,
+            context_preservation: ContextPreservation::NotApplicable,
+            effect,
+            before: None,
+            after: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    fn report(terminal: Terminal) -> ExecuteReport {
+        ExecuteReport {
+            acknowledgements: vec![ActionAck {
+                protocol_version: PROTOCOL_VERSION,
+                operation_id: "operation:1".to_string(),
+                sequence: 2,
+                action_hash: "0".repeat(64),
+                replayed: false,
+                state: AckState::Terminal {
+                    terminal: Box::new(terminal),
+                },
+            }],
+        }
+    }
+
     #[tokio::test]
-    async fn policy_can_disable_computer_use() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn host_policy_can_disable_computer_use() {
+        let dir = tempfile::tempdir().expect("temporary directory should open");
         let policy = ExecutionPolicy {
             allow_computer_use: false,
             ..ExecutionPolicy::default()
         };
-        let tool = PraefectusTool::new(dir.path(), Arc::new(policy)).unwrap();
-        let result = tool.execute(r#"{"action":"capabilities"}"#).await.unwrap();
+        let tool =
+            PraefectusTool::new(dir.path(), Arc::new(policy)).expect("tool should initialize");
+        let result = tool
+            .execute(r#"{"action":"capabilities"}"#)
+            .await
+            .expect("policy denial should be a tool result");
         assert!(result.is_error);
     }
 
     #[test]
-    fn hex_encoding_is_stable() {
-        assert_eq!(encode_hex(&[0, 15, 16, 255]), "000f10ff");
+    fn caller_cannot_supply_authority_or_isolation() {
+        for input in [
+            r#"{"action":"capabilities","authority":{}}"#,
+            r#"{"action":"observe","session_isolation":"host_isolated"}"#,
+        ] {
+            assert!(serde_json::from_str::<PraefectusArgs>(input).is_err());
+        }
+    }
+
+    #[test]
+    fn authority_hash_binds_interaction_mode_and_operation() {
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let interactive = signed_request(
+            Action::Invoke,
+            target(),
+            "operation:1".to_string(),
+            i64::MAX,
+            InteractionMode::Interactive,
+            &signing_key,
+            "session:1",
+        )
+        .expect("interactive request should sign");
+        let background = signed_request(
+            Action::Invoke,
+            target(),
+            "operation:1".to_string(),
+            i64::MAX,
+            InteractionMode::BackgroundOnly,
+            &signing_key,
+            "session:1",
+        )
+        .expect("background request should sign");
+        let other_operation = signed_request(
+            Action::Invoke,
+            target(),
+            "operation:2".to_string(),
+            i64::MAX,
+            InteractionMode::Interactive,
+            &signing_key,
+            "session:1",
+        )
+        .expect("other operation should sign");
+
+        assert_ne!(
+            interactive.authority.grant.action_hash,
+            background.authority.grant.action_hash
+        );
+        assert_eq!(
+            interactive.authority.grant.action_hash,
+            other_operation.authority.grant.action_hash
+        );
+        assert_ne!(
+            interactive.authority.grant.operation_id,
+            other_operation.authority.grant.operation_id
+        );
+    }
+
+    #[test]
+    fn set_value_verification_binds_the_exact_value() {
+        let request = signed_request(
+            Action::SetValue {
+                value: "private value".to_string(),
+            },
+            target(),
+            "operation:1".to_string(),
+            i64::MAX,
+            InteractionMode::Interactive,
+            &SigningKey::from_bytes(&[7; 32]),
+            "session:1",
+        )
+        .expect("set value request should sign");
+
+        assert!(matches!(
+            request.verification,
+            VerificationPolicy::TargetValueHash { sha256 }
+                if sha256 == value_hash("private value")
+        ));
+    }
+
+    #[test]
+    fn uncertain_and_failed_effects_are_never_retry_safe() {
+        for terminal in [
+            Terminal::OutcomeUnknown {
+                receipt: receipt(Effect::Unknown),
+                message: "outcome unknown".to_string(),
+            },
+            Terminal::Failed {
+                code: FailureCode::VerificationFailed,
+                message: "verification failed".to_string(),
+            },
+        ] {
+            let report = report(terminal);
+            assert!(!report_succeeded(&report));
+            assert!(!report_is_retry_safe(&report));
+        }
+    }
+
+    #[test]
+    fn only_proven_no_effect_terminals_are_retry_safe() {
+        assert!(report_is_retry_safe(&report(Terminal::Rejected {
+            code: FailureCode::PermissionDenied,
+            message: "denied".to_string(),
+        })));
+        assert!(!report_is_retry_safe(&report(Terminal::Succeeded {
+            receipt: receipt(Effect::Verified),
+        })));
     }
 }

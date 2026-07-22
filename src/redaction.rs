@@ -1,4 +1,5 @@
 use regex::Regex;
+use serde_json::Value;
 use std::sync::OnceLock;
 
 fn patterns() -> &'static [Regex] {
@@ -41,6 +42,44 @@ pub fn redact_text(input: &str) -> String {
     output
 }
 
+pub fn redact_tool_payload(tool: &str, input: &str) -> String {
+    if tool != "praefectus" {
+        return redact_text(input);
+    }
+    let Ok(mut value) = serde_json::from_str::<Value>(input) else {
+        return "[REDACTED]".to_string();
+    };
+    redact_praefectus_value(&mut value);
+    serde_json::to_string(&value).unwrap_or_else(|_| "[REDACTED]".to_string())
+}
+
+fn redact_praefectus_value(value: &mut Value) {
+    match value {
+        Value::Array(values) => values.iter_mut().for_each(redact_praefectus_value),
+        Value::Object(values) => {
+            for key in [
+                "after",
+                "authority",
+                "before",
+                "evidence",
+                "fallback_chain",
+                "name",
+                "signature",
+                "target",
+                "text",
+                "value",
+                "warnings",
+            ] {
+                if values.contains_key(key) {
+                    values.insert(key.to_string(), Value::String("[REDACTED]".to_string()));
+                }
+            }
+            values.values_mut().for_each(redact_praefectus_value);
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +105,16 @@ mod tests {
         let output = redact_text("Authorization: Bearer secret-token\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----");
         assert!(!output.contains("secret-token"));
         assert!(!output.contains("abc"));
+    }
+
+    #[test]
+    fn redacts_praefectus_targets_and_values_from_persistent_payloads() {
+        let output = redact_tool_payload(
+            "praefectus",
+            r#"{"desktop_action":{"kind":"set_value","value":"private"},"target":{"element_id":"selector"}}"#,
+        );
+        assert!(!output.contains("private"));
+        assert!(!output.contains("selector"));
+        assert!(output.contains("[REDACTED]"));
     }
 }

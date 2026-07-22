@@ -12,7 +12,7 @@ Default includes `plugin-web` and `plugin-skills`. Heavier packs:
 
 ```bash
 cargo build --features full          # all channels, providers, plugins, swarm
-cargo build --features plugin-advanced,plugin-browser,peekaboo
+cargo build --features plugin-advanced,desktop
 ```
 
 Runtime tool visibility still follows `toolsets` and workspace `.unthinkclaw/plugins/manifest.json`.
