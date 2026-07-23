@@ -29,7 +29,7 @@ impl Channel for HttpInjectChannel {
     }
 
     async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
-        tracing::debug!(target: "unthinkclaw::http", "reply: {}", message.text);
+        tracing::debug!(target: "apollo::http", "reply: {}", message.text);
         Ok(None)
     }
 

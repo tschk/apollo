@@ -1,5 +1,5 @@
-//! MCP server mode — exposes unthinkclaw as an MCP server over stdio or HTTP.
-//! Other AI clients can connect to prompt unthinkclaw or use its tools.
+//! MCP server mode — exposes apollo as an MCP server over stdio or HTTP.
+//! Other AI clients can connect to prompt apollo or use its tools.
 
 use axum::{
     extract::State,
@@ -426,7 +426,7 @@ struct HttpChatResponse {
     text: String,
 }
 
-/// Run unthinkclaw as an MCP server over stdio.
+/// Run apollo as an MCP server over stdio.
 pub async fn run_mcp_server(
     tools: Vec<Arc<dyn Tool>>,
     provider: Option<Arc<dyn crate::providers::traits::Provider>>,
@@ -462,12 +462,12 @@ pub async fn run_mcp_server(
     Ok(())
 }
 
-/// Run unthinkclaw as an MCP server over HTTP (for Cloudflare Container deployment).
+/// Run apollo as an MCP server over HTTP (for Cloudflare Container deployment).
 async fn health_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "service": "unthinkclaw",
+        "service": "apollo",
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
@@ -595,7 +595,7 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
                 "tools": {}
             },
             "serverInfo": {
-                "name": "unthinkclaw",
+                "name": "apollo",
                 "version": env!("CARGO_PKG_VERSION")
             }
         }),
@@ -612,17 +612,17 @@ fn handle_tools_list(
         .map(|t| tool_to_mcp_schema(&t.spec()))
         .collect();
 
-    // Add "ask" tool if we have a provider (allows other AIs to prompt unthinkclaw)
+    // Add "ask" tool if we have a provider (allows other AIs to prompt apollo)
     if has_provider {
         mcp_tools.push(serde_json::json!({
             "name": "ask",
-            "description": "Send a message to the unthinkclaw AI agent and get a response. Use this to prompt unthinkclaw for complex tasks like coding, research, or analysis.",
+            "description": "Send a message to the apollo AI agent and get a response. Use this to prompt apollo for complex tasks like coding, research, or analysis.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "message": {
                         "type": "string",
-                        "description": "The message/prompt to send to unthinkclaw"
+                        "description": "The message/prompt to send to apollo"
                     }
                 },
                 "required": ["message"]

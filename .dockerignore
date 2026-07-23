@@ -19,4 +19,4 @@ tests/
 
 # Rust build artifacts — exclude everything except the cross-compiled Linux binary
 target/
-!target/x86_64-unknown-linux-gnu/release/unthinkclaw
+!target/x86_64-unknown-linux-gnu/release/apollo

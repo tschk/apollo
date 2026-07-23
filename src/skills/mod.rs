@@ -46,7 +46,7 @@ pub fn discover_skills_for_workspace(workspace: Option<&Path>) -> Vec<Skill> {
 }
 
 pub fn managed_skills_dir(workspace: &Path) -> PathBuf {
-    workspace.join(".unthinkclaw/skills")
+    workspace.join(".apollo/skills")
 }
 
 fn scan_skill_dir(dir: &Path, skills: &mut Vec<Skill>) {

@@ -352,7 +352,7 @@ pub fn render_findings(findings: &[Finding]) -> String {
 
 pub fn render_doctor_report(report: &DoctorReport) -> String {
     let mut out = vec![
-        "unthinkclaw doctor".to_string(),
+        "apollo doctor".to_string(),
         String::new(),
         "Checks:".to_string(),
     ];

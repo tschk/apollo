@@ -74,7 +74,7 @@ impl Tool for SessionStatusTool {
             Model (heavy):    {}\n\
             Tools: {} active\n\
             PID: {}\n\
-            Runtime: unthinkclaw v{}\n\n\
+            Runtime: apollo v{}\n\n\
             Tool list: {}\n\n\
             Tip: use session_status{{\"model\":\"...\"}}\n\
             For swarms — use fast model as runner, heavy as orchestrator.\n\

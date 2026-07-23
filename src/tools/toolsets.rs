@@ -27,7 +27,7 @@ pub fn expand_package(name: &str) -> Vec<&'static str> {
         "skills" => vec!["skills"],
         "advanced" => vec!["advanced"],
         "desktop" => vec!["desktop"],
-        "unthinkclaw-live" | "live" => vec!["web", "browser", "skills", "advanced", "desktop"],
+        "apollo-live" | "live" => vec!["web", "browser", "skills", "advanced", "desktop"],
         "core" | "default" => CORE_TOOLSET_GROUPS.to_vec(),
         _ => vec![],
     }

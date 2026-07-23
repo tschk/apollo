@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "unthinkclaw-install", version)]
+#[command(name = "apollo-install", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -56,19 +56,19 @@ fn main() -> anyhow::Result<()> {
             let src = binary.unwrap_or_else(|| {
                 std::env::current_exe()
                     .ok()
-                    .and_then(|p| p.parent().map(|d| d.join("unthinkclaw")))
-                    .unwrap_or_else(|| PathBuf::from("target/release/unthinkclaw"))
+                    .and_then(|p| p.parent().map(|d| d.join("apollo")))
+                    .unwrap_or_else(|| PathBuf::from("target/release/apollo"))
             });
             if !src.is_file() {
                 anyhow::bail!("binary not found at {}", src.display());
             }
-            let dst = dest.join("unthinkclaw");
+            let dst = dest.join("apollo");
             copy_exe(&src, &dst)?;
             println!("Installed {}", dst.display());
         }
         Cmd::Uninstall { dest } => {
             let dest = expand_dest(&dest);
-            for name in ["unthinkclaw", "unthinkclaw-install"] {
+            for name in ["apollo", "apollo-install"] {
                 let p = dest.join(name);
                 if p.is_file() {
                     fs::remove_file(&p)?;

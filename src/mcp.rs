@@ -190,7 +190,7 @@ impl CodexClient {
 
         // Initialize
         mcp.initialize(serde_json::json!({
-            "name": "unthinkclaw",
+            "name": "apollo",
             "version": "0.1.0"
         }))
         .await?;

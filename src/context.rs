@@ -1,7 +1,7 @@
 use crate::channels::IncomingMessage;
 
 const GROUP_KEYWORDS: &[&str] = &[
-    "unthinkclaw",
+    "apollo",
     "plugin",
     "plugins",
     "plugin layer",
@@ -74,7 +74,7 @@ pub fn should_respond(msg: &IncomingMessage) -> bool {
         return true;
     }
 
-    let direct_mention = text.contains("@unthinkclaw");
+    let direct_mention = text.contains("@apollo");
     direct_mention || is_assistant_topic(&text)
 }
 
@@ -87,7 +87,7 @@ pub fn routing_guidance(is_group: bool, transport: &str) -> Option<String> {
         "## Group chat routing
 Transport: {transport}
 
-Respond even without a direct mention when the message is about unthinkclaw, unthinkclaw-live, plugins, plugin manifests, settings, commands, upgrades, transport, or asks for help with the bot. Stay silent for unrelated ambient chatter. When responding, be concise and reference the relevant command, plugin, or setting path when useful.",
+Respond even without a direct mention when the message is about apollo, apollo-live, plugins, plugin manifests, settings, commands, upgrades, transport, or asks for help with the bot. Stay silent for unrelated ambient chatter. When responding, be concise and reference the relevant command, plugin, or setting path when useful.",
         transport = transport
     ))
 }

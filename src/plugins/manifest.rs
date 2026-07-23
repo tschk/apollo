@@ -1,4 +1,4 @@
-//! JSON manifest under `workspace/.unthinkclaw/plugins/manifest.json`.
+//! JSON manifest under `workspace/.apollo/plugins/manifest.json`.
 
 use std::path::Path;
 
@@ -33,7 +33,7 @@ pub fn load_manifest(workspace: &Path, cfg: &Config) -> anyhow::Result<Option<Pl
         return Ok(None);
     }
     let path = workspace
-        .join(".unthinkclaw")
+        .join(".apollo")
         .join(&cfg.plugin_layer.manifest_path);
     if !path.is_file() {
         return Ok(None);

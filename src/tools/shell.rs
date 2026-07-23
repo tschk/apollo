@@ -92,7 +92,7 @@ impl Tool for ShellTool {
         let self_name = std::env::current_exe()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "unthinkclaw".to_string());
+            .unwrap_or_else(|| "apollo".to_string());
 
         if (cmd_lower.contains("systemctl") && cmd_lower.contains(&self_name))
             || (cmd_lower.contains("pkill") && cmd_lower.contains(&self_name))

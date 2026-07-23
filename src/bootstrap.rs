@@ -195,7 +195,7 @@ pub fn build_base_tools(
             Arc::clone(&provider),
             cfg.agent.fast_model.clone(),
         )),
-        Arc::new(ConfigTool::new(workspace.join("unthinkclaw.json"))),
+        Arc::new(ConfigTool::new(workspace.join("apollo.json"))),
         Arc::new(SleepTool),
         Arc::new(TodoWriteTool::new(workspace.to_path_buf())),
     ];

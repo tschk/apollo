@@ -1,12 +1,12 @@
 #!/bin/bash
-# Hot-reload watcher for unthinkclaw
+# Hot-reload watcher for apollo
 # Watches src/ and Cargo.toml for changes, rebuilds, and restarts the bot.
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG="/tmp/aclaw.log"
-PIDFILE="/tmp/unthinkclaw.pid"
+PIDFILE="/tmp/apollo.pid"
 
 # Load env from .env file
 if [ -f "$REPO/.env" ]; then
@@ -14,10 +14,10 @@ if [ -f "$REPO/.env" ]; then
 fi
 
 # Launch args (mirror production)
-TELEGRAM_TOKEN="${UNTHINKCLAW_TELEGRAM_TOKEN:?set UNTHINKCLAW_TELEGRAM_TOKEN in .env}"
-TELEGRAM_CHAT_ID="${UNTHINKCLAW_CHAT_ID:-5708941906}"
+TELEGRAM_TOKEN="${APOLLO_TELEGRAM_TOKEN:?set APOLLO_TELEGRAM_TOKEN in .env}"
+TELEGRAM_CHAT_ID="${APOLLO_CHAT_ID:-5708941906}"
 MODEL="${MODEL:-claude-sonnet-4-5}"
-BIN="$REPO/target/release/unthinkclaw"
+BIN="$REPO/target/release/apollo"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@ kill_bot() {
 }
 
 start_bot() {
-  log "Starting unthinkclaw…"
+  log "Starting apollo…"
   cd "$REPO"
   nohup "$BIN" chat \
     --channel telegram \

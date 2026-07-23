@@ -1,4 +1,4 @@
-//! unthinkclaw — Lightweight agent runtime
+//! apollo — Lightweight agent runtime
 //! Successor to OpenClaw. Best-of-breed from ZeroClaw, NanoClaw, HiClaw.
 //!
 //! Core traits (all swappable):

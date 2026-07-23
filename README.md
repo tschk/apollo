@@ -1,6 +1,6 @@
-# unthinkclaw
+# apollo
 
-unthinkclaw is a **local-first Rust AI agent runtime** for people who want the bot on
+apollo is a **local-first Rust AI agent runtime** for people who want the bot on
 their own machine, not hidden behind a hosted control plane.
 
 Small binary (~14MB), async-first (tokio), trait-driven. Ships with 10+ messaging
@@ -62,9 +62,9 @@ and feature-gated signed desktop actions through Praefectus
 ```bash
 cargo build --release
 
-./target/release/unthinkclaw init
-./target/release/unthinkclaw chat --config unthinkclaw.json
-./target/release/unthinkclaw ask "summarize this repo" --config unthinkclaw.json
+./target/release/apollo init
+./target/release/apollo chat --config apollo.json
+./target/release/apollo ask "summarize this repo" --config apollo.json
 ```
 
 ## Current Status
@@ -76,7 +76,7 @@ cargo build --release
 
 ## Configuration
 
-Initialize with `unthinkclaw init`, edit `unthinkclaw.json`. Key sections:
+Initialize with `apollo init`, edit `apollo.json`. Key sections:
 
 - `agent` — max rounds, history limit, model selection, compaction thresholds
 - `provider` — LLM backend choice + credentials

@@ -37,7 +37,7 @@ Last updated: 2026-06-16
 
 ## Next
 
-- [ ] Wire autonomous mode into CLI entrypoint (`unthinkclaw autonomous`)
+- [ ] Wire autonomous mode into CLI entrypoint (`apollo autonomous`)
 - [ ] Add trajectory collection toggle in config.yaml
 - [ ] Add tests for Telegram markdown conversion and long-message chunking
 - [ ] Add tests for audio/sticker handling in Telegram

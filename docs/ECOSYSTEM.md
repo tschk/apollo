@@ -2,7 +2,7 @@
 
 ## What we already mirror
 
-| Source | In unthinkclaw |
+| Source | In apollo |
 |--------|----------------|
 | OpenClaw tool groups | `src/tools/*`, `toolsets.rs` |
 | Hermes skill vars | `${HERMES_SKILL_DIR}`, `${HERMES_SESSION_ID}` in `skills/mod.rs` |
@@ -14,8 +14,8 @@
 
 ## v2 absorbed on main (partial)
 
-- Workspace manifest: `.unthinkclaw/plugins/manifest.json` + `apply_package_manifest` (packages: `web`, `live`, `desktop`, …).
-- `unthinkclaw-install` binary.
+- Workspace manifest: `.apollo/plugins/manifest.json` + `apply_package_manifest` (packages: `web`, `live`, `desktop`, …).
+- `apollo-install` binary.
 - Cargo feature-gated tools: `plugin-web`, `plugin-browser`, `plugin-skills`, `plugin-advanced` (+ `computer-use-praefectus`, `swarm`).
 - Still not ported: `fastembed`, `vendor/equilibrium`.
 

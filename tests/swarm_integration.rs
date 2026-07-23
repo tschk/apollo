@@ -3,12 +3,12 @@
 
 #![cfg(feature = "swarm")]
 
-use std::sync::Arc;
-use unthinkclaw::swarm::models::*;
-use unthinkclaw::swarm::scheduler::{ConcurrencyScheduler, Lane};
-use unthinkclaw::swarm::{
+use apollo::swarm::models::*;
+use apollo::swarm::scheduler::{ConcurrencyScheduler, Lane};
+use apollo::swarm::{
     AgentCapability, SurrealBackend, SwarmCoordinator, SwarmStorage, TaskPriority,
 };
+use std::sync::Arc;
 
 async fn setup_storage() -> Arc<dyn SwarmStorage> {
     let tmp = tempfile::tempdir().unwrap();

@@ -16,7 +16,7 @@ impl WebFetchTool {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
-                .user_agent("unthinkclaw/0.1")
+                .user_agent("apollo/0.1")
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("Failed to create HTTP client"),

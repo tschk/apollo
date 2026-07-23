@@ -15,7 +15,7 @@ cargo build --features full          # all channels, providers, plugins, swarm
 cargo build --features plugin-advanced,desktop
 ```
 
-Runtime tool visibility still follows `toolsets` and workspace `.unthinkclaw/plugins/manifest.json`.
+Runtime tool visibility still follows `toolsets` and workspace `.apollo/plugins/manifest.json`.
 
 ## Commits
 

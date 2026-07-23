@@ -1,4 +1,4 @@
-# AGENTS.md — unthinkclaw Engineering Protocol
+# AGENTS.md — apollo Engineering Protocol
 
 Scope: entire repository.
 
@@ -10,7 +10,7 @@ Scope: entire repository.
 
 ## 1) Project Snapshot
 
-unthinkclaw is a lean, fast Rust AI agent runtime — Telegram-first, trait-driven, and using SurrealDB + RocksDB as the primary state layer.
+apollo is a lean, fast Rust AI agent runtime — Telegram-first, trait-driven, and using SurrealDB + RocksDB as the primary state layer.
 
 Goals:
 - Fast startup (<10ms), low RAM (<10MB)
@@ -24,7 +24,7 @@ Goals:
 > optimizations (`opt-level = "z"`, LTO, strip, `panic = abort`) remain enabled
 > but the release binary exceeds 10MB. Treat <10MB as aspirational, not a gate.
 
-> **rx4 migration:** unthinkclaw is migrating its built-in agent loop to the
+> **rx4 migration:** apollo is migrating its built-in agent loop to the
 > `rx4` (rotary) harness engine. `rx4` is a crates.io dependency providing
 > the core agent loop, tools, providers, sessions,
 > skills, memory, guardrails, and MCP support. The bridge lives in
@@ -224,7 +224,7 @@ cargo test
 <claude-mem-context>
 # Memory Context
 
-# [unthinkclaw] recent context, 2026-05-05 12:29pm GMT+10
+# [apollo] recent context, 2026-05-05 12:29pm GMT+10
 
 No previous sessions found.
 </claude-mem-context>

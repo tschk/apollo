@@ -1,6 +1,6 @@
 //! Dynamic tool system — AI can create, list, and execute custom tools at runtime.
 //!
-//! Tools are stored in ~/.unthinkclaw/tools/<name>/
+//! Tools are stored in ~/.apollo/tools/<name>/
 //!   spec.json  — tool definition (name, description, parameters)
 //!   run.v      — V language implementation (preferred, fast compile)
 //!   run.py     — Python fallback
@@ -21,7 +21,7 @@ use crate::text::truncate_chars;
 /// Directory where dynamic tools live
 fn tools_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    PathBuf::from(home).join(".unthinkclaw/tools")
+    PathBuf::from(home).join(".apollo/tools")
 }
 
 /// A dynamic tool loaded from disk

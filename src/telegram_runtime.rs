@@ -55,7 +55,7 @@ pub async fn run_telegram_chat(run: TelegramChatRun<'_>) -> anyhow::Result<()> {
 
     runner.add_tool(Arc::new(MessageTool::new(tg_arc))).await;
 
-    println!("unthinkclaw — {} via Telegram", model);
+    println!("apollo — {} via Telegram", model);
     println!("   Workspace: {}", workspace.display());
     println!("   Chat ID: {}", chat_id);
     println!("   Tools: {}", runner.list_tools().await.join(", "));
@@ -249,7 +249,7 @@ async fn handle_command(
         "/help" => {
             let _ = tg
                 .send_message(
-                    "🐾 *unthinkclaw commands:*\n\n\
+                    "🐾 *apollo commands:*\n\n\
                     /stop — Stop current operation (saves tokens!)\n\
                     /help — Show this message\n\
                     /model — Show current model\n\
@@ -264,7 +264,7 @@ async fn handle_command(
                 .await;
             Ok(true)
         }
-        "/model" | "/model@unthinkclaw_bot" => {
+        "/model" | "/model@apollo_bot" => {
             if arg.is_empty() {
                 let _ = tg
                     .send_message(&format!(
@@ -312,7 +312,7 @@ async fn handle_command(
         "/status" => {
             let _ = tg
                 .send_message(&format!(
-                    "🐾 *unthinkclaw status:*\n\n\
+                    "🐾 *apollo status:*\n\n\
                     Model: `{}`\n\
                     Tools: {}\n\
                     Skills: {}\n\
@@ -363,7 +363,7 @@ async fn handle_command(
         "/start" => {
             let _ = tg
                 .send_message(
-                    "🐾 *unthinkclaw* — AI assistant\n\n\
+                    "🐾 *apollo* — AI assistant\n\n\
                     Just type a message to chat.\n\
                     Use /help for commands.\n\
                     Use /tools to see what I can do.",

@@ -1,4 +1,4 @@
-//! HTTP/WebSocket gateway for unthinkclaw.
+//! HTTP/WebSocket gateway for apollo.
 //! Exposes an authenticated control plane for hosted sessions.
 
 use std::collections::HashMap;
@@ -147,7 +147,7 @@ impl Gateway {
             .and_then(|value| value.strip_prefix("Bearer "));
         let token = bearer.or_else(|| {
             headers
-                .get("x-unthinkclaw-token")
+                .get("x-apollo-token")
                 .and_then(|value| value.to_str().ok())
         });
 
@@ -245,7 +245,7 @@ impl Gateway {
             .send(axum::extract::ws::Message::Text(
                 serde_json::json!({
                     "type": "hello",
-                    "message": "unthinkclaw gateway websocket connected"
+                    "message": "apollo gateway websocket connected"
                 })
                 .to_string(),
             ))
@@ -480,7 +480,7 @@ impl Gateway {
         let Some(runtime) = &gateway.hosted_runtime else {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "unthinkclaw_gateway_runtime_attached 0\n".to_string(),
+                "apollo_gateway_runtime_attached 0\n".to_string(),
             )
                 .into_response();
         };
@@ -491,69 +491,69 @@ impl Gateway {
 
         let mut body = String::new();
         body.push_str(
-            "# HELP unthinkclaw_gateway_runtime_attached Whether a hosted runtime is attached.\n",
+            "# HELP apollo_gateway_runtime_attached Whether a hosted runtime is attached.\n",
         );
-        body.push_str("# TYPE unthinkclaw_gateway_runtime_attached gauge\n");
-        body.push_str("unthinkclaw_gateway_runtime_attached 1\n");
+        body.push_str("# TYPE apollo_gateway_runtime_attached gauge\n");
+        body.push_str("apollo_gateway_runtime_attached 1\n");
         body.push_str(
-            "# HELP unthinkclaw_gateway_requests_total Total authenticated gateway requests.\n",
+            "# HELP apollo_gateway_requests_total Total authenticated gateway requests.\n",
         );
-        body.push_str("# TYPE unthinkclaw_gateway_requests_total counter\n");
+        body.push_str("# TYPE apollo_gateway_requests_total counter\n");
         body.push_str(&format!(
-            "unthinkclaw_gateway_requests_total {}\n",
+            "apollo_gateway_requests_total {}\n",
             runtime_metrics.total_requests
         ));
-        body.push_str("# HELP unthinkclaw_gateway_errors_total Total gateway request errors.\n");
-        body.push_str("# TYPE unthinkclaw_gateway_errors_total counter\n");
+        body.push_str("# HELP apollo_gateway_errors_total Total gateway request errors.\n");
+        body.push_str("# TYPE apollo_gateway_errors_total counter\n");
         body.push_str(&format!(
-            "unthinkclaw_gateway_errors_total {}\n",
+            "apollo_gateway_errors_total {}\n",
             runtime_metrics.total_errors
         ));
         body.push_str(
-            "# HELP unthinkclaw_gateway_auth_failures_total Total gateway auth failures.\n",
+            "# HELP apollo_gateway_auth_failures_total Total gateway auth failures.\n",
         );
-        body.push_str("# TYPE unthinkclaw_gateway_auth_failures_total counter\n");
+        body.push_str("# TYPE apollo_gateway_auth_failures_total counter\n");
         body.push_str(&format!(
-            "unthinkclaw_gateway_auth_failures_total {}\n",
+            "apollo_gateway_auth_failures_total {}\n",
             runtime_metrics.auth_failures
         ));
         body.push_str(
-            "# HELP unthinkclaw_gateway_rate_limited_total Total gateway rate-limited requests.\n",
+            "# HELP apollo_gateway_rate_limited_total Total gateway rate-limited requests.\n",
         );
-        body.push_str("# TYPE unthinkclaw_gateway_rate_limited_total counter\n");
+        body.push_str("# TYPE apollo_gateway_rate_limited_total counter\n");
         body.push_str(&format!(
-            "unthinkclaw_gateway_rate_limited_total {}\n",
+            "apollo_gateway_rate_limited_total {}\n",
             runtime_metrics.rate_limited
         ));
         body.push_str(
-            "# HELP unthinkclaw_gateway_latency_ms Average gateway latency in milliseconds.\n",
+            "# HELP apollo_gateway_latency_ms Average gateway latency in milliseconds.\n",
         );
-        body.push_str("# TYPE unthinkclaw_gateway_latency_ms gauge\n");
+        body.push_str("# TYPE apollo_gateway_latency_ms gauge\n");
         body.push_str(&format!(
-            "unthinkclaw_gateway_latency_ms {}\n",
+            "apollo_gateway_latency_ms {}\n",
             runtime_metrics.average_latency_ms
         ));
-        body.push_str("# HELP unthinkclaw_gateway_sessions Active runtime sessions.\n");
-        body.push_str("# TYPE unthinkclaw_gateway_sessions gauge\n");
+        body.push_str("# HELP apollo_gateway_sessions Active runtime sessions.\n");
+        body.push_str("# TYPE apollo_gateway_sessions gauge\n");
         body.push_str(&format!(
-            "unthinkclaw_gateway_sessions {}\n",
+            "apollo_gateway_sessions {}\n",
             sessions.len()
         ));
         body.push_str(
-            "# HELP unthinkclaw_gateway_tenant_requests_total Total requests per tenant.\n",
+            "# HELP apollo_gateway_tenant_requests_total Total requests per tenant.\n",
         );
-        body.push_str("# TYPE unthinkclaw_gateway_tenant_requests_total counter\n");
+        body.push_str("# TYPE apollo_gateway_tenant_requests_total counter\n");
         for tenant in &tenant_health {
             body.push_str(&format!(
-                "unthinkclaw_gateway_tenant_requests_total{{tenant_id=\"{}\"}} {}\n",
+                "apollo_gateway_tenant_requests_total{{tenant_id=\"{}\"}} {}\n",
                 tenant.tenant_id, tenant.total_requests
             ));
             body.push_str(&format!(
-                "unthinkclaw_gateway_tenant_errors_total{{tenant_id=\"{}\"}} {}\n",
+                "apollo_gateway_tenant_errors_total{{tenant_id=\"{}\"}} {}\n",
                 tenant.tenant_id, tenant.total_errors
             ));
             body.push_str(&format!(
-                "unthinkclaw_gateway_tenant_latency_ms{{tenant_id=\"{}\"}} {}\n",
+                "apollo_gateway_tenant_latency_ms{{tenant_id=\"{}\"}} {}\n",
                 tenant.tenant_id, tenant.average_latency_ms
             ));
         }

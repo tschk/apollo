@@ -116,7 +116,7 @@ impl PraefectusTool {
         let workspace = std::fs::canonicalize(workspace)?;
         let signing_key = SigningKey::generate(&mut OsRng);
         let verifier = Ed25519AuthorityVerifier::new([(
-            "unthinkclaw".to_string(),
+            "apollo".to_string(),
             "host-process".to_string(),
             "computer-use-enabled-v2".to_string(),
             signing_key.verifying_key(),
@@ -126,7 +126,7 @@ impl PraefectusTool {
                 engine: Engine::new(
                     NativeExecutor::default(),
                     workspace
-                        .join(".unthinkclaw")
+                        .join(".apollo")
                         .join("praefectus-operations.jsonl"),
                     verifier,
                 ),
@@ -244,7 +244,7 @@ fn signed_request(
         authority: SignedAuthority {
             grant: AuthorityGrant {
                 protocol_version: PROTOCOL_VERSION,
-                issuer: "unthinkclaw".to_string(),
+                issuer: "apollo".to_string(),
                 key_id: "host-process".to_string(),
                 operation_id,
                 subject,

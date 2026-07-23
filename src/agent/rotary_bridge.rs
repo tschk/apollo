@@ -1,19 +1,19 @@
-//! Rotary (rx4) bridge — adapts unthinkclaw's types to rx4's agent harness.
+//! Rotary (rx4) bridge — adapts apollo's types to rx4's agent harness.
 //!
 //! This module provides:
-//! - `RotaryProviderAdapter`: wraps an unthinkclaw `Provider` as an `rx4::Provider`
-//!   so rx4's `Agent` loop can use unthinkclaw's existing provider backends.
-//! - `register_unthinkclaw_tools`: registers unthinkclaw's `Tool` trait objects
+//! - `RotaryProviderAdapter`: wraps an apollo `Provider` as an `rx4::Provider`
+//!   so rx4's `Agent` loop can use apollo's existing provider backends.
+//! - `register_apollo_tools`: registers apollo's `Tool` trait objects
 //!   into rx4's `ToolRegistry` via boxed closures.
 //! - `chat_message_to_rx4` / `rx4_message_to_chat`: type translators between
-//!   unthinkclaw's `ChatMessage` and rx4's `Message`.
+//!   apollo's `ChatMessage` and rx4's `Message`.
 //! - `RotaryAgentBridge`: wraps an `rx4::Agent`, wiring up provider, tools,
 //!   system prompt, and providing a `run_prompt` method that the outer
-//!   unthinkclaw shell (channels, swarm, cron, heartbeat) can call.
+//!   apollo shell (channels, swarm, cron, heartbeat) can call.
 //!
 //! The bridge is designed to be incremental. The existing `AgentRunner` loop
 //! remains available; this bridge provides an alternative execution path that
-//! delegates the core agent loop to rx4 while keeping unthinkclaw's unique
+//! delegates the core agent loop to rx4 while keeping apollo's unique
 //! features (channels, swarm, cron, heartbeat, autonomous mode, plugins, MCP)
 //! as the outer shell.
 
@@ -28,7 +28,7 @@ use crate::tools::{Tool as UnthinkclawTool, ToolSpec};
 
 // ── Message translation ──────────────────────────────────────────────────
 
-/// Convert an unthinkclaw `ChatMessage` to an rx4 `Message`.
+/// Convert an apollo `ChatMessage` to an rx4 `Message`.
 pub fn chat_message_to_rx4(msg: &ChatMessage) -> Message {
     let role = match msg.role.as_str() {
         "system" => Role::System,
@@ -44,7 +44,7 @@ pub fn chat_message_to_rx4(msg: &ChatMessage) -> Message {
     }
 }
 
-/// Convert an rx4 `Message` back to an unthinkclaw `ChatMessage`.
+/// Convert an rx4 `Message` back to an apollo `ChatMessage`.
 pub fn rx4_message_to_chat(msg: &Message) -> ChatMessage {
     let role = match msg.role {
         Role::System => "system",
@@ -59,12 +59,12 @@ pub fn rx4_message_to_chat(msg: &Message) -> ChatMessage {
     }
 }
 
-/// Convert a slice of unthinkclaw `ChatMessage`s to rx4 `Message`s.
+/// Convert a slice of apollo `ChatMessage`s to rx4 `Message`s.
 pub fn chat_messages_to_rx4(messages: &[ChatMessage]) -> Vec<Message> {
     messages.iter().map(chat_message_to_rx4).collect()
 }
 
-/// Convert unthinkclaw `ToolSpec`s to rx4 tool definitions (JSON array).
+/// Convert apollo `ToolSpec`s to rx4 tool definitions (JSON array).
 pub fn tool_specs_to_rx4_json(specs: &[ToolSpec]) -> Vec<serde_json::Value> {
     specs
         .iter()
@@ -80,13 +80,13 @@ pub fn tool_specs_to_rx4_json(specs: &[ToolSpec]) -> Vec<serde_json::Value> {
 
 // ── Provider adapter ─────────────────────────────────────────────────────
 
-/// Adapter that wraps an unthinkclaw `Provider` and implements rx4's `Provider`
-/// trait. This lets rx4's `Agent` loop use unthinkclaw's existing provider
+/// Adapter that wraps an apollo `Provider` and implements rx4's `Provider`
+/// trait. This lets rx4's `Agent` loop use apollo's existing provider
 /// backends (Anthropic, OpenAI-compat, Ollama, Copilot) without modification.
 ///
-/// rx4's `Provider` trait is streaming-based (`stream()`), while unthinkclaw's
+/// rx4's `Provider` trait is streaming-based (`stream()`), while apollo's
 /// is request-response (`chat()`). This adapter bridges the gap by calling
-/// unthinkclaw's `chat()` and wrapping the result in a single-element stream.
+/// apollo's `chat()` and wrapping the result in a single-element stream.
 pub struct RotaryProviderAdapter {
     inner: Arc<dyn UnthinkclawProvider>,
     id: String,
@@ -96,7 +96,7 @@ pub struct RotaryProviderAdapter {
 impl RotaryProviderAdapter {
     pub fn new(provider: Arc<dyn UnthinkclawProvider>) -> Self {
         let id = provider.name().to_string();
-        let name = format!("unthinkclaw-{}", provider.name());
+        let name = format!("apollo-{}", provider.name());
         Self {
             inner: provider,
             id,
@@ -122,10 +122,10 @@ impl Rx4Provider for RotaryProviderAdapter {
         model: &str,
         tools: &[serde_json::Value],
     ) -> Result<rx4::provider::StreamResult, Rx4ProviderError> {
-        // Translate rx4 messages to unthinkclaw ChatMessages
+        // Translate rx4 messages to apollo ChatMessages
         let mut chat_messages: Vec<ChatMessage> = Vec::new();
 
-        // rx4 passes system prompt separately; unthinkclaw includes it in messages
+        // rx4 passes system prompt separately; apollo includes it in messages
         if let Some(sys) = system {
             chat_messages.push(ChatMessage::system(sys));
         }
@@ -134,7 +134,7 @@ impl Rx4Provider for RotaryProviderAdapter {
             chat_messages.push(rx4_message_to_chat(msg));
         }
 
-        // Convert rx4 tool definitions to unthinkclaw ToolSpecs
+        // Convert rx4 tool definitions to apollo ToolSpecs
         let tool_specs: Vec<ToolSpec> = tools
             .iter()
             .filter_map(|t| {
@@ -211,19 +211,16 @@ impl Rx4Provider for RotaryProviderAdapter {
 
 // ── Tool registration ────────────────────────────────────────────────────
 
-/// Register unthinkclaw's `Tool` trait objects into rx4's `ToolRegistry`.
+/// Register apollo's `Tool` trait objects into rx4's `ToolRegistry`.
 ///
-/// Each unthinkclaw tool is wrapped in a boxed closure that captures the
+/// Each apollo tool is wrapped in a boxed closure that captures the
 /// `Arc<dyn Tool>` and calls its `execute()` method. The closure is registered
 /// via `ToolDefinition::new_boxed()`, which uses `ToolExecutor::Boxed`.
 ///
 /// Tool effects are classified based on the tool name using rx4's
 /// `classify_tool()` guardrail function — idempotent tools get `ToolEffect::Read`,
 /// mutating tools get `ToolEffect::Write`.
-pub fn register_unthinkclaw_tools(
-    registry: &mut rx4::ToolRegistry,
-    tools: &[Arc<dyn UnthinkclawTool>],
-) {
+pub fn register_apollo_tools(registry: &mut rx4::ToolRegistry, tools: &[Arc<dyn UnthinkclawTool>]) {
     use rx4::guardrails::classify_tool;
     use rx4::{ToolDefinition, ToolEffect, ToolExecuteBox};
 
@@ -277,11 +274,11 @@ pub struct RotaryBridgeConfig {
 }
 
 /// Bridge that wraps an `rx4::Agent` and provides a simplified interface for
-/// unthinkclaw's outer shell to use.
+/// apollo's outer shell to use.
 ///
 /// The bridge handles:
 /// - Creating and configuring the rx4::Agent (provider, tools, system prompt)
-/// - Translating messages between unthinkclaw and rx4 types
+/// - Translating messages between apollo and rx4 types
 /// - Running prompts through rx4's agent loop
 ///
 /// Unthinkclaw's unique features (channels, swarm, cron, heartbeat, autonomous
@@ -305,12 +302,12 @@ impl RotaryAgentBridge {
         agent.set_workspace_root(&config.workspace);
         agent.max_tool_iterations = config.max_tool_iterations;
 
-        // Register unthinkclaw's tools into rx4's tool registry
+        // Register apollo's tools into rx4's tool registry
         let mut tool_registry = rx4::ToolRegistry::new();
-        register_unthinkclaw_tools(&mut tool_registry, &config.tools);
+        register_apollo_tools(&mut tool_registry, &config.tools);
         agent.tools = Arc::new(tool_registry);
 
-        // Use rx4's guardrails for loop detection (replaces unthinkclaw's
+        // Use rx4's guardrails for loop detection (replaces apollo's
         // ToolGuardrails in the main loop path)
         // rx4's Agent already has built-in tool caching and effect classification
 
@@ -369,7 +366,7 @@ impl RotaryAgentBridge {
     /// Run a single user prompt through the rx4 agent loop.
     ///
     /// This delegates the core agent loop (LLM calls, tool execution, turn
-    /// cycling) to rx4::Agent. The caller (unthinkclaw's channel/swarm/cron
+    /// cycling) to rx4::Agent. The caller (apollo's channel/swarm/cron
     /// shell) is responsible for:
     /// - Receiving the user message from a channel
     /// - Calling this method with the prompt text
@@ -400,7 +397,7 @@ impl RotaryAgentBridge {
     /// Run a prompt with pre-loaded conversation history.
     ///
     /// The history is loaded into rx4's message buffer before running the
-    /// prompt. This is used when unthinkclaw's memory backend provides
+    /// prompt. This is used when apollo's memory backend provides
     /// conversation history for a chat session.
     pub async fn run_prompt_with_history(
         &mut self,
@@ -422,7 +419,7 @@ impl RotaryAgentBridge {
     /// Register additional tools at runtime.
     pub fn register_tools(&mut self, tools: &[Arc<dyn UnthinkclawTool>]) {
         if let Some(registry) = Arc::get_mut(&mut self.agent.tools) {
-            register_unthinkclaw_tools(registry, tools);
+            register_apollo_tools(registry, tools);
         } else {
             tracing::warn!("cannot register rx4 tools while the registry is shared");
         }
@@ -450,30 +447,30 @@ impl RotaryAgentBridge {
 
 // ── Skill bridge ─────────────────────────────────────────────────────────
 
-/// Build an `rx4::SkillEngine` configured with unthinkclaw's skill directories.
+/// Build an `rx4::SkillEngine` configured with apollo's skill directories.
 ///
 /// Unthinkclaw discovers skills from 3 directories:
 /// 1. `~/.npm-global/lib/node_modules/openclaw/skills` (legacy)
 /// 2. `~/.openclaw/workspace/skills` (shared workspace skills)
-/// 3. `{workspace}/.unthinkclaw/skills` (project-local managed skills)
+/// 3. `{workspace}/.apollo/skills` (project-local managed skills)
 ///
 /// This maps to rx4's `SkillEngine` with the primary dir set to the managed
 /// skills directory and the other two as `extra_dirs`.
 ///
 /// After calling this, use `engine.load()` to populate skills from disk,
-/// then `engine.search()` for keyword matching (replaces unthinkclaw's
+/// then `engine.search()` for keyword matching (replaces apollo's
 /// `match_skill()`).
 ///
-/// Note: unthinkclaw's template variable substitution and inline shell
+/// Note: apollo's template variable substitution and inline shell
 /// preprocessing (`preprocess_skill_content`) are not part of rx4's
-/// SkillEngine and remain in unthinkclaw's `skills` module. Use
+/// SkillEngine and remain in apollo's `skills` module. Use
 /// `skills::preprocess_skill_content()` on the matched skill's instructions
 /// before injecting into the system prompt.
 pub fn build_rx4_skill_engine(workspace: &std::path::Path) -> rx4::SkillEngine {
     let home = dirs::home_dir().unwrap_or_default();
 
     // Primary dir: managed skills in the workspace
-    let managed_dir = workspace.join(".unthinkclaw/skills");
+    let managed_dir = workspace.join(".apollo/skills");
 
     let mut engine = rx4::SkillEngine::new(managed_dir);
 
@@ -489,12 +486,12 @@ pub fn build_rx4_skill_engine(workspace: &std::path::Path) -> rx4::SkillEngine {
 
 /// Match a skill using rx4's SkillEngine keyword search.
 ///
-/// This replaces unthinkclaw's `skills::match_skill()` when using the rx4
+/// This replaces apollo's `skills::match_skill()` when using the rx4
 /// bridge path. Returns the best-matching skill's name and instructions
 /// (raw, unpreprocessed).
 ///
 /// The caller should preprocess the instructions using
-/// `unthinkclaw::skills::preprocess_skill_content()` before injecting
+/// `apollo::skills::preprocess_skill_content()` before injecting
 /// into the system prompt, as rx4's SkillEngine does not perform template
 /// variable substitution or inline shell expansion.
 pub fn match_skill_via_rx4(
@@ -511,13 +508,13 @@ pub fn match_skill_via_rx4(
     Some((skill.name.clone(), skill.instructions.clone()))
 }
 
-/// Discover skills using rx4's SkillEngine, returning unthinkclaw-compatible
+/// Discover skills using rx4's SkillEngine, returning apollo-compatible
 /// Skill structs for backward compatibility with existing code that expects
 /// the `Vec<skills::Skill>` type.
 ///
 /// This loads skills from disk via rx4's SkillEngine (which handles both
 /// JSON and SKILL.md formats with YAML frontmatter), then converts them to
-/// unthinkclaw's Skill type.
+/// apollo's Skill type.
 pub fn discover_skills_via_rx4(workspace: &std::path::Path) -> Vec<crate::skills::Skill> {
     let mut engine = build_rx4_skill_engine(workspace);
     if engine.load().is_err() {
@@ -542,7 +539,7 @@ pub fn discover_skills_via_rx4(workspace: &std::path::Path) -> Vec<crate::skills
 // ── Memory bridge ────────────────────────────────────────────────────────
 
 /// Bridge that wraps rx4's GraphMemory for agent memory (concepts, decisions,
-/// patterns, bugs) while keeping unthinkclaw's SurrealDB for channel state,
+/// patterns, bugs) while keeping apollo's SurrealDB for channel state,
 /// swarm coordination, and cron scheduling.
 ///
 /// rx4's GraphMemory is an in-memory knowledge graph with PageRank, community
@@ -555,7 +552,7 @@ pub fn discover_skills_via_rx4(workspace: &std::path::Path) -> Vec<crate::skills
 /// - JSON persistence for the graph
 ///
 /// TODO: Enable rx4's `memory` feature to also get SQLite FTS5 full-text search
-/// via rx4::MemoryStore. For now, unthinkclaw's SurrealDB backend remains
+/// via rx4::MemoryStore. For now, apollo's SurrealDB backend remains
 /// the primary persistent memory for conversation history and key-value store.
 pub struct RotaryMemoryBridge {
     graph: rx4::GraphMemory,
@@ -568,7 +565,7 @@ impl RotaryMemoryBridge {
     /// Create a new memory bridge rooted at the given workspace.
     pub fn new(workspace: &std::path::Path) -> Self {
         let graph = rx4::GraphMemory::from_workspace(workspace);
-        let graph_path = workspace.join(".unthinkclaw/graph_memory.json");
+        let graph_path = workspace.join(".apollo/graph_memory.json");
         Self {
             graph,
             extractor: rx4::ConversationExtractor::new(),
@@ -723,7 +720,7 @@ mod tests {
         let engine = build_rx4_skill_engine(tmp.path());
         assert!(
             engine.skills_dir().exists()
-                || engine.skills_dir() == tmp.path().join(".unthinkclaw/skills")
+                || engine.skills_dir() == tmp.path().join(".apollo/skills")
         );
     }
 

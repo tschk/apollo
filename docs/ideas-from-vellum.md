@@ -23,7 +23,7 @@ Lean copies for `main` — no hosted control plane, no 8-type memory taxonomy.
 - Full notification routing engine
 - Native `auth-profiles.json` (OpenClaw import still works via `bootstrap.rs`)
 
-## Config sketch (`unthinkclaw.json`)
+## Config sketch (`apollo.json`)
 
 ```json
 {
@@ -35,8 +35,8 @@ Lean copies for `main` — no hosted control plane, no 8-type memory taxonomy.
   },
   "zkr": {
     "enabled": true,
-    "database": ".unthinkclaw/zkr.db",
-    "tenant_id": "unthinkclaw",
+    "database": ".apollo/zkr.db",
+    "tenant_id": "apollo",
     "person_id": "local",
     "auto_capture": true,
     "inject_recall": true,

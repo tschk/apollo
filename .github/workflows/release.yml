@@ -41,14 +41,14 @@ jobs:
 
       - name: Package tarball
         run: |
-          BIN="target/${{ matrix.target }}/release/unthinkclaw"
+          BIN="target/${{ matrix.target }}/release/apollo"
           strip "$BIN" 2>/dev/null || true
-          tar czvf "unthinkclaw-${{ matrix.suffix }}.tar.gz" -C "target/${{ matrix.target }}/release" unthinkclaw
+          tar czvf "apollo-${{ matrix.suffix }}.tar.gz" -C "target/${{ matrix.target }}/release" apollo
 
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.suffix }}
-          path: unthinkclaw-${{ matrix.suffix }}.tar.gz
+          path: apollo-${{ matrix.suffix }}.tar.gz
 
   publish:
     needs: build

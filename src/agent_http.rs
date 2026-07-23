@@ -51,7 +51,7 @@ pub async fn chat_once(
 }
 
 pub fn http_listen_addr() -> SocketAddr {
-    let port = std::env::var("UNTHINKCLAW_HTTP_PORT")
+    let port = std::env::var("APOLLO_HTTP_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(31338);
@@ -77,16 +77,16 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) {
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
-                tracing::error!("unthinkclaw http bind {}: {}", addr, e);
+                tracing::error!("apollo http bind {}: {}", addr, e);
                 return;
             }
         };
         tracing::info!(
-            "unthinkclaw agent HTTP http://{}/v1/chat · WS /v1/chat/stream",
+            "apollo agent HTTP http://{}/v1/chat · WS /v1/chat/stream",
             addr
         );
         if let Err(e) = axum::serve(listener, app).await {
-            tracing::error!("unthinkclaw http server: {}", e);
+            tracing::error!("apollo http server: {}", e);
         }
     });
 }

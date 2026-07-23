@@ -184,7 +184,7 @@ impl TelegramChannel {
 
         // 3. Create temp file
         let temp_dir = std::env::temp_dir();
-        let temp_path = temp_dir.join(format!("unthinkclaw_voice_{}.ogg", uuid::Uuid::new_v4()));
+        let temp_path = temp_dir.join(format!("apollo_voice_{}.ogg", uuid::Uuid::new_v4()));
         tokio::fs::write(&temp_path, file_bytes).await?;
 
         // 4. Call faster-whisper via Python (async)

@@ -1,20 +1,20 @@
 [package]
-name = "unthinkclaw"
+name = "apollo"
 version = "0.2.2"
 edition = "2021"
 description = "Local-first Rust AI agent runtime — Telegram-first, trait-driven, SurrealDB + RocksDB state layer."
 license = "MIT"
-repository = "https://github.com/undivisible/unthinkclaw"
+repository = "https://github.com/undivisible/apollo"
 keywords = ["agent", "ai", "llm", "telegram", "automation"]
 categories = ["command-line-utilities", "web-programming::http-client"]
 
 [[bin]]
-name = "unthinkclaw"
+name = "apollo"
 path = "src/main.rs"
 
 [[bin]]
-name = "unthinkclaw-install"
-path = "src/bin/unthinkclaw_install.rs"
+name = "apollo-install"
+path = "src/bin/apollo_install.rs"
 
 [features]
 default = [
@@ -71,7 +71,7 @@ computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 [dependencies]
 # Rotary (rx4) — agent harness engine providing the core agent loop, tools,
 # providers, sessions, skills, memory, guardrails, and MCP support.
-# Used during the migration from unthinkclaw's built-in agent loop to rx4's
+# Used during the migration from apollo's built-in agent loop to rx4's
 # harness.
 rx4 = { version = "0.3.23", default-features = false, features = ["ipc", "builtin-tools", "providers", "mcp", "skills", "graph-memory"] }
 

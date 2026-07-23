@@ -247,8 +247,8 @@ impl Default for ZkrConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            database: PathBuf::from(".unthinkclaw/zkr.db"),
-            tenant_id: "unthinkclaw".to_string(),
+            database: PathBuf::from(".apollo/zkr.db"),
+            tenant_id: "apollo".to_string(),
             person_id: "local".to_string(),
             auto_capture: true,
             inject_recall: true,
@@ -386,7 +386,7 @@ impl Default for SelfUpdateConfig {
             interval_secs: 900,
             remote: "origin".to_string(),
             branch: "main".to_string(),
-            restart_service: Some("unthinkclaw".to_string()),
+            restart_service: Some("apollo".to_string()),
         }
     }
 }
@@ -395,7 +395,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             backend: "surreal".to_string(),
-            root: PathBuf::from(".unthinkclaw"),
+            root: PathBuf::from(".apollo"),
         }
     }
 }
@@ -404,7 +404,7 @@ impl Default for HostingConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            tenant_root: PathBuf::from(".unthinkclaw/tenants"),
+            tenant_root: PathBuf::from(".apollo/tenants"),
             session_timeout_minutes: 120,
             default_channel: "gateway".to_string(),
         }
@@ -414,7 +414,7 @@ impl Default for HostingConfig {
 impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
-            service_name: "unthinkclaw".to_string(),
+            service_name: "apollo".to_string(),
             environment: "development".to_string(),
             json_logs: false,
             trace_header_name: "traceparent".to_string(),

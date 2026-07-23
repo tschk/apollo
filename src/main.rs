@@ -1,4 +1,4 @@
-//! unthinkclaw — Lightweight agent runtime CLI
+//! apollo — Lightweight agent runtime CLI
 //! Successor to OpenClaw. Best-of-breed from ZeroClaw, NanoClaw, HiClaw.
 
 use std::path::PathBuf;
@@ -6,31 +6,27 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
-use unthinkclaw::agent::hooks::PermissionHook;
-use unthinkclaw::agent::{agent_mode_from_permission_profile, AgentRunner};
-use unthinkclaw::bootstrap::{
+use apollo::agent::hooks::PermissionHook;
+use apollo::agent::{agent_mode_from_permission_profile, AgentRunner};
+use apollo::bootstrap::{
     build_base_tools, build_embedding_provider, build_memory_backend, build_provider, load_config,
 };
 #[cfg(feature = "channel-cli")]
-use unthinkclaw::channels::cli::CliChannel;
+use apollo::channels::cli::CliChannel;
 #[cfg(feature = "channel-discord")]
-use unthinkclaw::channels::discord::DiscordChannel;
-use unthinkclaw::config::{apply_permission_profile, Config};
-use unthinkclaw::cron_scheduler::CronScheduler;
-use unthinkclaw::diagnostics::{collect_doctor_report, render_doctor_report, render_findings};
-use unthinkclaw::heartbeat::{self, HeartbeatConfig};
-use unthinkclaw::policy::ExecutionPolicy;
-use unthinkclaw::prompt;
-use unthinkclaw::self_update::{SelfUpdater, UpdateOutcome};
-use unthinkclaw::skills;
-use unthinkclaw::telegram_runtime::{run_telegram_chat, TelegramChatRun};
+use apollo::channels::discord::DiscordChannel;
+use apollo::config::{apply_permission_profile, Config};
+use apollo::cron_scheduler::CronScheduler;
+use apollo::diagnostics::{collect_doctor_report, render_doctor_report, render_findings};
+use apollo::heartbeat::{self, HeartbeatConfig};
+use apollo::policy::ExecutionPolicy;
+use apollo::prompt;
+use apollo::self_update::{SelfUpdater, UpdateOutcome};
+use apollo::skills;
+use apollo::telegram_runtime::{run_telegram_chat, TelegramChatRun};
 
 #[derive(Parser)]
-#[command(
-    name = "unthinkclaw",
-    about = "Lightweight agent runtime — unthink everything",
-    version
-)]
+#[command(name = "apollo", about = "Lightweight agent runtime — Apollo", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -41,7 +37,7 @@ enum Commands {
     /// Start interactive agent chat
     Chat {
         /// Configuration file path
-        #[arg(short, long, default_value = "unthinkclaw.json")]
+        #[arg(short, long, default_value = "apollo.json")]
         config: String,
 
         /// Override the model
@@ -79,7 +75,7 @@ enum Commands {
         message: String,
 
         /// Configuration file path
-        #[arg(short, long, default_value = "unthinkclaw.json")]
+        #[arg(short, long, default_value = "apollo.json")]
         config: String,
 
         /// Override the model
@@ -90,7 +86,7 @@ enum Commands {
     /// Run system diagnostics and config validation
     Doctor {
         /// Configuration file path
-        #[arg(short, long, default_value = "unthinkclaw.json")]
+        #[arg(short, long, default_value = "apollo.json")]
         config: String,
 
         /// Show more dependency checks
@@ -105,7 +101,7 @@ enum Commands {
     /// Run a focused security/config audit
     Audit {
         /// Configuration file path
-        #[arg(short, long, default_value = "unthinkclaw.json")]
+        #[arg(short, long, default_value = "apollo.json")]
         config: String,
 
         /// Output JSON
@@ -119,7 +115,7 @@ enum Commands {
     /// Run as an MCP server (stdio or HTTP for Cloudflare Container)
     Mcp {
         /// Configuration file path
-        #[arg(short, long, default_value = "unthinkclaw.json")]
+        #[arg(short, long, default_value = "apollo.json")]
         config: String,
 
         /// Workspace directory
@@ -138,7 +134,7 @@ enum Commands {
     /// Run one self-update cycle against the current repo
     SelfUpdate {
         /// Configuration file path
-        #[arg(short, long, default_value = "unthinkclaw.json")]
+        #[arg(short, long, default_value = "apollo.json")]
         config: String,
 
         /// Workspace directory
@@ -193,13 +189,13 @@ enum Commands {
         permission_profile: Option<String>,
     },
 
-    /// Send a message to the running unthinkclaw bot via Telegram
+    /// Send a message to the running apollo bot via Telegram
     #[command(alias = "msg")]
     Message {
         /// Message text
         message: String,
 
-        /// Chat ID (defaults to UNTHINKCLAW_CHAT_ID from .env)
+        /// Chat ID (defaults to APOLLO_CHAT_ID from .env)
         #[arg(long)]
         chat_id: Option<String>,
 
@@ -214,7 +210,7 @@ enum Commands {
         action: CronAction,
 
         /// Configuration file path
-        #[arg(short, long, default_value = "unthinkclaw.json")]
+        #[arg(short, long, default_value = "apollo.json")]
         config: String,
 
         /// Workspace directory
@@ -288,11 +284,11 @@ enum SwarmAction {
     /// Start swarm coordinator
     Start {
         /// SurrealDB path
-        #[arg(long, default_value = ".unthinkclaw/state.surreal")]
+        #[arg(long, default_value = ".apollo/state.surreal")]
         surreal_path: String,
 
         /// RocksDB cache path
-        #[arg(long, default_value = ".unthinkclaw/cache")]
+        #[arg(long, default_value = ".apollo/cache")]
         cache_path: String,
     },
 
@@ -425,9 +421,9 @@ async fn main() -> anyhow::Result<()> {
             discord_channel_id: _discord_channel_id,
         } => {
             let workspace = workspace.unwrap_or_else(|| load_config(&config).workspace.clone());
-            let cfg = unthinkclaw::bootstrap::load_config_workspace(&config, Some(&workspace));
+            let cfg = apollo::bootstrap::load_config_workspace(&config, Some(&workspace));
             let model = model.unwrap_or(cfg.model.clone());
-            let _ = unthinkclaw::workspace_init::ensure_workspace_kit(&workspace);
+            let _ = apollo::workspace_init::ensure_workspace_kit(&workspace);
 
             let provider = build_provider(&cfg);
             let policy = Arc::new(ExecutionPolicy::from_config(&cfg.policy));
@@ -446,7 +442,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Build shared zkr memory store (used by both the zkr tool and the runner)
             #[cfg(feature = "zkr-memory")]
-            let zkr_store = unthinkclaw::bootstrap::build_zkr_store(&workspace, &cfg)
+            let zkr_store = apollo::bootstrap::build_zkr_store(&workspace, &cfg)
                 .ok()
                 .flatten();
 
@@ -472,8 +468,7 @@ async fn main() -> anyhow::Result<()> {
             );
 
             // Load any previously created dynamic tools
-            let dynamic_tools =
-                unthinkclaw::tools::dynamic::DynamicTool::load_all(Arc::clone(&policy));
+            let dynamic_tools = apollo::tools::dynamic::DynamicTool::load_all(Arc::clone(&policy));
             let dynamic_count = dynamic_tools.len();
             for dt in dynamic_tools {
                 tools.push(Arc::new(dt));
@@ -485,13 +480,11 @@ async fn main() -> anyhow::Result<()> {
             // Start swarm coordinator if requested
             #[cfg(feature = "swarm")]
             let coordinator = {
-                let storage: Arc<dyn unthinkclaw::swarm::SwarmStorage> = Arc::new(
-                    unthinkclaw::swarm::SurrealBackend::new(
-                        &workspace.join(".unthinkclaw/swarm.surreal"),
-                    )
-                    .await?,
+                let storage: Arc<dyn apollo::swarm::SwarmStorage> = Arc::new(
+                    apollo::swarm::SurrealBackend::new(&workspace.join(".apollo/swarm.surreal"))
+                        .await?,
                 );
-                let coord = Arc::new(unthinkclaw::swarm::SwarmCoordinator::new(storage));
+                let coord = Arc::new(apollo::swarm::SwarmCoordinator::new(storage));
                 coord.init().await?;
                 Some(coord)
             };
@@ -514,7 +507,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             {
-                let mut host_reg = unthinkclaw::plugin::PluginRegistry::new();
+                let mut host_reg = apollo::plugin::PluginRegistry::new();
                 host_reg.ingest_host_plugins(&workspace, &cfg.plugin_layer.host_plugin_roots);
                 runner = runner.with_plugin_registry(host_reg).await;
             }
@@ -526,11 +519,11 @@ async fn main() -> anyhow::Result<()> {
 
             let runner_arc = Arc::new(runner);
 
-            if std::env::var("UNTHINKCLAW_HTTP")
+            if std::env::var("APOLLO_HTTP")
                 .map(|v| v != "0")
                 .unwrap_or(true)
             {
-                unthinkclaw::agent_http::spawn_http_server(Arc::clone(&runner_arc));
+                apollo::agent_http::spawn_http_server(Arc::clone(&runner_arc));
             }
 
             runner_arc.add_hook(Arc::new(PermissionHook::new(
@@ -540,29 +533,27 @@ async fn main() -> anyhow::Result<()> {
 
             #[cfg(feature = "swarm")]
             runner_arc
-                .add_tool(Arc::new(unthinkclaw::tools::CodingSwarmTool::new(
+                .add_tool(Arc::new(apollo::tools::CodingSwarmTool::new(
                     runner_arc.clone(),
                     3,
                 )))
                 .await;
             runner_arc
-                .add_tool(Arc::new(
-                    unthinkclaw::tools::tool_search::ToolSearchTool::new(runner_arc.tools.clone()),
-                ))
+                .add_tool(Arc::new(apollo::tools::tool_search::ToolSearchTool::new(
+                    runner_arc.tools.clone(),
+                )))
                 .await;
             runner_arc
-                .add_tool(Arc::new(
-                    unthinkclaw::tools::mode_switch::ModeSwitchTool::new(runner_arc.mode_handle()),
-                ))
+                .add_tool(Arc::new(apollo::tools::mode_switch::ModeSwitchTool::new(
+                    runner_arc.mode_handle(),
+                )))
                 .await;
 
             // Add claude_usage tool (needs cost tracker reference)
             runner_arc
-                .add_tool(Arc::new(
-                    unthinkclaw::tools::claude_usage::ClaudeUsageTool::new(
-                        runner_arc.cost_tracker(),
-                    ),
-                ))
+                .add_tool(Arc::new(apollo::tools::claude_usage::ClaudeUsageTool::new(
+                    runner_arc.cost_tracker(),
+                )))
                 .await;
 
             // Start cron scheduler background task and add tool
@@ -576,16 +567,14 @@ async fn main() -> anyhow::Result<()> {
             let mut cron_runtime = None;
             if let Some(surreal_mem) = memory
                 .as_any()
-                .downcast_ref::<unthinkclaw::memory::surreal::SurrealMemory>()
+                .downcast_ref::<apollo::memory::surreal::SurrealMemory>()
             {
                 let cron_sched = Arc::new(CronScheduler::new(Arc::new(surreal_mem.clone())));
-                let (cron_rx, cron_shutdown) = unthinkclaw::cron_scheduler::start_cron_ticker(
-                    cron_sched.clone(),
-                    channel.clone(),
-                );
+                let (cron_rx, cron_shutdown) =
+                    apollo::cron_scheduler::start_cron_ticker(cron_sched.clone(), channel.clone());
 
                 runner_arc
-                    .add_tool(Arc::new(unthinkclaw::tools::cron_tool::CronTool::new(
+                    .add_tool(Arc::new(apollo::tools::cron_tool::CronTool::new(
                         cron_sched.clone(),
                         channel.clone(),
                         scheduled_chat_id.clone(),
@@ -601,7 +590,7 @@ async fn main() -> anyhow::Result<()> {
                 #[cfg(feature = "channel-cli")]
                 "cli" => {
                     println!(
-                        "unthinkclaw v{} — {} via {}",
+                        "apollo v{} — {} via {}",
                         env!("CARGO_PKG_VERSION"),
                         cfg.model,
                         cfg.provider.name
@@ -610,8 +599,8 @@ async fn main() -> anyhow::Result<()> {
                     println!("   Channel: CLI");
                     println!("   Type /quit to exit");
                     println!(
-                        "   Agent HTTP: http://{}/v1/chat (UNTHINKCLAW_HTTP_PORT)",
-                        unthinkclaw::agent_http::http_listen_addr()
+                        "   Agent HTTP: http://{}/v1/chat (APOLLO_HTTP_PORT)",
+                        apollo::agent_http::http_listen_addr()
                     );
                     println!();
 
@@ -660,7 +649,7 @@ async fn main() -> anyhow::Result<()> {
                     let channel_id = _discord_channel_id
                         .ok_or_else(|| anyhow::anyhow!("--discord-channel-id required"))?;
 
-                    println!("unthinkclaw — {} via Discord", cfg.model);
+                    println!("apollo — {} via Discord", cfg.model);
                     println!("   Channel ID: {}", channel_id);
                     println!("   Listening for messages...");
 
@@ -713,7 +702,7 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Audit { config, json } => {
             let cfg = load_config(&config);
-            let findings = unthinkclaw::diagnostics::audit_config(&cfg);
+            let findings = apollo::diagnostics::audit_config(&cfg);
             if json {
                 println!("{}", serde_json::to_string_pretty(&findings)?);
             } else {
@@ -722,7 +711,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::Status => {
-            println!("unthinkclaw v{}", env!("CARGO_PKG_VERSION"));
+            println!("apollo v{}", env!("CARGO_PKG_VERSION"));
             println!("Status: OK");
             println!(
                 "Commands: chat, ask, doctor, audit, status, mcp, self-update, init, cron, swarm"
@@ -745,7 +734,7 @@ async fn main() -> anyhow::Result<()> {
             let embedding_provider = build_embedding_provider(&cfg)?;
 
             #[cfg(feature = "zkr-memory")]
-            let zkr_store = unthinkclaw::bootstrap::build_zkr_store(&workspace, &cfg)
+            let zkr_store = apollo::bootstrap::build_zkr_store(&workspace, &cfg)
                 .ok()
                 .flatten();
             #[cfg(feature = "zkr-memory")]
@@ -771,7 +760,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(port) = port {
                 let system_prompt = cfg.system_prompt.clone();
                 let runner = Arc::new(
-                    unthinkclaw::agent::loop_runner::AgentRunner::new(
+                    apollo::agent::loop_runner::AgentRunner::new(
                         Arc::clone(&provider),
                         tools.clone(),
                         Arc::clone(&memory),
@@ -788,12 +777,12 @@ async fn main() -> anyhow::Result<()> {
                     cfg.agent.permissions.allow.clone(),
                 )));
                 eprintln!(
-                    "unthinkclaw v{} — MCP HTTP server on port {} ({})",
+                    "apollo v{} — MCP HTTP server on port {} ({})",
                     env!("CARGO_PKG_VERSION"),
                     port,
                     model
                 );
-                unthinkclaw::mcp_server::run_mcp_server_http(
+                apollo::mcp_server::run_mcp_server_http(
                     tools,
                     Some(provider),
                     Some(model),
@@ -803,11 +792,11 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             } else {
                 eprintln!(
-                    "unthinkclaw v{} — MCP server mode ({})",
+                    "apollo v{} — MCP server mode ({})",
                     env!("CARGO_PKG_VERSION"),
                     model
                 );
-                unthinkclaw::mcp_server::run_mcp_server(tools, Some(provider), Some(model)).await?;
+                apollo::mcp_server::run_mcp_server(tools, Some(provider), Some(model)).await?;
             }
         }
 
@@ -846,7 +835,7 @@ async fn main() -> anyhow::Result<()> {
             permission_profile,
         } => {
             let workspace = workspace.unwrap_or_else(|| PathBuf::from("."));
-            println!("🐾 unthinkclaw setup\n");
+            println!("🐾 apollo setup\n");
 
             // === Resolve values (flags or interactive prompts) ===
             let provider = match provider {
@@ -1038,16 +1027,16 @@ async fn main() -> anyhow::Result<()> {
                 env_content.push_str(&format!("OPENAI_API_KEY=\"{}\"\n", api_key));
             }
             if let Some(ref t) = tg_token {
-                env_content.push_str(&format!("UNTHINKCLAW_TELEGRAM_TOKEN=\"{}\"\n", t));
+                env_content.push_str(&format!("APOLLO_TELEGRAM_TOKEN=\"{}\"\n", t));
             }
             if let Some(ref c) = tg_chat_id {
-                env_content.push_str(&format!("UNTHINKCLAW_CHAT_ID=\"{}\"\n", c));
+                env_content.push_str(&format!("APOLLO_CHAT_ID=\"{}\"\n", c));
             }
             if let Some(ref t) = dc_token {
-                env_content.push_str(&format!("UNTHINKCLAW_DISCORD_TOKEN=\"{}\"\n", t));
+                env_content.push_str(&format!("APOLLO_DISCORD_TOKEN=\"{}\"\n", t));
             }
             if let Some(ref c) = dc_channel {
-                env_content.push_str(&format!("UNTHINKCLAW_DISCORD_CHANNEL=\"{}\"\n", c));
+                env_content.push_str(&format!("APOLLO_DISCORD_CHANNEL=\"{}\"\n", c));
             }
             std::fs::write(&env_path, &env_content)?;
 
@@ -1067,11 +1056,11 @@ async fn main() -> anyhow::Result<()> {
             cfg.model = model.clone();
             apply_permission_profile(&mut cfg, &permission_profile);
             let json = serde_json::to_string_pretty(&cfg)?;
-            let config_path = workspace.join("unthinkclaw.json");
+            let config_path = workspace.join("apollo.json");
             std::fs::write(&config_path, &json)?;
 
             // === Write systemd service ===
-            let bin_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("unthinkclaw"));
+            let bin_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("apollo"));
             let service_dir = dirs::home_dir()
                 .unwrap_or_default()
                 .join(".config/systemd/user");
@@ -1080,7 +1069,7 @@ async fn main() -> anyhow::Result<()> {
             let mut exec_args = format!("{} chat --channel {}", bin_path.display(), channel);
             if tg_token.is_some() {
                 exec_args.push_str(&format!(
-                    " --telegram-token $UNTHINKCLAW_TELEGRAM_TOKEN --telegram-chat-id {}",
+                    " --telegram-token $APOLLO_TELEGRAM_TOKEN --telegram-chat-id {}",
                     tg_chat_id.as_deref().unwrap_or("0")
                 ));
             }
@@ -1101,15 +1090,15 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let service = format!(
-                "[Unit]\nDescription=unthinkclaw AI agent\nAfter=network-online.target\n\n\
+                "[Unit]\nDescription=apollo AI agent\nAfter=network-online.target\n\n\
                 [Service]\nType=simple\nExecStart={}\nRestart=always\nRestartSec=5\n\
-                WorkingDirectory={}\nStandardOutput=append:/tmp/unthinkclaw.log\n\
-                StandardError=append:/tmp/unthinkclaw.log\n\n\
+                WorkingDirectory={}\nStandardOutput=append:/tmp/apollo.log\n\
+                StandardError=append:/tmp/apollo.log\n\n\
                 [Install]\nWantedBy=default.target\n",
                 run_path.display(),
                 workspace.display()
             );
-            std::fs::write(service_dir.join("unthinkclaw.service"), &service)?;
+            std::fs::write(service_dir.join("apollo.service"), &service)?;
 
             // === Summary ===
             println!("\n✅ Setup complete!\n");
@@ -1123,11 +1112,11 @@ async fn main() -> anyhow::Result<()> {
             );
             println!("  Config:    {}", config_path.display());
             println!("  Secrets:   {}", env_path.display());
-            println!("  Service:   ~/.config/systemd/user/unthinkclaw.service");
+            println!("  Service:   ~/.config/systemd/user/apollo.service");
             println!("\n  Commands:");
             println!("    systemctl --user daemon-reload");
-            println!("    systemctl --user enable --now unthinkclaw");
-            println!("    journalctl --user -u unthinkclaw -f");
+            println!("    systemctl --user enable --now apollo");
+            println!("    journalctl --user -u apollo -f");
 
             // === Auto-start ===
             if start {
@@ -1136,9 +1125,9 @@ async fn main() -> anyhow::Result<()> {
                     .args(["--user", "daemon-reload"])
                     .status();
                 let _ = std::process::Command::new("systemctl")
-                    .args(["--user", "enable", "--now", "unthinkclaw"])
+                    .args(["--user", "enable", "--now", "apollo"])
                     .status();
-                println!("  🐾 unthinkclaw is running!");
+                println!("  🐾 apollo is running!");
             }
         }
 
@@ -1156,7 +1145,7 @@ async fn main() -> anyhow::Result<()> {
 
             match resp {
                 Ok(r) if r.status().is_success() => {
-                    println!("✅ Sent to unthinkclaw");
+                    println!("✅ Sent to apollo");
                 }
                 Ok(r) => {
                     eprintln!(
@@ -1166,7 +1155,9 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
                 Err(_) => {
-                    eprintln!("❌ Can't reach unthinkclaw. Is it running? (systemctl --user status unthinkclaw)");
+                    eprintln!(
+                        "❌ Can't reach apollo. Is it running? (systemctl --user status apollo)"
+                    );
                 }
             }
         }
@@ -1182,7 +1173,7 @@ async fn main() -> anyhow::Result<()> {
 
             if let Some(surreal_mem) = memory
                 .as_any()
-                .downcast_ref::<unthinkclaw::memory::surreal::SurrealMemory>()
+                .downcast_ref::<apollo::memory::surreal::SurrealMemory>()
             {
                 let scheduler = CronScheduler::new(Arc::new(surreal_mem.clone()));
 
@@ -1254,13 +1245,13 @@ async fn main() -> anyhow::Result<()> {
 
             #[cfg(feature = "swarm")]
             {
-                use unthinkclaw::swarm::models::LinkDirection;
-                use unthinkclaw::swarm::{
+                use apollo::swarm::models::LinkDirection;
+                use apollo::swarm::{
                     AgentCapability, SurrealBackend, SwarmCoordinator, SwarmStorage, TaskPriority,
                 };
 
                 let workspace = workspace.unwrap_or_else(|| PathBuf::from("."));
-                let surreal_path = workspace.join(".unthinkclaw/swarm.surreal");
+                let surreal_path = workspace.join(".apollo/swarm.surreal");
 
                 // Ensure directory exists
                 if let Some(parent) = surreal_path.parent() {
@@ -1650,7 +1641,7 @@ fn config_path_for_cli(cli: &Cli) -> Option<String> {
     }
 }
 
-fn init_tracing(cfg: &unthinkclaw::config::ObservabilityConfig) -> anyhow::Result<()> {
+fn init_tracing(cfg: &apollo::config::ObservabilityConfig) -> anyhow::Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::from_default_env();
     let fmt = tracing_subscriber::fmt().with_env_filter(env_filter);
     if cfg.json_logs {
