@@ -197,6 +197,68 @@ impl ZkrStore {
         output.push_str("</zkr_memory>");
         Ok(Some(output))
     }
+
+    pub async fn record_reflection(
+        &self,
+        context: &str,
+        action: &str,
+        outcome: &str,
+        lesson: &str,
+    ) -> anyhow::Result<Remembered> {
+        let text =
+            format!("Context: {context}\nAction: {action}\nOutcome: {outcome}\nLesson: {lesson}");
+        let claim = ClaimInput {
+            subject: context.to_string(),
+            predicate: "improved".to_string(),
+            value: lesson.to_string(),
+            kind: ClaimKind::Skill,
+            valid_from: chrono::Utc::now().timestamp(),
+            tier: zkr::MemoryTier::LongTerm,
+            processing_state: zkr::MemoryProcessingState::Processed,
+        };
+        self.remember(
+            text,
+            SourceKind::Integration,
+            Some(format!("self_improve:{}", nanos())),
+            Some(claim),
+            chrono::Utc::now().timestamp(),
+        )
+        .await
+    }
+
+    pub async fn augment_prompt(&self, query: &str, base: &str) -> anyhow::Result<String> {
+        let mut lessons = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for q in ["self improve lessons", query] {
+            let pack = self.search(q.to_string(), 5).await?;
+            for item in pack.items {
+                let text = item.excerpt.trim().to_string();
+                if seen.insert(text.clone()) {
+                    lessons.push(text);
+                }
+            }
+        }
+
+        if lessons.is_empty() {
+            return Ok(base.to_string());
+        }
+
+        let mut augmented = base.to_string();
+        augmented.push_str("\n\n<lessons_learned>\n");
+        for (i, lesson) in lessons.iter().take(5).enumerate() {
+            augmented.push_str(&format!("{}. {lesson}\n", i + 1));
+        }
+        augmented.push_str("</lessons_learned>");
+        Ok(augmented)
+    }
+}
+
+fn nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 pub fn source_kind(value: &str) -> anyhow::Result<SourceKind> {

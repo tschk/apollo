@@ -241,6 +241,7 @@ pub struct ZkrConfig {
     pub auto_capture: bool,
     pub inject_recall: bool,
     pub recall_limit: u32,
+    pub self_improve: bool,
 }
 
 impl Default for ZkrConfig {
@@ -253,6 +254,7 @@ impl Default for ZkrConfig {
             auto_capture: true,
             inject_recall: true,
             recall_limit: 5,
+            self_improve: true,
         }
     }
 }

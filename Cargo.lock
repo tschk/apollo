@@ -4721,9 +4721,9 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rx4"
-version = "0.3.23"
+version = "0.3.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d202959ed8c32abe0ae488ed8d881f744e610f070bf2ea1239f6202b901a131"
+checksum = "901f986d96a321dcfaaff48ccb71c0f10d4561753cd3ddedbc44c04035b8f659"
 dependencies = [
  "async-trait",
  "cancellation-token",
@@ -4746,6 +4746,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zkr",
 ]
 
 [[package]]
@@ -7262,9 +7263,9 @@ dependencies = [
 
 [[package]]
 name = "zkr"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfeb1fb2ea2ba1cd2a26d4047de282cf703682a48bff184ed43c47253af5a1fa"
+checksum = "d4cad430a77adac42848046980982a5cd08a8b680b7da99d6e3853b70debef42"
 dependencies = [
  "rusqlite",
  "serde",

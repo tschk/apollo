@@ -77,7 +77,7 @@ computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 # providers, sessions, skills, memory, guardrails, and MCP support.
 # Used during the migration from apollo's built-in agent loop to rx4's
 # harness.
-rx4 = { version = "0.3.23", default-features = false, features = ["ipc", "builtin-tools", "providers", "mcp", "skills", "graph-memory"] }
+rx4 = { version = "0.3.25", default-features = false, features = ["ipc", "builtin-tools", "providers", "mcp", "skills", "graph-memory", "zkr-memory"] }
 
 # Async runtime (optimized features only)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }
@@ -138,7 +138,7 @@ regex = "1"
 dirs = "5.0"
 praefectus = { version = "=0.4.0", optional = true }
 ed25519-dalek = { version = "2.1", features = ["rand_core"], optional = true }
-zkr = { version = "0.3.0", optional = true }
+zkr = { version = "0.3.1", optional = true }
 rs_ai = { version = "0.2", optional = true }
 rs_ai_core = { version = "0.2", optional = true }
 rs_ai_providers = { version = "0.2", optional = true, features = ["claude", "chatgpt", "gemini", "openai-compatible", "xai", "cloudflare"] }

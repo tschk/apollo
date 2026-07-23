@@ -76,8 +76,6 @@ pub struct AgentRunner {
     zkr: Option<Arc<crate::memory::zkr::ZkrStore>>,
     #[cfg(feature = "zkr-memory")]
     zkr_config: crate::config::ZkrConfig,
-    #[cfg(feature = "zkr-memory")]
-    self_improve: Option<Arc<crate::agent::SelfImprove>>,
     session_note_workspace: Option<PathBuf>,
 }
 
@@ -120,8 +118,6 @@ impl AgentRunner {
             zkr: None,
             #[cfg(feature = "zkr-memory")]
             zkr_config: crate::config::ZkrConfig::default(),
-            #[cfg(feature = "zkr-memory")]
-            self_improve: None,
             session_note_workspace: None,
         }
     }
@@ -206,12 +202,6 @@ impl AgentRunner {
     ) -> Self {
         self.zkr = store;
         self.zkr_config = cfg;
-        self
-    }
-
-    #[cfg(feature = "zkr-memory")]
-    pub fn with_self_improve(mut self, improve: Option<Arc<crate::agent::SelfImprove>>) -> Self {
-        self.self_improve = improve;
         self
     }
 
@@ -635,13 +625,17 @@ impl AgentRunner {
 
         let base_prompt = self.system_prompt.read().await.clone();
         #[cfg(feature = "zkr-memory")]
-        let system_prompt = if let Some(improve) = &self.self_improve {
-            match improve.augment_prompt(&effective_text, &base_prompt).await {
-                Ok(augmented) => augmented,
-                Err(error) => {
-                    tracing::warn!("self-improve augmentation failed: {error}");
-                    base_prompt
+        let system_prompt = if self.zkr_config.self_improve {
+            if let Some(store) = &self.zkr {
+                match store.augment_prompt(&effective_text, &base_prompt).await {
+                    Ok(augmented) => augmented,
+                    Err(error) => {
+                        tracing::warn!("self-improve augmentation failed: {error}");
+                        base_prompt
+                    }
                 }
+            } else {
+                base_prompt
             }
         } else {
             base_prompt
@@ -1404,10 +1398,12 @@ impl AgentRunner {
         }
 
         #[cfg(feature = "zkr-memory")]
-        if let Some(improve) = &self.self_improve {
-            let _ = improve
-                .record(&msg.text, "agent turn", text, "completed")
-                .await;
+        if self.zkr_config.self_improve {
+            if let Some(store) = &self.zkr {
+                let _ = store
+                    .record_reflection(&msg.text, "agent turn", text, "completed")
+                    .await;
+            }
         }
 
         Ok(())

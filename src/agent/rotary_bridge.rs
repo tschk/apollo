@@ -288,10 +288,6 @@ pub struct RotaryAgentBridge {
     agent: rx4::Agent,
     /// Conversation messages maintained in rx4 format (per-session)
     messages: Vec<Message>,
-    #[cfg(feature = "zkr-memory")]
-    self_improve: Option<Arc<crate::agent::SelfImprove>>,
-    #[cfg(feature = "zkr-memory")]
-    base_system_prompt: String,
 }
 
 impl RotaryAgentBridge {
@@ -318,10 +314,6 @@ impl RotaryAgentBridge {
         Self {
             agent,
             messages: Vec::new(),
-            #[cfg(feature = "zkr-memory")]
-            self_improve: None,
-            #[cfg(feature = "zkr-memory")]
-            base_system_prompt: config.system_prompt.clone(),
         }
     }
 
@@ -354,18 +346,6 @@ impl RotaryAgentBridge {
     /// Set the system prompt.
     pub fn set_system_prompt(&mut self, prompt: &str) {
         self.agent.set_system_prompt(prompt);
-        #[cfg(feature = "zkr-memory")]
-        {
-            self.base_system_prompt = prompt.to_string();
-        }
-    }
-
-    /// Attach a self-improvement loop backed by `zkr`.
-    #[cfg(feature = "zkr-memory")]
-    pub fn with_self_improve(mut self, improve: Arc<crate::agent::SelfImprove>) -> Self {
-        self.self_improve = Some(improve);
-        self.base_system_prompt = self.agent.system_prompt.clone().unwrap_or_default();
-        self
     }
 
     /// Set the workspace root.
@@ -408,28 +388,9 @@ impl RotaryAgentBridge {
             }
         });
 
-        #[cfg(feature = "zkr-memory")]
-        if let Some(improve) = &self.self_improve {
-            match improve
-                .augment_prompt(prompt, &self.base_system_prompt)
-                .await
-            {
-                Ok(augmented) => self.agent.set_system_prompt(&augmented),
-                Err(error) => tracing::warn!("self-improve augmentation failed: {error}"),
-            }
-        }
-
         self.agent.prompt(prompt).await?;
 
         let response = last_response.read().clone();
-
-        #[cfg(feature = "zkr-memory")]
-        if let Some(improve) = &self.self_improve {
-            let _ = improve
-                .record(prompt, "rx4 agent turn", &response, "completed")
-                .await;
-        }
-
         Ok(response)
     }
 

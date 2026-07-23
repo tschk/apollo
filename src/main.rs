@@ -504,10 +504,6 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(feature = "zkr-memory")]
             {
                 runner = runner.with_zkr(zkr_store.clone(), cfg.zkr.clone());
-                let self_improve = zkr_store
-                    .clone()
-                    .map(|s| Arc::new(apollo::agent::SelfImprove::new(Some(s))));
-                runner = runner.with_self_improve(self_improve);
             }
 
             {
@@ -777,10 +773,6 @@ async fn main() -> anyhow::Result<()> {
                 #[cfg(feature = "zkr-memory")]
                 {
                     runner = runner.with_zkr(zkr_store.clone(), cfg.zkr.clone());
-                    let self_improve = zkr_store
-                        .clone()
-                        .map(|s| Arc::new(apollo::agent::SelfImprove::new(Some(s))));
-                    runner = runner.with_self_improve(self_improve);
                 }
                 let runner = Arc::new(runner);
                 runner.add_hook(Arc::new(PermissionHook::new(
