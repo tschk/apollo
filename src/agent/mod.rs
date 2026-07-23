@@ -11,6 +11,8 @@ pub mod hooks;
 pub mod loop_runner;
 pub mod mode;
 pub mod rotary_bridge;
+#[cfg(feature = "zkr-memory")]
+pub mod self_improve;
 pub mod stream;
 pub mod streaming;
 
@@ -21,4 +23,6 @@ pub use rotary_bridge::{
     match_skill_via_rx4, register_apollo_tools, rx4_message_to_chat, tool_specs_to_rx4_json,
     RotaryAgentBridge, RotaryBridgeConfig, RotaryMemoryBridge, RotaryProviderAdapter,
 };
+#[cfg(feature = "zkr-memory")]
+pub use self_improve::SelfImprove;
 pub use streaming::{stream_channel, StreamChunk, StreamReceiver, StreamSender};

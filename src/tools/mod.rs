@@ -24,6 +24,8 @@ pub mod file_ops;
 pub mod guardrails;
 #[cfg(feature = "plugin-advanced")]
 pub mod mcp;
+#[cfg(feature = "rs-ai")]
+pub mod media;
 #[cfg(feature = "channel-telegram")]
 pub mod message;
 pub mod mode_switch;

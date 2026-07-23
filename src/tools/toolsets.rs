@@ -16,6 +16,7 @@ pub fn toolset_for_tool(name: &str) -> &'static str {
         "skill_manager" => "skills",
         "praefectus" => "desktop",
         "mcp" | "create_tool" | "list_custom_tools" | "vibemania" => "advanced",
+        "generate_image" | "text_to_speech" | "speech_to_text" => "media",
         _ => "misc",
     }
 }
@@ -27,7 +28,8 @@ pub fn expand_package(name: &str) -> Vec<&'static str> {
         "skills" => vec!["skills"],
         "advanced" => vec!["advanced"],
         "desktop" => vec!["desktop"],
-        "apollo-live" | "live" => vec!["web", "browser", "skills", "advanced", "desktop"],
+        "media" => vec!["media"],
+        "apollo-live" | "live" => vec!["web", "browser", "skills", "advanced", "desktop", "media"],
         "core" | "default" => CORE_TOOLSET_GROUPS.to_vec(),
         _ => vec![],
     }

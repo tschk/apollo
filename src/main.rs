@@ -503,7 +503,11 @@ async fn main() -> anyhow::Result<()> {
                     .await;
             #[cfg(feature = "zkr-memory")]
             {
-                runner = runner.with_zkr(zkr_store, cfg.zkr.clone());
+                runner = runner.with_zkr(zkr_store.clone(), cfg.zkr.clone());
+                let self_improve = zkr_store
+                    .clone()
+                    .map(|s| Arc::new(apollo::agent::SelfImprove::new(Some(s))));
+                runner = runner.with_self_improve(self_improve);
             }
 
             {
@@ -745,7 +749,7 @@ async fn main() -> anyhow::Result<()> {
                 embedding_provider,
                 Arc::clone(&provider),
                 &cfg,
-                zkr_store,
+                zkr_store.clone(),
             );
             #[cfg(not(feature = "zkr-memory"))]
             let tools = build_base_tools(
@@ -759,19 +763,26 @@ async fn main() -> anyhow::Result<()> {
 
             if let Some(port) = port {
                 let system_prompt = cfg.system_prompt.clone();
-                let runner = Arc::new(
-                    apollo::agent::loop_runner::AgentRunner::new(
-                        Arc::clone(&provider),
-                        tools.clone(),
-                        Arc::clone(&memory),
-                        system_prompt,
-                        model.clone(),
-                    )
-                    .with_config(cfg.agent.clone())
-                    .with_mode(agent_mode_from_permission_profile(
-                        &cfg.agent.permission_profile,
-                    )),
-                );
+                let mut runner = apollo::agent::loop_runner::AgentRunner::new(
+                    Arc::clone(&provider),
+                    tools.clone(),
+                    Arc::clone(&memory),
+                    system_prompt,
+                    model.clone(),
+                )
+                .with_config(cfg.agent.clone())
+                .with_mode(agent_mode_from_permission_profile(
+                    &cfg.agent.permission_profile,
+                ));
+                #[cfg(feature = "zkr-memory")]
+                {
+                    runner = runner.with_zkr(zkr_store.clone(), cfg.zkr.clone());
+                    let self_improve = zkr_store
+                        .clone()
+                        .map(|s| Arc::new(apollo::agent::SelfImprove::new(Some(s))));
+                    runner = runner.with_self_improve(self_improve);
+                }
+                let runner = Arc::new(runner);
                 runner.add_hook(Arc::new(PermissionHook::new(
                     cfg.agent.permissions.deny.clone(),
                     cfg.agent.permissions.allow.clone(),

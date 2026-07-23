@@ -125,6 +125,38 @@ pub fn build_provider(cfg: &Config) -> Arc<dyn Provider> {
                 Arc::new(crate::providers::copilot::CopilotProvider::new(&api_key))
             }
         }
+        #[cfg(feature = "rs-ai")]
+        "chatgpt" => Arc::new(crate::providers::rs_ai::RsAiProvider::new(
+            "chatgpt",
+            &cfg.model,
+            &api_key,
+            cfg.provider.base_url.clone(),
+            None,
+        )),
+        #[cfg(feature = "rs-ai")]
+        "gemini" => Arc::new(crate::providers::rs_ai::RsAiProvider::new(
+            "gemini",
+            &cfg.model,
+            &api_key,
+            cfg.provider.base_url.clone(),
+            None,
+        )),
+        #[cfg(feature = "rs-ai")]
+        "xai" | "grok" => Arc::new(crate::providers::rs_ai::RsAiProvider::new(
+            "xai",
+            &cfg.model,
+            &api_key,
+            cfg.provider.base_url.clone(),
+            None,
+        )),
+        #[cfg(feature = "rs-ai")]
+        "cloudflare" => Arc::new(crate::providers::rs_ai::RsAiProvider::new(
+            "cloudflare",
+            &cfg.model,
+            &api_key,
+            None,
+            cfg.provider.base_url.clone(),
+        )),
         "ollama" => {
             #[cfg(feature = "provider-ollama")]
             {
@@ -148,6 +180,7 @@ pub fn build_provider(cfg: &Config) -> Arc<dyn Provider> {
         "deepseek" => Arc::new(OpenAiCompatProvider::deepseek(&api_key)),
         "fireworks" => Arc::new(OpenAiCompatProvider::fireworks(&api_key)),
         "perplexity" => Arc::new(OpenAiCompatProvider::perplexity(&api_key)),
+        #[cfg(not(feature = "rs-ai"))]
         "xai" | "grok" => Arc::new(OpenAiCompatProvider::xai(&api_key)),
         "moonshot" | "kimi" => Arc::new(OpenAiCompatProvider::moonshot(&api_key)),
         "venice" => Arc::new(OpenAiCompatProvider::venice(&api_key)),
@@ -230,6 +263,25 @@ pub fn build_base_tools(
     #[cfg(feature = "zkr-memory")]
     if let Some(store) = zkr_store {
         tools.push(Arc::new(crate::tools::zkr::ZkrTool::new(store)));
+    }
+    #[cfg(feature = "rs-ai")]
+    {
+        let media_key = cfg.provider.api_key.clone().unwrap_or_default();
+        let media_provider = cfg.provider.name.clone();
+        tools.push(Arc::new(crate::tools::media::ImageGenerationTool::new(
+            workspace.to_path_buf(),
+            media_key.clone(),
+            media_provider.clone(),
+        )));
+        tools.push(Arc::new(crate::tools::media::TextToSpeechTool::new(
+            workspace.to_path_buf(),
+            media_key.clone(),
+            media_provider.clone(),
+        )));
+        tools.push(Arc::new(crate::tools::media::SpeechToTextTool::new(
+            media_key,
+            media_provider,
+        )));
     }
     tools
         .into_iter()

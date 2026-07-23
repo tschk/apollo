@@ -76,6 +76,8 @@ pub struct AgentRunner {
     zkr: Option<Arc<crate::memory::zkr::ZkrStore>>,
     #[cfg(feature = "zkr-memory")]
     zkr_config: crate::config::ZkrConfig,
+    #[cfg(feature = "zkr-memory")]
+    self_improve: Option<Arc<crate::agent::SelfImprove>>,
     session_note_workspace: Option<PathBuf>,
 }
 
@@ -118,6 +120,8 @@ impl AgentRunner {
             zkr: None,
             #[cfg(feature = "zkr-memory")]
             zkr_config: crate::config::ZkrConfig::default(),
+            #[cfg(feature = "zkr-memory")]
+            self_improve: None,
             session_note_workspace: None,
         }
     }
@@ -202,6 +206,12 @@ impl AgentRunner {
     ) -> Self {
         self.zkr = store;
         self.zkr_config = cfg;
+        self
+    }
+
+    #[cfg(feature = "zkr-memory")]
+    pub fn with_self_improve(mut self, improve: Option<Arc<crate::agent::SelfImprove>>) -> Self {
+        self.self_improve = improve;
         self
     }
 
@@ -623,7 +633,21 @@ impl AgentRunner {
 
         // ── Build messages ──
 
-        let system_prompt = self.system_prompt.read().await.clone();
+        let base_prompt = self.system_prompt.read().await.clone();
+        #[cfg(feature = "zkr-memory")]
+        let system_prompt = if let Some(improve) = &self.self_improve {
+            match improve.augment_prompt(&effective_text, &base_prompt).await {
+                Ok(augmented) => augmented,
+                Err(error) => {
+                    tracing::warn!("self-improve augmentation failed: {error}");
+                    base_prompt
+                }
+            }
+        } else {
+            base_prompt
+        };
+        #[cfg(not(feature = "zkr-memory"))]
+        let system_prompt = base_prompt;
         let mut messages = vec![ChatMessage::system(&system_prompt)];
         if let Some(guidance) = crate::context::routing_guidance(msg.is_group, channel.name()) {
             messages.push(ChatMessage::system(guidance));
@@ -1377,6 +1401,13 @@ impl AgentRunner {
 
         if let Some(ref mid) = draft_id {
             let _ = channel.finalize_draft(&msg.chat_id, mid, text).await;
+        }
+
+        #[cfg(feature = "zkr-memory")]
+        if let Some(improve) = &self.self_improve {
+            let _ = improve
+                .record(&msg.text, "agent turn", text, "completed")
+                .await;
         }
 
         Ok(())

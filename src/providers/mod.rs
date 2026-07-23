@@ -18,4 +18,7 @@ pub mod copilot;
 pub mod ollama;
 pub mod openai_compat;
 
+#[cfg(feature = "rs-ai")]
+pub mod rs_ai;
+
 pub use traits::{ChatMessage, ChatRequest, ChatResponse, Provider, ToolCall};
