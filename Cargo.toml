@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "ui"]
+resolver = "2"
+
 [package]
 name = "apollo-agent"
 version = "0.2.2"

@@ -73,6 +73,9 @@ apollo init          # interactive setup wizard (`apollo setup` is an alias)
 apollo               # start chatting (same as `apollo chat`)
 apollo ask "summarize this repo"
 apollo doctor        # diagnose config / deps
+
+cargo run -p apollo-ui
+# or after install: apollo ui
 ```
 
 Install from a release binary (after build):

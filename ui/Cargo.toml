@@ -1,0 +1,19 @@
+[package]
+name = "apollo-ui"
+version = "0.2.2"
+edition = "2021"
+license = "MPL-2.0"
+description = "Desktop chat UI for apollo-agent (Crepuscularity + GPUI)"
+repository = "https://github.com/tschk/apollo"
+publish = false
+
+[[bin]]
+name = "apollo-ui"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit"] }
+crepuscularity-gpui = { path = "../../crepuscularity/crates/crepuscularity-gpui", version = "0.5.8" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
