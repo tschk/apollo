@@ -62,6 +62,9 @@ and feature-gated signed desktop actions through Praefectus
 ## Quick Start
 
 ```bash
+# From crates.io (binaries: apollo, apollo-install)
+cargo install apollo-agent
+
 # From source
 cargo install --path .
 ./scripts/install.sh   # build release + install to ~/.local/bin
@@ -84,7 +87,7 @@ cargo build --release
 - ✅ `cargo clippy --all-targets` — 0 warnings
 - ✅ `cargo test` — 85 tests pass, 0 fail
 - ✅ `cargo build --release` — passes, ~14MB binary
-- ✅ v0.2.0 — install from source or release binary; `cargo install apollo` pending crate rename (name reserved on crates.io)
+- ✅ v0.2.0 — install from source, release binary, or `cargo install apollo-agent` (crates.io package; binaries `apollo`, `apollo-install`)
 
 ## Configuration
 

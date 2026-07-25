@@ -16,7 +16,7 @@ cleanup() {
 find_repo_root() {
   local dir="$1"
   while [[ -n "$dir" && "$dir" != "/" ]]; do
-    if [[ -f "$dir/Cargo.toml" ]] && grep -q '^name = "apollo"' "$dir/Cargo.toml" 2>/dev/null; then
+    if [[ -f "$dir/Cargo.toml" ]] && grep -qE '^name = "apollo(-agent)?"' "$dir/Cargo.toml" 2>/dev/null; then
       printf '%s\n' "$dir"
       return 0
     fi
