@@ -6,3 +6,9 @@
 .env
 .DS_Store
 node_modules/
+
+ui/target/
+
+# Keep shared macOS bindgen config; ignore other local cargo state
+.cargo/*
+!.cargo/config.toml

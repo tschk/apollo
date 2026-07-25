@@ -253,6 +253,9 @@ enum Commands {
         #[arg(short, long)]
         workspace: Option<PathBuf>,
     },
+
+    /// Launch the desktop UI (apollo-ui)
+    Ui,
 }
 
 #[derive(Subcommand)]
@@ -1653,9 +1656,58 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+
+        Commands::Ui => {
+            launch_apollo_ui().await?;
+        }
     }
 
     Ok(())
+}
+
+async fn launch_apollo_ui() -> anyhow::Result<()> {
+    let binary = find_apollo_ui_binary().await.ok_or_else(|| {
+        eprintln!("apollo-ui binary not found.");
+        eprintln!("  cargo run -p apollo-ui");
+        eprintln!("  cargo build --release -p apollo-ui");
+        anyhow::anyhow!("apollo-ui binary not found")
+    })?;
+
+    let cwd = std::env::current_dir()?;
+    let status = tokio::process::Command::new(&binary)
+        .current_dir(&cwd)
+        .status()
+        .await?;
+
+    if !status.success() {
+        anyhow::bail!("apollo-ui exited with status: {status}");
+    }
+
+    Ok(())
+}
+
+async fn find_apollo_ui_binary() -> Option<PathBuf> {
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(dir) = current.parent() {
+            let sibling = dir.join("apollo-ui");
+            if sibling.is_file() {
+                return Some(sibling);
+            }
+        }
+    }
+
+    let on_path = tokio::process::Command::new("which")
+        .arg("apollo-ui")
+        .output()
+        .await
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    if on_path {
+        Some(PathBuf::from("apollo-ui"))
+    } else {
+        None
+    }
 }
 
 fn compiled_in_providers() -> Vec<&'static str> {
