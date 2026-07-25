@@ -1,7 +1,5 @@
 use crepuscularity_gpui::prelude::*;
-use gpui::{
-    actions, bounds, point, px, size, Application, ClickEvent, KeyDownEvent, SharedString,
-};
+use gpui::{actions, bounds, point, px, size, Application, ClickEvent, KeyDownEvent, SharedString};
 
 actions!(apollo_ui, [SubmitMessage, ClearDraft]);
 
@@ -29,8 +27,7 @@ impl ApolloView {
             draft: String::new(),
             messages: vec![ChatMessage {
                 role: "apollo".into(),
-                text: "Local-first agent runtime. Type a message and press Enter (or Send)."
-                    .into(),
+                text: "Local-first agent runtime. Type a message and press Enter (or Send).".into(),
             }],
             status: status.into(),
             busy: false,
@@ -52,7 +49,10 @@ impl ApolloView {
                 self.draft.clear();
                 cx.notify();
             }
-            _ if key.len() == 1 && !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
+            _ if key.len() == 1
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.platform =>
+            {
                 self.draft.push_str(key);
                 cx.notify();
             }
@@ -87,7 +87,11 @@ impl ApolloView {
     }
 
     fn prompt_status(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.use_prompt("What is your current status and configured model?", window, cx);
+        self.use_prompt(
+            "What is your current status and configured model?",
+            window,
+            cx,
+        );
     }
 
     fn send(&mut self, _window: &mut Window, cx: &mut Context<Self>) {

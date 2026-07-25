@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 gpui = { version = "=0.2.2", default-features = false, features = ["font-kit"] }
-crepuscularity-gpui = { path = "../../crepuscularity/crates/crepuscularity-gpui", version = "0.5.8" }
+crepuscularity-gpui = { version = "0.5.8" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
