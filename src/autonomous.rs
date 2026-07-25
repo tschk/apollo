@@ -121,6 +121,19 @@ impl AutonomousLoop {
         }
     }
 
+    pub fn start_fresh(&mut self) {
+        self.status = AutonomousStatus::new();
+        Self::save_status_to_file(&self.status, &self.status_path);
+    }
+
+    pub fn resume(&mut self) {
+        self.status.paused = false;
+        if self.status.state == AutonomousState::Paused {
+            self.status.state = AutonomousState::Idle;
+        }
+        Self::save_status_to_file(&self.status, &self.status_path);
+    }
+
     /// Start the autonomous loop. Runs indefinitely.
     pub async fn run(self, agent: std::sync::Arc<crate::agent::AgentRunner>) {
         let config = self.config.clone();

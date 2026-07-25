@@ -52,7 +52,7 @@ impl Tool for DoctorTool {
     async fn execute(&self, arguments: &str) -> anyhow::Result<ToolResult> {
         let args: DoctorArgs =
             serde_json::from_str(arguments).unwrap_or(DoctorArgs { verbose: false });
-        let report = collect_doctor_report(None, args.verbose).await;
+        let report = collect_doctor_report(None, Some("apollo.json"), args.verbose).await;
         Ok(ToolResult::success(render_doctor_report(&report)))
     }
 }

@@ -29,6 +29,13 @@ pub fn load_config(path: &str) -> Config {
     load_config_workspace(path, None)
 }
 
+pub fn require_config_file(path: &str) -> anyhow::Result<()> {
+    if !Path::new(path).exists() {
+        anyhow::bail!("Config not found at {path}. Run `apollo init` to create one.");
+    }
+    Ok(())
+}
+
 pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
     let mut cfg = Config::load(path).unwrap_or_else(|_| {
         tracing::warn!("Config not found at {}, using defaults", path);
@@ -400,4 +407,25 @@ fn resolve_openclaw_token(provider: &str) -> anyhow::Result<String> {
         "No {} credentials in auth-profiles",
         provider
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_config_file_errors_when_missing() {
+        let path = "/tmp/apollo-bootstrap-missing-config-test-xyz123.json";
+        let err = require_config_file(path).unwrap_err();
+        assert!(err.to_string().contains("Config not found"));
+        assert!(err.to_string().contains(path));
+    }
+
+    #[test]
+    fn require_config_file_ok_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apollo.json");
+        std::fs::write(&path, "{}").unwrap();
+        require_config_file(path.to_str().unwrap()).unwrap();
+    }
 }

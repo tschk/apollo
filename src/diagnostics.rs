@@ -54,6 +54,8 @@ pub struct Check {
     pub name: String,
     pub ok: bool,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub soft_warn: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -254,9 +256,20 @@ pub fn audit_config(cfg: &Config) -> Vec<Finding> {
     findings
 }
 
-pub async fn collect_doctor_report(cfg: Option<&Config>, verbose: bool) -> DoctorReport {
+pub async fn collect_doctor_report(
+    cfg: Option<&Config>,
+    config_path: Option<&str>,
+    verbose: bool,
+) -> DoctorReport {
     let mut checks = Vec::new();
-    let cfg = cfg.cloned().unwrap_or_else(Config::default_config);
+    if let Some(path) = config_path {
+        checks.push(check_config_file(path));
+    }
+    let cfg = cfg.cloned().unwrap_or_else(|| {
+        config_path
+            .and_then(|path| Config::load(path).ok())
+            .unwrap_or_else(Config::default_config)
+    });
 
     for (bin, label) in [
         ("git", "Git"),
@@ -275,15 +288,34 @@ pub async fn collect_doctor_report(cfg: Option<&Config>, verbose: bool) -> Docto
                 } else {
                     format!("{bin} is not on PATH")
                 },
+                soft_warn: false,
             });
         }
     }
 
+    let workspace_exists = cfg.workspace.exists();
     checks.push(Check {
         name: "Workspace".into(),
-        ok: cfg.workspace.exists(),
+        ok: workspace_exists,
         detail: cfg.workspace.display().to_string(),
+        soft_warn: false,
     });
+
+    let workspace_writable = workspace_exists && is_workspace_writable(&cfg.workspace);
+    checks.push(Check {
+        name: "Workspace writable".into(),
+        ok: workspace_writable,
+        detail: if !workspace_exists {
+            "workspace does not exist".into()
+        } else if workspace_writable {
+            "workspace is writable".into()
+        } else {
+            "workspace is not writable".into()
+        },
+        soft_warn: false,
+    });
+
+    checks.push(local_bin_path_check());
 
     let provider_key_present = cfg.provider.api_key.is_some()
         || std::env::var("ANTHROPIC_API_KEY").is_ok()
@@ -296,24 +328,28 @@ pub async fn collect_doctor_report(cfg: Option<&Config>, verbose: bool) -> Docto
         } else {
             "No provider credentials detected".into()
         },
+        soft_warn: false,
     });
 
     checks.push(Check {
         name: "Gateway bind".into(),
         ok: is_loopback_bind(cfg.gateway.bind.trim()),
         detail: cfg.gateway.bind.clone(),
+        soft_warn: false,
     });
 
     checks.push(Check {
         name: "Gateway rate limit".into(),
         ok: cfg.gateway.rate_limit_per_minute > 0,
         detail: format!("{} req/min", cfg.gateway.rate_limit_per_minute),
+        soft_warn: false,
     });
 
     checks.push(Check {
         name: "Gateway timeout".into(),
         ok: cfg.gateway.request_timeout_secs > 0,
         detail: format!("{}s", cfg.gateway.request_timeout_secs),
+        soft_warn: false,
     });
 
     DoctorReport {
@@ -357,13 +393,83 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         "Checks:".to_string(),
     ];
     for check in &report.checks {
-        let icon = if check.ok { "OK" } else { "FAIL" };
+        let icon = if check.ok {
+            "OK"
+        } else if check.soft_warn {
+            "WARN"
+        } else {
+            "FAIL"
+        };
         out.push(format!("- [{icon}] {}: {}", check.name, check.detail));
     }
     out.push(String::new());
     out.push("Audit:".to_string());
     out.push(render_findings(&report.findings));
     out.join("\n")
+}
+
+pub(crate) fn check_config_file(path: &str) -> Check {
+    let file = Path::new(path);
+    if !file.exists() {
+        return Check {
+            name: "Config file".into(),
+            ok: false,
+            detail: format!("{path} not found"),
+            soft_warn: false,
+        };
+    }
+    match Config::load(path) {
+        Ok(_) => Check {
+            name: "Config file".into(),
+            ok: true,
+            detail: format!("{path} parses OK"),
+            soft_warn: false,
+        },
+        Err(err) => Check {
+            name: "Config file".into(),
+            ok: false,
+            detail: format!("{path} invalid: {err}"),
+            soft_warn: false,
+        },
+    }
+}
+
+fn is_workspace_writable(path: &Path) -> bool {
+    let probe = path.join(format!(".apollo-write-test-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn local_bin_path_check() -> Check {
+    let on_path = local_bin_on_path();
+    Check {
+        name: "~/.local/bin on PATH".into(),
+        ok: on_path,
+        detail: if on_path {
+            "~/.local/bin is on PATH".into()
+        } else {
+            "~/.local/bin is not on PATH (optional)".into()
+        },
+        soft_warn: true,
+    }
+}
+
+fn local_bin_on_path() -> bool {
+    let Ok(home) = std::env::var("HOME") else {
+        return false;
+    };
+    let local_bin = Path::new(&home).join(".local/bin");
+    let Ok(path_env) = std::env::var("PATH") else {
+        return false;
+    };
+    path_env
+        .split(':')
+        .any(|entry| Path::new(entry) == local_bin.as_path())
 }
 
 fn is_loopback_bind(bind: &str) -> bool {
@@ -486,5 +592,57 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.code == "gateway_origins_unrestricted" && f.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn render_doctor_report_marks_soft_warn_and_fail() {
+        let report = DoctorReport {
+            findings: vec![],
+            checks: vec![
+                Check {
+                    name: "passing".into(),
+                    ok: true,
+                    detail: "all good".into(),
+                    soft_warn: false,
+                },
+                Check {
+                    name: "optional missing".into(),
+                    ok: false,
+                    detail: "not on PATH (optional)".into(),
+                    soft_warn: true,
+                },
+                Check {
+                    name: "required missing".into(),
+                    ok: false,
+                    detail: "not found".into(),
+                    soft_warn: false,
+                },
+            ],
+        };
+        let rendered = render_doctor_report(&report);
+        assert!(rendered.contains("- [OK] passing: all good"));
+        assert!(rendered.contains("- [WARN] optional missing: not on PATH (optional)"));
+        assert!(rendered.contains("- [FAIL] required missing: not found"));
+    }
+
+    #[test]
+    fn check_config_file_reports_missing_path() {
+        let path = "/tmp/apollo-doctor-missing-config-test-xyz123.json";
+        let check = check_config_file(path);
+        assert!(!check.ok);
+        assert!(!check.soft_warn);
+        assert_eq!(check.name, "Config file");
+        assert!(check.detail.contains("not found"));
+    }
+
+    #[test]
+    fn check_config_file_reports_valid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apollo.json");
+        std::fs::write(&path, "{}").unwrap();
+        let check = check_config_file(path.to_str().unwrap());
+        assert!(check.ok);
+        assert!(!check.soft_warn);
+        assert!(check.detail.contains("parses OK"));
     }
 }

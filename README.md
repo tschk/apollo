@@ -1,5 +1,7 @@
 # apollo
 
+[![License: MPL-2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](LICENSE)
+
 apollo is a **local-first Rust AI agent runtime** for people who want the bot on
 their own machine, not hidden behind a hosted control plane.
 
@@ -60,11 +62,21 @@ and feature-gated signed desktop actions through Praefectus
 ## Quick Start
 
 ```bash
-cargo build --release
+# From source
+cargo install --path .
+./scripts/install.sh   # build release + install to ~/.local/bin
 
-./target/release/apollo init
-./target/release/apollo chat --config apollo.json
-./target/release/apollo ask "summarize this repo" --config apollo.json
+apollo init          # interactive setup wizard (`apollo setup` is an alias)
+apollo               # start chatting (same as `apollo chat`)
+apollo ask "summarize this repo"
+apollo doctor        # diagnose config / deps
+```
+
+Install from a release binary (after build):
+
+```bash
+cargo build --release
+./target/release/apollo-install install
 ```
 
 ## Current Status
@@ -72,7 +84,7 @@ cargo build --release
 - ✅ `cargo clippy --all-targets` — 0 warnings
 - ✅ `cargo test` — 85 tests pass, 0 fail
 - ✅ `cargo build --release` — passes, ~14MB binary
-- ✅ v0.2.0 released
+- ✅ v0.2.0 — install from source or release binary; `cargo install apollo` pending crate rename (name reserved on crates.io)
 
 ## Configuration
 

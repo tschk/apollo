@@ -47,6 +47,18 @@ fn copy_exe(src: &Path, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn path_hint(dest: &Path) {
+    let in_path = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|p| p == dest))
+        .unwrap_or(false);
+    if in_path {
+        return;
+    }
+    eprintln!();
+    eprintln!("Add to PATH (e.g. in ~/.bashrc or ~/.zshrc):");
+    eprintln!("  export PATH=\"{}:$PATH\"", dest.display());
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -65,6 +77,15 @@ fn main() -> anyhow::Result<()> {
             let dst = dest.join("apollo");
             copy_exe(&src, &dst)?;
             println!("Installed {}", dst.display());
+            if let Some(parent) = src.parent() {
+                let installer = parent.join("apollo-install");
+                if installer.is_file() {
+                    let idst = dest.join("apollo-install");
+                    copy_exe(&installer, &idst)?;
+                    println!("Installed {}", idst.display());
+                }
+            }
+            path_hint(&dest);
         }
         Cmd::Uninstall { dest } => {
             let dest = expand_dest(&dest);
