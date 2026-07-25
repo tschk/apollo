@@ -8,8 +8,10 @@ use clap::{Parser, Subcommand};
 
 use apollo::agent::hooks::PermissionHook;
 use apollo::agent::{agent_mode_from_permission_profile, AgentRunner};
+use apollo::autonomous::{AutonomousConfig, AutonomousLoop};
 use apollo::bootstrap::{
     build_base_tools, build_embedding_provider, build_memory_backend, build_provider, load_config,
+    require_config_file,
 };
 #[cfg(feature = "channel-cli")]
 use apollo::channels::cli::CliChannel;
@@ -26,10 +28,10 @@ use apollo::skills;
 use apollo::telegram_runtime::{run_telegram_chat, TelegramChatRun};
 
 #[derive(Parser)]
-#[command(name = "apollo", about = "Lightweight agent runtime — Apollo", version)]
+#[command(name = "apollo", about = "Local-first AI agent runtime", version)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -143,6 +145,7 @@ enum Commands {
     },
 
     /// Initialize configuration (interactive wizard or one-command setup)
+    #[command(alias = "setup")]
     Init {
         /// Provider (omit to pick from compiled-in list with type-to-filter)
         #[arg(short, long)]
@@ -216,6 +219,29 @@ enum Commands {
         /// Workspace directory
         #[arg(short, long)]
         workspace: Option<PathBuf>,
+    },
+
+    /// Run autonomous TODO.md-driven coding loop
+    Autonomous {
+        /// Configuration file path
+        #[arg(short, long, default_value = "apollo.json")]
+        config: String,
+
+        /// Workspace directory
+        #[arg(short, long)]
+        workspace: Option<PathBuf>,
+
+        /// Check cycle interval in seconds
+        #[arg(long)]
+        interval: Option<u64>,
+
+        /// Reset autonomous status and start fresh
+        #[arg(long, default_value_t = false)]
+        start: bool,
+
+        /// Clear paused state and continue
+        #[arg(long, default_value_t = false)]
+        resume: bool,
     },
 
     /// Swarm commands (multi-agent coordination)
@@ -409,7 +435,19 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default();
     init_tracing(&tracing_cfg)?;
 
-    match cli.command {
+    // Hermes-style: bare `apollo` starts interactive chat.
+    let command = cli.command.unwrap_or(Commands::Chat {
+        config: "apollo.json".into(),
+        model: None,
+        workspace: None,
+        channel: "cli".into(),
+        telegram_token: None,
+        telegram_chat_id: None,
+        discord_token: None,
+        discord_channel_id: None,
+    });
+
+    match command {
         Commands::Chat {
             config,
             model,
@@ -420,6 +458,7 @@ async fn main() -> anyhow::Result<()> {
             discord_token: _discord_token,
             discord_channel_id: _discord_channel_id,
         } => {
+            require_config_file(&config)?;
             let workspace = workspace.unwrap_or_else(|| load_config(&config).workspace.clone());
             let cfg = apollo::bootstrap::load_config_workspace(&config, Some(&workspace));
             let model = model.unwrap_or(cfg.model.clone());
@@ -678,6 +717,7 @@ async fn main() -> anyhow::Result<()> {
             config,
             model,
         } => {
+            require_config_file(&config)?;
             let cfg = load_config(&config);
             let model = model.unwrap_or(cfg.model.clone());
             let provider = build_provider(&cfg);
@@ -692,7 +732,7 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             let cfg = load_config(&config);
-            let report = collect_doctor_report(Some(&cfg), verbose).await;
+            let report = collect_doctor_report(Some(&cfg), Some(&config), verbose).await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -714,7 +754,7 @@ async fn main() -> anyhow::Result<()> {
             println!("apollo v{}", env!("CARGO_PKG_VERSION"));
             println!("Status: OK");
             println!(
-                "Commands: chat, ask, doctor, audit, status, mcp, self-update, init, cron, swarm"
+                "Commands: chat, ask, doctor, audit, status, mcp, self-update, init, cron, autonomous, swarm"
             );
         }
 
@@ -1238,6 +1278,106 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::Autonomous {
+            config,
+            workspace,
+            interval,
+            start,
+            resume,
+        } => {
+            let workspace = workspace.unwrap_or_else(|| load_config(&config).workspace.clone());
+            let cfg = apollo::bootstrap::load_config_workspace(&config, Some(&workspace));
+            let model = cfg.model.clone();
+            let _ = apollo::workspace_init::ensure_workspace_kit(&workspace);
+
+            let provider = build_provider(&cfg);
+            let policy = Arc::new(ExecutionPolicy::from_config(&cfg.policy));
+            let memory = build_memory_backend(&workspace, &cfg).await?;
+            let embedding_provider = build_embedding_provider(&cfg)?;
+
+            let system_prompt = prompt::build_system_prompt(&workspace).await;
+            let discovered_skills = skills::discover_skills_for_workspace(Some(&workspace));
+
+            #[cfg(feature = "zkr-memory")]
+            let zkr_store = apollo::bootstrap::build_zkr_store(&workspace, &cfg)
+                .ok()
+                .flatten();
+            #[cfg(feature = "zkr-memory")]
+            let mut tools = build_base_tools(
+                &workspace,
+                Arc::clone(&policy),
+                memory.clone(),
+                embedding_provider,
+                Arc::clone(&provider),
+                &cfg,
+                zkr_store.clone(),
+            );
+            #[cfg(not(feature = "zkr-memory"))]
+            let mut tools = build_base_tools(
+                &workspace,
+                Arc::clone(&policy),
+                memory.clone(),
+                embedding_provider,
+                Arc::clone(&provider),
+                &cfg,
+            );
+
+            for dt in apollo::tools::dynamic::DynamicTool::load_all(Arc::clone(&policy)) {
+                tools.push(Arc::new(dt));
+            }
+
+            let mut runner =
+                AgentRunner::new(provider, tools, memory.clone(), &system_prompt, model)
+                    .with_config(cfg.agent.clone())
+                    .with_mode(agent_mode_from_permission_profile(
+                        &cfg.agent.permission_profile,
+                    ))
+                    .with_workspace(workspace.clone())
+                    .with_memory_ideas(cfg.memory.clone())
+                    .with_group_chat(cfg.group_chat.clone())
+                    .with_skills(discovered_skills)
+                    .await;
+            #[cfg(feature = "zkr-memory")]
+            {
+                runner = runner.with_zkr(zkr_store.clone(), cfg.zkr.clone());
+            }
+
+            {
+                let mut host_reg = apollo::plugin::PluginRegistry::new();
+                host_reg.ingest_host_plugins(&workspace, &cfg.plugin_layer.host_plugin_roots);
+                runner = runner.with_plugin_registry(host_reg).await;
+            }
+
+            let runner_arc = Arc::new(runner);
+            runner_arc.add_hook(Arc::new(PermissionHook::new(
+                cfg.agent.permissions.deny.clone(),
+                cfg.agent.permissions.allow.clone(),
+            )));
+
+            let mut autonomous_config = AutonomousConfig::default();
+            if let Some(secs) = interval {
+                autonomous_config.interval_secs = secs;
+            }
+            let interval_secs = autonomous_config.interval_secs;
+
+            let mut autonomous_loop = AutonomousLoop::new(autonomous_config, workspace.clone());
+            if start {
+                autonomous_loop.start_fresh();
+            } else if resume {
+                autonomous_loop.resume();
+            }
+
+            println!(
+                "apollo v{} — autonomous mode (interval={}s)",
+                env!("CARGO_PKG_VERSION"),
+                interval_secs
+            );
+            println!("   Workspace: {}", workspace.display());
+            println!("   Press Ctrl+C to stop");
+
+            autonomous_loop.run(runner_arc).await;
+        }
+
         Commands::Swarm { action, workspace } => {
             #[cfg(not(feature = "swarm"))]
             {
@@ -1634,13 +1774,15 @@ fn prompt_permission_profile_interactive() -> anyhow::Result<String> {
 
 fn config_path_for_cli(cli: &Cli) -> Option<String> {
     match &cli.command {
-        Commands::Chat { config, .. }
-        | Commands::Ask { config, .. }
-        | Commands::Doctor { config, .. }
-        | Commands::Audit { config, .. }
-        | Commands::SelfUpdate { config, .. }
-        | Commands::Mcp { config, .. } => Some(config.clone()),
-        _ => None,
+        None => Some("apollo.json".into()),
+        Some(Commands::Chat { config, .. })
+        | Some(Commands::Ask { config, .. })
+        | Some(Commands::Doctor { config, .. })
+        | Some(Commands::Audit { config, .. })
+        | Some(Commands::SelfUpdate { config, .. })
+        | Some(Commands::Mcp { config, .. })
+        | Some(Commands::Autonomous { config, .. }) => Some(config.clone()),
+        Some(_) => None,
     }
 }
 

@@ -1,12 +1,16 @@
 [package]
-name = "apollo"
+name = "apollo-agent"
 version = "0.2.2"
 edition = "2021"
 description = "Local-first Rust AI agent runtime — Telegram-first, trait-driven, SurrealDB + RocksDB state layer."
-license = "MIT"
+license = "MPL-2.0"
+readme = "README.md"
+documentation = "https://docs.rs/apollo-agent"
 repository = "https://github.com/tschk/apollo"
+homepage = "https://github.com/tschk/apollo"
 keywords = ["agent", "ai", "llm", "telegram", "automation"]
 categories = ["command-line-utilities", "web-programming::http-client"]
+exclude = [".cursor/"]
 
 [[bin]]
 name = "apollo"
@@ -15,6 +19,10 @@ path = "src/main.rs"
 [[bin]]
 name = "apollo-install"
 path = "src/bin/apollo_install.rs"
+
+[lib]
+name = "apollo"
+path = "src/lib.rs"
 
 [features]
 default = [

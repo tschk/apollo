@@ -1,0 +1,9 @@
+{
+  "name": "apollo",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "install": "chmod +x scripts/cloud-agent-install.sh && ./scripts/cloud-agent-install.sh",
+  "agentCanUpdateSnapshot": true
+}

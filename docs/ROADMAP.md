@@ -25,7 +25,7 @@ Last updated: 2026-06-16
 - Skill template preprocessing — `${HERMES_SKILL_DIR}` / `${HERMES_SESSION_ID}`
   variables + `!\`command\`` inline shell in SKILL.md
 - Cron scheduler — SurrealDB-backed with in-memory noop fallback for testing
-- Cargo publish v0.2.0 to crates.io
+- Cargo publish v0.2.0 to crates.io as `apollo-agent`
 
 ## Next
 

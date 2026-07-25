@@ -23,7 +23,7 @@ Last updated: 2026-06-16
 - [x] Hermes-style self-healing, loop detection, and compaction integration in
   loop_runner.rs
 - [x] All 85 tests pass, 0 clippy warnings
-- [x] v0.2.0 published to crates.io
+- [x] v0.2.0 published to crates.io as `apollo-agent`
 
 ### Previous (v0.1.x)
 - [x] SurrealDB memory schema includes `files`, `chunks`, FTS, and sticker cache
@@ -37,7 +37,7 @@ Last updated: 2026-06-16
 
 ## Next
 
-- [ ] Wire autonomous mode into CLI entrypoint (`apollo autonomous`)
+- [x] Wire autonomous mode into CLI entrypoint (`apollo autonomous`)
 - [ ] Add trajectory collection toggle in config.yaml
 - [ ] Add tests for Telegram markdown conversion and long-message chunking
 - [ ] Add tests for audio/sticker handling in Telegram
