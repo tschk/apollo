@@ -12,6 +12,10 @@ use crate::tools::ToolSpec;
 
 pub struct AnthropicProvider {
     api_key: String,
+    /// Present when the credential is an OAuth token loaded from the Claude
+    /// credentials file. The cache refreshes on expiry and persists the new
+    /// token, so a long-running process survives past the first hour.
+    oauth: Option<super::oauth::OAuthTokenCache>,
     base_url: String,
     cost_tracker: Option<std::sync::Arc<CostTracker>>,
 }
@@ -20,6 +24,7 @@ impl AnthropicProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
+            oauth: None,
             base_url: "https://api.anthropic.com/v1".to_string(),
             cost_tracker: None,
         }
@@ -33,13 +38,32 @@ impl AnthropicProvider {
         }
 
         // Try loading from Claude.dev OAuth credentials
-        if let Ok((token, _, _)) = super::oauth::load_oauth_token_from_file() {
-            return Ok(Self::new(token));
+        if let Ok(cache) = super::oauth::OAuthTokenCache::from_credentials_file() {
+            let (token, _, _) = super::oauth::load_oauth_token_from_file()?;
+            let mut provider = Self::new(token);
+            provider.oauth = Some(cache);
+            return Ok(provider);
         }
 
         Err(anyhow::anyhow!(
             "No ANTHROPIC_API_KEY found. Set env var or install Claude for Desktop with OAuth token."
         ))
+    }
+
+    /// Resolve the credential for a request, refreshing an expired OAuth token
+    /// first. Falls back to the token captured at construction when there is no
+    /// OAuth cache (plain API key) or the refresh fails.
+    async fn resolve_key(&self) -> String {
+        match &self.oauth {
+            Some(cache) => match cache.get_token().await {
+                Ok(token) => token,
+                Err(e) => {
+                    tracing::warn!("OAuth token refresh failed, using cached token: {}", e);
+                    self.api_key.clone()
+                }
+            },
+            None => self.api_key.clone(),
+        }
     }
 
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
@@ -213,7 +237,8 @@ impl Provider for AnthropicProvider {
         }
 
         // Detect OAuth tokens (sk-ant-oat) vs API keys (sk-ant-api)
-        let is_oauth = self.api_key.contains("sk-ant-oat");
+        let api_key = self.resolve_key().await;
+        let is_oauth = api_key.contains("sk-ant-oat");
 
         // OAuth tokens require the system prompt to start with the Claude Code identity prefix
         if is_oauth {
@@ -248,7 +273,7 @@ impl Provider for AnthropicProvider {
 
         if is_oauth {
             req_builder = req_builder
-                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Authorization", format!("Bearer {api_key}"))
                 .header(
                     "anthropic-beta",
                     "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
@@ -256,7 +281,7 @@ impl Provider for AnthropicProvider {
                 .header("anthropic-dangerous-direct-browser-access", "true");
         } else {
             req_builder = req_builder
-                .header("x-api-key", &self.api_key)
+                .header("x-api-key", &api_key)
                 .header("anthropic-beta", "prompt-caching-2024-07-31");
         }
 
