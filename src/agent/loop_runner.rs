@@ -139,6 +139,9 @@ impl AgentRunner {
     }
 
     pub fn with_config(mut self, config: crate::config::AgentConfig) -> Self {
+        if config.engine() == crate::config::AgentEngine::Rx4 {
+            tracing::info!("agent engine: rx4 (rotary harness owns the loop)");
+        }
         self.agent_config = config;
         self
     }
@@ -733,6 +736,17 @@ impl AgentRunner {
         let main_model = model
             .map(str::to_string)
             .unwrap_or_else(|| self.model.read().unwrap().clone());
+
+        // ── rx4 engine ──
+        // Context assembly above stays apollo's; from here rx4 owns the loop.
+        if self.agent_config.engine() == crate::config::AgentEngine::Rx4 {
+            let text = self
+                .run_via_rotary(&messages, &tools_snapshot, &main_model)
+                .await?;
+            self.finish_execution(msg, &text, &draft_id, channel)
+                .await?;
+            return Ok(text);
+        }
 
         // ═══════════════════════════════════════════════════════
         // STATE MACHINE: Planning → Executing → Summarizing
@@ -1368,6 +1382,56 @@ impl AgentRunner {
             return Ok(String::new());
         }
         Ok(circuit_msg)
+    }
+
+    /// Run one turn through the rx4 (rotary) harness instead of the legacy
+    /// state machine.
+    ///
+    /// apollo keeps ownership of everything around the loop — system prompt,
+    /// skill injection, conversation history, memory recall, tool set — and
+    /// hands rx4 the assembled conversation. rx4 owns model calls and tool
+    /// cycling from there.
+    ///
+    /// The bridge is built per turn so each chat gets an isolated message
+    /// buffer; registration is in-memory and does no I/O.
+    async fn run_via_rotary(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Arc<dyn Tool>],
+        model: &str,
+    ) -> anyhow::Result<String> {
+        use crate::agent::rotary_bridge::{RotaryAgentBridge, RotaryBridgeConfig};
+
+        // rx4 takes the system prompt out of band, so collapse apollo's system
+        // messages (base prompt, mode injection, skills, group memory) into one.
+        let system_prompt = messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let mut history: Vec<ChatMessage> = messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .cloned()
+            .collect();
+        let prompt = history
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("no user turn to run through rx4"))?;
+
+        let mut bridge = RotaryAgentBridge::new(RotaryBridgeConfig {
+            provider: Arc::clone(&self.provider),
+            tools: tools.to_vec(),
+            system_prompt,
+            model: model.to_string(),
+            workspace: self.workspace.clone(),
+            max_tool_iterations: self.agent_config.max_rounds,
+        });
+
+        bridge
+            .run_prompt_with_history(&prompt.content, &history)
+            .await
     }
 
     /// Finish execution — persist, emit events, finalize draft
