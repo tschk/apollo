@@ -41,6 +41,7 @@ pub fn chat_message_to_rx4(msg: &ChatMessage) -> Message {
         role,
         content: msg.content.clone(),
         tool_call_id: msg.tool_use_id.clone(),
+        tool_calls: Vec::new(),
     }
 }
 
@@ -121,6 +122,7 @@ impl Rx4Provider for RotaryProviderAdapter {
         system: &Option<String>,
         model: &str,
         tools: &[serde_json::Value],
+        _reasoning_effort: Option<&str>,
     ) -> Result<rx4::provider::StreamResult, Rx4ProviderError> {
         // Translate rx4 messages to apollo ChatMessages
         let mut chat_messages: Vec<ChatMessage> = Vec::new();
