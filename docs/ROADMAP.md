@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-06-16
+Last updated: 2026-07-27
 
 ## Now
 
@@ -29,9 +29,10 @@ Last updated: 2026-06-16
 
 ## Next
 
+- exercise `agent.engine = "rx4"` end to end and decide whether it becomes the
+  default loop
 - add tests for Telegram markdown conversion and long-message chunking
 - add tests for audio/sticker handling in Telegram
-- wire autonomous mode into CLI entrypoint (`apollo autonomous`)
 - add trajectory collection toggle in config.yaml
 - make swarm state more visible and easier to operate
 - improve gateway hardening and operator diagnostics
