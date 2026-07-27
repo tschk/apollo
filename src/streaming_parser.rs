@@ -277,6 +277,33 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParserEvent> {
     events
 }
 
+/// Split a completed response into prose and the tool calls it embedded as
+/// `<tool_call>` XML.
+///
+/// Providers without native tool calling emit calls inline in the text. Running
+/// the state machine over the finished body recovers them so callers can treat
+/// them like native tool calls. Returns the text with the tool_call blocks
+/// removed, plus the recovered calls in the order they appeared.
+pub fn recover_tool_calls(content: &str) -> (String, Vec<ToolCall>) {
+    let mut text = String::new();
+    let mut calls = Vec::new();
+
+    for event in parse_tool_calls(content) {
+        match event {
+            ParserEvent::Text(t) => text.push_str(&t),
+            ParserEvent::ToolCall { name, args } => calls.push(ToolCall {
+                id: format!("xml_{}", calls.len()),
+                name,
+                arguments: args,
+            }),
+            ParserEvent::Error(e) => debug!("streaming parser: {}", e),
+            ParserEvent::End => {}
+        }
+    }
+
+    (text, calls)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -413,5 +440,42 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["y"]);
+    }
+
+    #[test]
+    fn recover_splits_prose_from_tool_calls() {
+        let input = concat!(
+            "Let me check that.",
+            r#"<tool_call>{"name":"read","arguments":{"path":"/tmp/x"}}</tool_call>"#,
+            "Done."
+        );
+        let (text, calls) = recover_tool_calls(input);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read");
+        assert_eq!(calls[0].id, "xml_0");
+        assert!(text.contains("Let me check that."));
+        assert!(text.contains("Done."));
+        assert!(!text.contains("tool_call"));
+    }
+
+    #[test]
+    fn recover_ids_are_unique_per_call() {
+        let input = concat!(
+            r#"<tool_call>{"name":"a","arguments":{}}</tool_call>"#,
+            r#"<tool_call>{"name":"b","arguments":{}}</tool_call>"#
+        );
+        let (_, calls) = recover_tool_calls(input);
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "xml_0");
+        assert_eq!(calls[1].id, "xml_1");
+    }
+
+    #[test]
+    fn recover_returns_no_calls_for_plain_text() {
+        let (text, calls) = recover_tool_calls("just a normal answer");
+        assert!(calls.is_empty());
+        assert_eq!(text, "just a normal answer");
     }
 }

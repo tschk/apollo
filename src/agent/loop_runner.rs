@@ -983,7 +983,27 @@ impl AgentRunner {
                 max_tokens: Some(8192),
             };
 
-            let response = self.provider.chat(&request).await?;
+            let mut response = self.provider.chat(&request).await?;
+
+            // Providers without native tool calling emit calls as <tool_call>
+            // XML inside the text. Recover them so the rest of the loop treats
+            // them like native calls.
+            if !response.has_tool_calls() {
+                let (text, recovered) =
+                    crate::streaming_parser::recover_tool_calls(response.text_or_empty());
+                if !recovered.is_empty() {
+                    tracing::debug!("recovered {} XML tool call(s) from text", recovered.len());
+                    response.text = (!text.trim().is_empty()).then_some(text);
+                    response.tool_calls = recovered
+                        .into_iter()
+                        .map(|c| crate::providers::ToolCall {
+                            id: c.id,
+                            name: c.name,
+                            arguments: c.arguments,
+                        })
+                        .collect();
+                }
+            }
 
             if let Some(usage) = &response.usage {
                 let _ = self
