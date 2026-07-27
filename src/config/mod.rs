@@ -64,6 +64,35 @@ pub struct AgentConfig {
     pub permissions: PermissionRulesConfig,
     /// Initial safety profile: `full`, `auto`, `prompt`, or `tools_only` (drives default `AgentMode`).
     pub permission_profile: String,
+    /// Agent loop implementation: `legacy` (apollo's built-in state machine)
+    /// or `rx4` (the rotary harness engine). apollo keeps ownership of context
+    /// assembly and tools either way; `rx4` hands the loop itself to rx4.
+    pub engine: String,
+}
+
+/// Which agent loop executes a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentEngine {
+    /// apollo's built-in Planning → Executing → Summarizing state machine.
+    #[default]
+    Legacy,
+    /// The rx4 (rotary) harness engine, via `agent::rotary_bridge`.
+    Rx4,
+}
+
+impl AgentConfig {
+    /// Parse the configured engine. Unknown values fall back to `Legacy` with
+    /// a warning rather than failing startup.
+    pub fn engine(&self) -> AgentEngine {
+        match self.engine.trim().to_ascii_lowercase().as_str() {
+            "rx4" | "rotary" => AgentEngine::Rx4,
+            "legacy" | "" => AgentEngine::Legacy,
+            other => {
+                tracing::warn!("unknown agent.engine {other:?}, using legacy");
+                AgentEngine::Legacy
+            }
+        }
+    }
 }
 
 impl Default for AgentConfig {
@@ -77,6 +106,7 @@ impl Default for AgentConfig {
             heavy_model: "claude-sonnet-4-6".to_string(),
             permissions: PermissionRulesConfig::default(),
             permission_profile: "auto".to_string(),
+            engine: "legacy".to_string(),
         }
     }
 }
@@ -528,6 +558,33 @@ mod permission_profile_tests {
             ]
         );
         assert!(cfg.toolsets.disabled.contains(&"browser".to_string()));
+    }
+
+    #[test]
+    fn engine_defaults_to_legacy() {
+        assert_eq!(AgentConfig::default().engine(), AgentEngine::Legacy);
+    }
+
+    #[test]
+    fn engine_parses_rx4_aliases() {
+        for value in ["rx4", "RX4", " rotary "] {
+            let cfg = AgentConfig {
+                engine: value.to_string(),
+                ..AgentConfig::default()
+            };
+            assert_eq!(cfg.engine(), AgentEngine::Rx4, "value: {value:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_engine_falls_back_to_legacy() {
+        for value in ["nope", ""] {
+            let cfg = AgentConfig {
+                engine: value.to_string(),
+                ..AgentConfig::default()
+            };
+            assert_eq!(cfg.engine(), AgentEngine::Legacy, "value: {value:?}");
+        }
     }
 
     #[test]
