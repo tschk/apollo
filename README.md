@@ -5,9 +5,9 @@
 apollo is a **local-first Rust AI agent runtime** for people who want the bot on
 their own machine, not hidden behind a hosted control plane.
 
-Small binary (~14MB), async-first (tokio), trait-driven. Ships with 10+ messaging
+Single 16MB binary, async-first (tokio), trait-driven. Ships with 10+ messaging
 channels, 20+ LLM providers, pluggable memory (SurrealDB + RocksDB), tool guardrails,
-context compaction, streaming tool-call parsing, autonomous coding mode, and a plugin
+context compaction, XML tool-call recovery, autonomous coding mode, and a plugin
 system with lifecycle hooks.
 
 ## Features
@@ -20,8 +20,11 @@ system with lifecycle hooks.
 - **Pluggable context compaction** — summarizer trait + default LLM-based compactor
   with configurable thresholds
 - **Self-healing retry** — auto re-prompts LLM with error context on tool failures
-- **Streaming tool-call parser** — state-machine detects `<tool_call>` blocks
-  incrementally from partial LLM output for early tool execution
+- **Selectable agent loop** — `agent.engine` runs turns on apollo's built-in
+  state machine (`legacy`, default) or the rx4 rotary harness (`rx4`)
+- **XML tool-call recovery** — state-machine parser extracts `<tool_call>`
+  blocks from the response text, so providers without native tool calling still
+  work. The parser also supports incremental feeding for streaming callers
 - **Lifecycle hooks** — plugins can intercept pre/post tool calls, session start/end
 - **Skill template preprocessing** — `${HERMES_SKILL_DIR}`, `${HERMES_SESSION_ID}`
   variables + `!\`command\`` inline shell execution in SKILL.md
@@ -87,16 +90,17 @@ cargo build --release
 
 ## Current Status
 
-- ✅ `cargo clippy --all-targets` — 0 warnings
-- ✅ `cargo test` — 85 tests pass, 0 fail
-- ✅ `cargo build --release` — passes, ~14MB binary
+- ✅ `cargo clippy --all-targets --all-features` — 0 warnings
+- ✅ `cargo test` — 156 tests pass, 0 fail
+- ✅ `cargo build --release` — passes, 16MB `apollo` binary
 - ✅ v0.2.0 — install from source, release binary, or `cargo install apollo-agent` (crates.io package; binaries `apollo`, `apollo-install`)
 
 ## Configuration
 
 Initialize with `apollo init`, edit `apollo.json`. Key sections:
 
-- `agent` — max rounds, history limit, model selection, compaction thresholds
+- `agent` — max rounds, history limit, model selection, compaction thresholds,
+  and `engine` (`legacy` or `rx4`) to pick which loop executes a turn
 - `provider` — LLM backend choice + credentials
 - `channel` — messaging platform config
 - `policy` — shell/dynamic tool/plugin permission gates

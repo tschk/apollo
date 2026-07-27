@@ -28,8 +28,18 @@ Goals:
 > `rx4` (rotary) harness engine. `rx4` is a crates.io dependency providing
 > the core agent loop, tools, providers, sessions,
 > skills, memory, guardrails, and MCP support. The bridge lives in
-> `src/agent/rotary_bridge.rs`. Until the migration completes, both the
-> legacy loop and the rx4 bridge coexist.
+> `src/agent/rotary_bridge.rs`.
+>
+> Both loops are selectable at runtime via `agent.engine`:
+>
+> - `legacy` (default) — apollo's Planning → Executing → Summarizing state
+>   machine in `loop_runner.rs`
+> - `rx4` — the rotary harness owns model calls and tool cycling
+>
+> Under either engine apollo owns everything around the loop: system prompt,
+> skill injection, conversation history, memory recall, tool set,
+> persistence, and lifecycle hooks. Delegation happens at the single
+> `handle_message` chokepoint, so every channel honors the setting.
 
 Key extension points:
 - `src/providers/traits.rs` — AI model providers
@@ -172,6 +182,11 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 cargo test
 ```
+
+If `ndarray-stats` fails to compile against `indexmap 1.9.3` (`IndexMap` "takes
+3 generic arguments"), the build-script artifacts in `target/` are corrupt —
+indexmap 1.x detects `std` from a build script, and a truncated probe leaves
+`has_std` unset. `rm -rf target/release` and rebuild; it is not a source error.
 
 ## 9) Workflow
 

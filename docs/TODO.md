@@ -1,6 +1,6 @@
 # TODO
 
-Last updated: 2026-06-16
+Last updated: 2026-07-27
 
 ## Done
 
@@ -38,11 +38,16 @@ Last updated: 2026-06-16
 ## Next
 
 - [x] Wire autonomous mode into CLI entrypoint (`apollo autonomous`)
+- [x] Integrate streaming parser into execution loop — `recover_tool_calls`
+  runs when the provider returns no native tool calls
+- [x] Wire the rx4 bridge into the execution path behind `agent.engine`
+- [x] Refresh and persist expired Anthropic OAuth tokens
 - [ ] Add trajectory collection toggle in config.yaml
 - [ ] Add tests for Telegram markdown conversion and long-message chunking
 - [ ] Add tests for audio/sticker handling in Telegram
-- [ ] Integrate streaming parser into execution loop (standalone now)
 - [ ] Make guardrails state persistable across restarts
+- [ ] Exercise `agent.engine = "rx4"` against a live provider — the path is
+  wired and type-checked but has no end-to-end coverage yet
 
 ## Backlog
 
