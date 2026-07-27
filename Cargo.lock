@@ -6803,9 +6803,9 @@ dependencies = [
 
 [[package]]
 name = "rx4"
-version = "0.3.25"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "901f986d96a321dcfaaff48ccb71c0f10d4561753cd3ddedbc44c04035b8f659"
+checksum = "681d9d00ee0a15e2c636bcec080687835e637f484aabff5356f776c11d6a228c"
 dependencies = [
  "async-trait",
  "cancellation-token",
@@ -6824,6 +6824,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -10221,9 +10222,9 @@ dependencies = [
 
 [[package]]
 name = "zkr"
-version = "0.3.1"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4cad430a77adac42848046980982a5cd08a8b680b7da99d6e3853b70debef42"
+checksum = "debe9aaac6a84a4a441d86754126b16d30b38bb69c7c36c2de16adc6f017d220"
 dependencies = [
  "rusqlite",
  "serde",

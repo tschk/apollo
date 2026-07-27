@@ -51,6 +51,7 @@ impl ZkrStore {
                 captured_at,
                 recorded_at: chrono::Utc::now().timestamp(),
                 claim,
+                feature_flag: None,
             })
         })
         .await??)
@@ -68,6 +69,7 @@ impl ZkrStore {
                 limit,
                 query_embedding: None,
                 as_of: None,
+                enabled_features: Vec::new(),
             })
         })
         .await??)
