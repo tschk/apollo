@@ -1,3 +1,13 @@
-# macOS: bindgen needs the Xcode SDK path (gpui / crepuscularity-gpui)
+# macOS: bindgen needs an SDK sysroot to build gpui / crepuscularity-gpui.
+#
+# The CommandLineTools SDK is used rather than the one inside Xcode.app because
+# bindgen splits BINDGEN_EXTRA_CLANG_ARGS on whitespace, so any SDK path
+# containing a space — "/Applications/Xcode Beta.app/..." — is truncated and
+# clang then fails to find dispatch/dispatch.h.
+#
+# force = false, so exporting BINDGEN_EXTRA_CLANG_ARGS yourself wins. On a
+# machine with a different layout:
+#   export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$(xcrun --show-sdk-path)"
+# (only safe if that path has no spaces).
 [env]
-BINDGEN_EXTRA_CLANG_ARGS = { value = "--sysroot=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk", force = false }
+BINDGEN_EXTRA_CLANG_ARGS = { value = "--sysroot=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk", force = false }

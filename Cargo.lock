@@ -273,6 +273,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tungstenite 0.24.0",
 ]
 
 [[package]]
