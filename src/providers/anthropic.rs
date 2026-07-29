@@ -32,6 +32,20 @@ const FILTERED_SEARCH_MODELS: &[&str] = &[
     "claude-mythos-5",
 ];
 
+/// How many times a paused turn is resumed before returning what there is.
+const MAX_PAUSE_RESUMES: u32 = 5;
+
+/// Fold one response's token counts into the running total for the turn.
+fn add_usage(total: &mut Option<Usage>, data: &Value) {
+    let Some(u) = data["usage"].as_object() else {
+        return;
+    };
+    let field = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let entry = total.get_or_insert_with(Usage::default);
+    entry.input_tokens += field("input_tokens");
+    entry.output_tokens += field("output_tokens");
+}
+
 /// Error code from a `web_search_tool_result` block, if it failed.
 ///
 /// A search that worked carries a list of results in `content`; one that failed
@@ -339,96 +353,122 @@ impl Provider for AnthropicProvider {
             }
         }
 
-        let mut req_builder = client
-            .post(format!("{}/messages", self.base_url))
-            .header("content-type", "application/json")
-            .header("anthropic-version", "2023-06-01");
-
-        if is_oauth {
-            req_builder = req_builder
-                .header("Authorization", format!("Bearer {api_key}"))
-                .header(
-                    "anthropic-beta",
-                    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
-                )
-                .header("anthropic-dangerous-direct-browser-access", "true");
-        } else {
-            req_builder = req_builder
-                .header("x-api-key", &api_key)
-                .header("anthropic-beta", "prompt-caching-2024-07-31");
-        }
-
-        let resp = send_with_retry(req_builder.json(&body), self.name()).await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "Anthropic API error {}: {}",
-                status,
-                truncate_chars(&text, 200)
-            );
-        }
-
-        // Capture response headers for rate limit tracking
-        let headers = resp.headers().clone();
-
-        let data: Value = resp.json().await?;
-
-        // Record usage for cost tracking
-        self.record_usage(&data, request.model).await;
-
-        // Update rate limits from response headers
-        if let Some(tracker) = &self.cost_tracker {
-            tracker.update_rate_limits(&headers).await;
-        }
-
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut usage: Option<Usage> = None;
 
-        if let Some(content) = data["content"].as_array() {
-            for block in content {
-                match block["type"].as_str() {
-                    Some("text") => {
-                        if let Some(t) = block["text"].as_str() {
-                            text_parts.push(t.to_string());
+        // A turn that exhausts the server tool loop comes back as `pause_turn`
+        // with a partial answer. Resuming means replaying the paused assistant
+        // turn verbatim and asking again — the server picks up where it left
+        // off, so no extra user message is added.
+        for attempt in 0..=MAX_PAUSE_RESUMES {
+            let mut req_builder = client
+                .post(format!("{}/messages", self.base_url))
+                .header("content-type", "application/json")
+                .header("anthropic-version", "2023-06-01");
+
+            if is_oauth {
+                req_builder = req_builder
+                    .header("Authorization", format!("Bearer {api_key}"))
+                    .header(
+                        "anthropic-beta",
+                        "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
+                    )
+                    .header("anthropic-dangerous-direct-browser-access", "true");
+            } else {
+                req_builder = req_builder
+                    .header("x-api-key", &api_key)
+                    .header("anthropic-beta", "prompt-caching-2024-07-31");
+            }
+
+            let resp = send_with_retry(req_builder.json(&body), self.name()).await?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                anyhow::bail!(
+                    "Anthropic API error {}: {}",
+                    status,
+                    truncate_chars(&text, 200)
+                );
+            }
+
+            // Capture response headers for rate limit tracking
+            let headers = resp.headers().clone();
+
+            let data: Value = resp.json().await?;
+
+            // Record usage for cost tracking
+            self.record_usage(&data, request.model).await;
+
+            // Update rate limits from response headers
+            if let Some(tracker) = &self.cost_tracker {
+                tracker.update_rate_limits(&headers).await;
+            }
+
+            if let Some(content) = data["content"].as_array() {
+                for block in content {
+                    match block["type"].as_str() {
+                        Some("text") => {
+                            if let Some(t) = block["text"].as_str() {
+                                text_parts.push(t.to_string());
+                            }
                         }
-                    }
-                    Some("tool_use") => {
-                        tool_calls.push(ToolCall {
-                            id: block["id"].as_str().unwrap_or("").to_string(),
-                            name: block["name"].as_str().unwrap_or("").to_string(),
-                            arguments: block["input"].to_string(),
-                        });
-                    }
-                    // Server tools resolve before the response is returned, so
-                    // these are a record of what ran, not work for apollo. Only
-                    // a failure needs surfacing — the model folds successful
-                    // results into its own text.
-                    Some("web_search_tool_result") => {
-                        if let Some(code) = web_search_error(block) {
-                            tracing::warn!("anthropic web search failed: {code}");
+                        Some("tool_use") => {
+                            tool_calls.push(ToolCall {
+                                id: block["id"].as_str().unwrap_or("").to_string(),
+                                name: block["name"].as_str().unwrap_or("").to_string(),
+                                arguments: block["input"].to_string(),
+                            });
                         }
+                        // Server tools resolve before the response is returned,
+                        // so these are a record of what ran, not work for
+                        // apollo. Only a failure needs surfacing — the model
+                        // folds successful results into its own text.
+                        Some("web_search_tool_result") => {
+                            if let Some(code) = web_search_error(block) {
+                                tracing::warn!("anthropic web search failed: {code}");
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
-        }
 
-        // The server tool loop stopped at its own iteration limit rather than
-        // finishing. `max_uses` above is set to keep turns clear of this, so it
-        // should not happen — say so if it does rather than return a truncated
-        // answer as if it were complete.
-        if data["stop_reason"].as_str() == Some("pause_turn") {
-            tracing::warn!(
-                "anthropic paused the turn at the server tool limit; the response may be incomplete"
-            );
-        }
+            // Each attempt reports only its own tokens, so the caller sees the
+            // whole turn rather than the last leg of it.
+            add_usage(&mut usage, &data);
 
-        let usage = data["usage"].as_object().map(|u| Usage {
-            input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        });
+            if data["stop_reason"].as_str() != Some("pause_turn") {
+                break;
+            }
+            // A pending client tool call outranks resuming: apollo has to run it
+            // before the turn can go anywhere.
+            if !tool_calls.is_empty() {
+                break;
+            }
+            if attempt == MAX_PAUSE_RESUMES {
+                tracing::warn!(
+                    "anthropic still paused after {MAX_PAUSE_RESUMES} resumes; \
+                     returning a partial response"
+                );
+                break;
+            }
+
+            let Some(content) = data.get("content").cloned() else {
+                tracing::warn!("anthropic paused the turn without content; cannot resume");
+                break;
+            };
+            // The paused turn has to go back exactly as it arrived — the server
+            // reads its own tool blocks out of it to resume.
+            if let Some(messages) = body["messages"].as_array_mut() {
+                messages.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": content,
+                }));
+            }
+            tracing::debug!("resuming a paused anthropic turn (attempt {})", attempt + 1);
+        }
 
         Ok(ChatResponse {
             text: if text_parts.is_empty() {
@@ -445,6 +485,7 @@ impl Provider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn filtered_search_only_for_models_that_accept_it() {
@@ -484,6 +525,103 @@ mod tests {
     fn an_error_without_a_code_still_reports() {
         let block = serde_json::json!({"content": {}});
         assert_eq!(web_search_error(&block).as_deref(), Some("unknown error"));
+    }
+
+    /// Serve canned responses that pause the turn `pauses` times before
+    /// finishing. Returns the base URL and the request counter.
+    async fn paused_server(pauses: usize) -> (String, std::sync::Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&seen);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0u8; 65536];
+                let _ = socket.read(&mut buf).await;
+
+                let payload = if n < pauses {
+                    serde_json::json!({
+                        "content": [
+                            {"type": "server_tool_use", "id": "s", "name": "web_search",
+                             "input": {"query": "q"}},
+                            {"type": "text", "text": format!("part{n} ")},
+                        ],
+                        "usage": {"input_tokens": 100, "output_tokens": 10},
+                        "stop_reason": "pause_turn",
+                    })
+                } else {
+                    serde_json::json!({
+                        "content": [{"type": "text", "text": "final."}],
+                        "usage": {"input_tokens": 100, "output_tokens": 10},
+                        "stop_reason": "end_turn",
+                    })
+                }
+                .to_string();
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+
+        (format!("http://{addr}"), seen)
+    }
+
+    async fn chat_against(base: &str) -> ChatResponse {
+        let p = AnthropicProvider::new("sk-ant-test").with_base_url(base);
+        let msgs = [ChatMessage::user("hi")];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+            model: "claude-opus-5",
+            temperature: 0.0,
+            max_tokens: Some(64),
+        };
+        p.chat(&req).await.expect("mock call")
+    }
+
+    #[tokio::test]
+    async fn a_paused_turn_resumes_and_keeps_every_leg() {
+        let (base, seen) = paused_server(2).await;
+        let r = chat_against(&base).await;
+        // Text from all three legs, in order — a resume that dropped the
+        // earlier legs would still look like a valid answer.
+        assert_eq!(r.text.as_deref(), Some("part0 part1 final."));
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn usage_covers_the_whole_turn_not_just_the_last_leg() {
+        let (base, _) = paused_server(2).await;
+        let usage = chat_against(&base).await.usage.expect("usage");
+        assert_eq!(usage.input_tokens, 300);
+        assert_eq!(usage.output_tokens, 30);
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_never_unpauses_gives_up() {
+        // Server pauses forever; the loop must stop rather than spin.
+        let (base, seen) = paused_server(usize::MAX).await;
+        let r = chat_against(&base).await;
+        assert_eq!(
+            seen.load(Ordering::SeqCst) as u32,
+            MAX_PAUSE_RESUMES + 1,
+            "should stop after the resume cap"
+        );
+        // Partial text still comes back rather than an error or nothing.
+        assert!(r.text.unwrap_or_default().starts_with("part0 "));
     }
 
     #[test]
