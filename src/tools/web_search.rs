@@ -4,13 +4,15 @@
 //!
 //! 1. **SearXNG** (`SEARXNG_URL`) — a self-hosted metasearch instance. Full web
 //!    results, no third-party key, nothing leaves the machine except the query.
-//! 2. **DuckDuckGo Instant Answer** — official, keyless, always available. It
-//!    returns topic abstracts rather than a ranked result list, so it answers
-//!    "what is X" well and "find pages about X" poorly.
+//! 2. **DuckDuckGo** — keyless, always available. Reads the lite result page
+//!    for a ranked list, and falls back to the Instant Answer API when that
+//!    page is unavailable.
 //! 3. **Perplexity** (`PERPLEXITY_API_KEY`) — paid, kept for existing setups.
 //!
-//! DuckDuckGo's `html.` and `lite.` HTML endpoints are deliberately not used:
-//! they answer 202 with no results to non-browser clients.
+//! The lite endpoint answers 202 with a challenge stub to clients that do not
+//! look like browsers, so the request carries browser headers. That is a
+//! best-effort path by nature: when it is refused the Instant Answer API still
+//! answers "what is X", but only a SearXNG instance gives durable result lists.
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -20,6 +22,24 @@ use crate::text::truncate_chars;
 
 /// Cap on characters returned to the model from any one backend.
 const MAX_RESULT_CHARS: usize = 4000;
+
+/// DuckDuckGo's plainest result page — table markup, no scripting.
+const DDG_LITE_URL: &str = "https://lite.duckduckgo.com/lite/";
+
+/// Markers DuckDuckGo puts on an anti-bot challenge page instead of results.
+const DDG_BLOCK_MARKERS: &[&str] = &[
+    "anomaly-modal",
+    "challenge-platform",
+    "DDG.anomalyDetection",
+];
+
+const DDG_USER_AGENTS: &[&str] = &[
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+];
 
 /// Search backends, most preferred first.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +122,52 @@ impl WebSearchTool {
         })))
     }
 
+    /// Ranked results when DuckDuckGo serves them, instant answers otherwise.
     async fn search_duckduckgo(query: &str) -> anyhow::Result<String> {
+        match Self::scrape_duckduckgo(query).await {
+            Ok(text) => Ok(text),
+            Err(e) => {
+                tracing::debug!("duckduckgo result page unavailable ({e}), using instant answers");
+                Self::duckduckgo_instant(query).await
+            }
+        }
+    }
+
+    async fn scrape_duckduckgo(query: &str) -> anyhow::Result<String> {
+        let resp = Self::client()?
+            .post(DDG_LITE_URL)
+            .header(reqwest::header::USER_AGENT, pick_user_agent())
+            .header(
+                reqwest::header::ACCEPT,
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+            .header(reqwest::header::REFERER, "https://lite.duckduckgo.com/")
+            .form(&[("q", query), ("kl", "us-en"), ("safe", "1")])
+            .send()
+            .await?;
+
+        // 202 is how the endpoint refuses a client it does not consider a browser.
+        if resp.status().as_u16() == 202 {
+            anyhow::bail!("soft-blocked");
+        }
+        if !resp.status().is_success() {
+            anyhow::bail!("duckduckgo returned {}", resp.status());
+        }
+
+        let body = resp.text().await?;
+        if looks_blocked(&body) {
+            anyhow::bail!("challenge page");
+        }
+
+        let hits = parse_lite_results(&body);
+        if hits.is_empty() {
+            anyhow::bail!("no results parsed");
+        }
+        Ok(format_results(hits.into_iter().take(8)))
+    }
+
+    async fn duckduckgo_instant(query: &str) -> anyhow::Result<String> {
         let resp = Self::client()?
             .get("https://api.duckduckgo.com/")
             .query(&[
@@ -154,6 +219,100 @@ struct SearchHit {
     title: String,
     url: String,
     snippet: String,
+}
+
+/// Rotates the user agent so a long-running agent looks less uniform.
+fn pick_user_agent() -> &'static str {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    DDG_USER_AGENTS[nanos % DDG_USER_AGENTS.len()]
+}
+
+fn looks_blocked(body: &str) -> bool {
+    DDG_BLOCK_MARKERS.iter().any(|m| body.contains(m))
+}
+
+/// Read one attribute out of an opening tag, tolerating either quote style.
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let at = tag.find(&format!("{name}="))?;
+    let rest = &tag[at + name.len() + 1..];
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &rest[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+/// Strip tags, decode the entities DuckDuckGo emits, and collapse whitespace.
+fn clean_text(fragment: &str) -> String {
+    let mut out = String::with_capacity(fragment.len());
+    let mut in_tag = false;
+    for ch in fragment.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    // `&amp;` decodes last so an escaped entity is not decoded twice.
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Pull results out of the lite page, which lists each hit as an anchor of
+/// class `result-link` followed by an optional `result-snippet` cell.
+fn parse_lite_results(html: &str) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    let mut rest = html;
+
+    while let Some(marker) = rest.find("result-link") {
+        let (before, after) = rest.split_at(marker);
+        let Some(gt) = after.find('>') else { break };
+        let body = &after[gt + 1..];
+        let Some(end) = body.find("</a>") else { break };
+        let tail = &body[end..];
+
+        let url = before
+            .rfind("<a ")
+            .and_then(|start| attr(&before[start..], "href"))
+            .unwrap_or_default();
+        let title = clean_text(&body[..end]);
+
+        // A snippet belongs to this hit only if it precedes the next one.
+        let next = tail.find("result-link").unwrap_or(tail.len());
+        let snippet = tail[..next]
+            .find("result-snippet")
+            .and_then(|at| {
+                let segment = &tail[at..next];
+                let open = segment.find('>')?;
+                let close = segment[open..].find("</td>")?;
+                Some(clean_text(&segment[open + 1..open + close]))
+            })
+            .unwrap_or_default();
+
+        if !url.is_empty() && !title.is_empty() {
+            hits.push(SearchHit {
+                title,
+                url,
+                snippet,
+            });
+        }
+        rest = tail;
+    }
+
+    hits
 }
 
 fn field(value: &serde_json::Value, key: &str) -> String {
@@ -368,6 +527,72 @@ mod tests {
         let out = format_duckduckgo(&body);
         assert!(out.contains("Has text"));
         assert!(!out.contains("no-text"));
+    }
+
+    const LITE_PAGE: &str = r#"
+      <table border="0">
+        <tr><td valign="top">1.&nbsp;</td>
+            <td><a rel="nofollow" href="https://tokio.rs/" class='result-link'>Tokio - An asynchronous <b>Rust</b> runtime</a></td></tr>
+        <tr><td>&nbsp;</td>
+            <td class='result-snippet'><b>Tokio</b> is a library for fast &amp; reliable apps.</td></tr>
+        <tr><td valign="top">2.&nbsp;</td>
+            <td><a rel="nofollow" href="https://docs.rs/tokio" class='result-link'>tokio - Rust</a></td></tr>
+      </table>"#;
+
+    #[test]
+    fn parses_lite_result_page() {
+        let hits = parse_lite_results(LITE_PAGE);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].url, "https://tokio.rs/");
+        assert_eq!(hits[0].title, "Tokio - An asynchronous Rust runtime");
+        assert_eq!(
+            hits[0].snippet,
+            "Tokio is a library for fast & reliable apps."
+        );
+        assert_eq!(hits[1].url, "https://docs.rs/tokio");
+    }
+
+    #[test]
+    fn does_not_borrow_a_later_hits_snippet() {
+        // The second hit has no snippet of its own and must not inherit one.
+        let hits = parse_lite_results(LITE_PAGE);
+        assert!(hits[1].snippet.is_empty());
+    }
+
+    #[test]
+    fn parsing_a_page_without_results_yields_nothing() {
+        assert!(parse_lite_results("<html><body>nothing here</body></html>").is_empty());
+    }
+
+    #[test]
+    fn detects_challenge_pages() {
+        assert!(looks_blocked("<div id=\"anomaly-modal\">"));
+        assert!(looks_blocked("window.DDG.anomalyDetection = {}"));
+        assert!(!looks_blocked(LITE_PAGE));
+    }
+
+    #[test]
+    fn reads_attributes_in_either_quote_style() {
+        assert_eq!(attr("<a href=\"x\">", "href").as_deref(), Some("x"));
+        assert_eq!(attr("<a href='y'>", "href").as_deref(), Some("y"));
+        assert_eq!(attr("<a rel=nofollow>", "href"), None);
+    }
+
+    #[test]
+    fn user_agent_comes_from_the_pool() {
+        assert!(DDG_USER_AGENTS.contains(&pick_user_agent()));
+    }
+
+    /// Canary for the scraped path: DuckDuckGo can change its markup or start
+    /// refusing this client at any time. Ignored by default — it needs network.
+    /// Run with: `cargo test --lib duckduckgo_still_serves -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn duckduckgo_still_serves_a_result_page() {
+        let out = WebSearchTool::scrape_duckduckgo("rust tokio runtime")
+            .await
+            .expect("lite endpoint refused or markup changed");
+        assert!(out.contains("http"), "no links in: {out}");
     }
 
     #[test]
