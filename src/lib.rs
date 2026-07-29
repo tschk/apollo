@@ -17,6 +17,7 @@ pub mod agent;
 pub mod agent_http;
 pub mod autonomous;
 pub mod bootstrap;
+pub mod capabilities;
 pub mod channels;
 pub mod claw_adapter;
 pub mod config;
