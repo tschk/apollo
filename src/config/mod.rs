@@ -33,6 +33,9 @@ pub struct ProviderConfig {
     pub name: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    /// Let the provider run web search on its own infrastructure instead of
+    /// apollo's `web_search` tool. Anthropic only; billed by the provider.
+    pub native_web_search: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,6 +386,7 @@ impl Default for ProviderConfig {
             name: "anthropic".to_string(),
             api_key: None,
             base_url: None,
+            native_web_search: false,
         }
     }
 }

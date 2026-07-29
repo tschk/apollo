@@ -118,7 +118,8 @@ pub fn build_provider(cfg: &Config) -> Arc<dyn Provider> {
     match cfg.provider.name.as_str() {
         #[cfg(feature = "provider-anthropic")]
         "anthropic" | "claude" => {
-            let mut p = AnthropicProvider::new(&api_key);
+            let mut p = AnthropicProvider::new(&api_key)
+                .with_native_web_search(cfg.provider.native_web_search);
             if let Some(url) = &cfg.provider.base_url {
                 p = p.with_base_url(url);
             }
@@ -241,7 +242,12 @@ pub fn build_base_tools(
     ];
     #[cfg(feature = "plugin-web")]
     {
-        tools.push(Arc::new(crate::tools::web_search::WebSearchTool::new()));
+        // A provider that searches server-side already answers to the name
+        // `web_search`. Registering apollo's tool too would send the model two
+        // tools with one name, which the API rejects outright.
+        if !provider.capabilities().native_web_search {
+            tools.push(Arc::new(crate::tools::web_search::WebSearchTool::new()));
+        }
         tools.push(Arc::new(crate::tools::web_fetch::WebFetchTool::new()));
     }
     #[cfg(feature = "plugin-browser")]

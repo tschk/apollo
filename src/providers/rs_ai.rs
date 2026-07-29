@@ -110,6 +110,7 @@ impl Provider for RsAiProvider {
                 "claude" | "chatgpt" | "openai" | "gemini" | "xai" | "grok"
             ),
             max_context: 200_000,
+            native_web_search: false,
         }
     }
 

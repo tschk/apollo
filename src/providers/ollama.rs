@@ -64,6 +64,7 @@ impl Provider for OllamaProvider {
             streaming: true,
             vision: false,
             max_context: 32_000,
+            native_web_search: false,
         }
     }
 

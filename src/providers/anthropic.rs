@@ -10,6 +10,56 @@ use crate::cost::{CostTracker, TokenUsage};
 use crate::text::truncate_chars;
 use crate::tools::ToolSpec;
 
+/// Server tool with dynamic filtering, on models that accept it.
+const WEB_SEARCH_FILTERED: &str = "web_search_20260209";
+/// The original server tool, accepted by every model that has web search.
+const WEB_SEARCH_BASIC: &str = "web_search_20250305";
+
+/// Cap on server-side searches per turn. Also keeps the turn clear of the
+/// server tool loop's own iteration limit, which would end it in `pause_turn`.
+const WEB_SEARCH_MAX_USES: u32 = 5;
+
+/// Model families that accept the filtered web search tool. Anything else gets
+/// the basic tool, which is the safe floor.
+const FILTERED_SEARCH_MODELS: &[&str] = &[
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-fable-5",
+    "claude-mythos-5",
+];
+
+/// Error code from a `web_search_tool_result` block, if it failed.
+///
+/// A search that worked carries a list of results in `content`; one that failed
+/// carries a single object instead, and the request still returns HTTP 200. The
+/// shape is the only signal.
+fn web_search_error(block: &Value) -> Option<String> {
+    let content = block.get("content")?;
+    if content.is_array() {
+        return None;
+    }
+    Some(
+        content
+            .get("error_code")
+            .and_then(|c| c.as_str())
+            .unwrap_or("unknown error")
+            .to_string(),
+    )
+}
+
+/// Pick the newest web search tool the model accepts.
+fn web_search_tool_type(model: &str) -> &'static str {
+    if FILTERED_SEARCH_MODELS.iter().any(|m| model.starts_with(m)) {
+        WEB_SEARCH_FILTERED
+    } else {
+        WEB_SEARCH_BASIC
+    }
+}
+
 pub struct AnthropicProvider {
     api_key: String,
     /// Present when the credential is an OAuth token loaded from the Claude
@@ -18,6 +68,8 @@ pub struct AnthropicProvider {
     oauth: Option<super::oauth::OAuthTokenCache>,
     base_url: String,
     cost_tracker: Option<std::sync::Arc<CostTracker>>,
+    /// Declare Anthropic's server-side web search alongside apollo's own tools.
+    native_web_search: bool,
 }
 
 impl AnthropicProvider {
@@ -27,6 +79,7 @@ impl AnthropicProvider {
             oauth: None,
             base_url: "https://api.anthropic.com/v1".to_string(),
             cost_tracker: None,
+            native_web_search: false,
         }
     }
 
@@ -73,6 +126,11 @@ impl AnthropicProvider {
 
     pub fn with_cost_tracker(mut self, tracker: std::sync::Arc<CostTracker>) -> Self {
         self.cost_tracker = Some(tracker);
+        self
+    }
+
+    pub fn with_native_web_search(mut self, enabled: bool) -> Self {
+        self.native_web_search = enabled;
         self
     }
 
@@ -186,6 +244,7 @@ impl Provider for AnthropicProvider {
             streaming: true,
             vision: true,
             max_context: 200_000,
+            native_web_search: self.native_web_search,
         }
     }
 
@@ -230,10 +289,24 @@ impl Provider for AnthropicProvider {
             body["system"] = sys;
         }
 
-        if let Some(tools) = request.tools {
-            if !tools.is_empty() {
-                body["tools"] = Value::Array(self.build_tools_payload(tools));
-            }
+        let mut tool_payload = request
+            .tools
+            .filter(|t| !t.is_empty())
+            .map(|t| self.build_tools_payload(t))
+            .unwrap_or_default();
+
+        // Anthropic runs this one itself; the results come back in the same
+        // response rather than as a tool call apollo has to execute.
+        if self.native_web_search {
+            tool_payload.push(serde_json::json!({
+                "type": web_search_tool_type(request.model),
+                "name": "web_search",
+                "max_uses": WEB_SEARCH_MAX_USES,
+            }));
+        }
+
+        if !tool_payload.is_empty() {
+            body["tools"] = Value::Array(tool_payload);
         }
 
         // Detect OAuth tokens (sk-ant-oat) vs API keys (sk-ant-api)
@@ -328,9 +401,28 @@ impl Provider for AnthropicProvider {
                             arguments: block["input"].to_string(),
                         });
                     }
+                    // Server tools resolve before the response is returned, so
+                    // these are a record of what ran, not work for apollo. Only
+                    // a failure needs surfacing — the model folds successful
+                    // results into its own text.
+                    Some("web_search_tool_result") => {
+                        if let Some(code) = web_search_error(block) {
+                            tracing::warn!("anthropic web search failed: {code}");
+                        }
+                    }
                     _ => {}
                 }
             }
+        }
+
+        // The server tool loop stopped at its own iteration limit rather than
+        // finishing. `max_uses` above is set to keep turns clear of this, so it
+        // should not happen — say so if it does rather than return a truncated
+        // answer as if it were complete.
+        if data["stop_reason"].as_str() == Some("pause_turn") {
+            tracing::warn!(
+                "anthropic paused the turn at the server tool limit; the response may be incomplete"
+            );
         }
 
         let usage = data["usage"].as_object().map(|u| Usage {
@@ -347,5 +439,61 @@ impl Provider for AnthropicProvider {
             tool_calls,
             usage,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filtered_search_only_for_models_that_accept_it() {
+        assert_eq!(web_search_tool_type("claude-opus-5"), WEB_SEARCH_FILTERED);
+        assert_eq!(
+            web_search_tool_type("claude-sonnet-4-6"),
+            WEB_SEARCH_FILTERED
+        );
+        // apollo's own onboarding default predates the filtered tool.
+        assert_eq!(web_search_tool_type("claude-sonnet-4-5"), WEB_SEARCH_BASIC);
+        assert_eq!(web_search_tool_type("claude-haiku-4-5"), WEB_SEARCH_BASIC);
+        assert_eq!(web_search_tool_type(""), WEB_SEARCH_BASIC);
+    }
+
+    #[test]
+    fn a_result_list_is_not_an_error() {
+        let block = serde_json::json!({
+            "type": "web_search_tool_result",
+            "content": [{"type": "web_search_result", "url": "https://example.com"}],
+        });
+        assert_eq!(web_search_error(&block), None);
+    }
+
+    #[test]
+    fn a_result_object_is_an_error() {
+        let block = serde_json::json!({
+            "type": "web_search_tool_result",
+            "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"},
+        });
+        assert_eq!(
+            web_search_error(&block).as_deref(),
+            Some("max_uses_exceeded")
+        );
+    }
+
+    #[test]
+    fn an_error_without_a_code_still_reports() {
+        let block = serde_json::json!({"content": {}});
+        assert_eq!(web_search_error(&block).as_deref(), Some("unknown error"));
+    }
+
+    #[test]
+    fn native_search_is_off_unless_asked_for() {
+        assert!(!AnthropicProvider::new("k").capabilities().native_web_search);
+        assert!(
+            AnthropicProvider::new("k")
+                .with_native_web_search(true)
+                .capabilities()
+                .native_web_search
+        );
     }
 }

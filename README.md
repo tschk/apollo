@@ -43,6 +43,27 @@ coding agent), dynamic tools, MCP bridge, session management, cron scheduling,
 browser automation, message send, config management, mode switching, brief summary,
 and feature-gated signed desktop actions through Praefectus
 
+### Web search
+`web_search` picks a backend from the environment, in order:
+
+1. `SEARXNG_URL` — a self-hosted SearXNG instance. Ranked results, no third-party
+   key, and only the query leaves the machine.
+2. DuckDuckGo — keyless and always available. Reads the lite result page, and
+   falls back to the Instant Answer API when that page is refused.
+3. `PERPLEXITY_API_KEY` — paid, kept for existing setups.
+
+Anthropic can also run the search itself, which replaces the tool rather than
+configuring it:
+
+```json
+{ "provider": { "name": "anthropic", "native_web_search": true } }
+```
+
+The model searches during its own turn, so results never round-trip through
+apollo and nothing needs a search key — but the searches are billed by Anthropic,
+and apollo's `web_search` tool is left unregistered to keep the name unambiguous.
+Other providers ignore the setting.
+
 ### Memory
 - SurrealDB + RocksDB backend with conversation history, FTS5, vector embeddings
 - Sticker cache, file indexing, code chunk storage

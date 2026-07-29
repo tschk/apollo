@@ -102,6 +102,9 @@ pub struct ProviderCapabilities {
     pub vision: bool,
     /// Maximum context window
     pub max_context: u32,
+    /// Runs web search on the provider's own infrastructure, so apollo's
+    /// `web_search` tool must be left out of the tool set to avoid a name clash.
+    pub native_web_search: bool,
 }
 
 /// The core Provider trait.
