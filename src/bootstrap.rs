@@ -11,6 +11,7 @@ use crate::memory::MemoryBackend;
 use crate::policy::ExecutionPolicy;
 #[cfg(feature = "provider-anthropic")]
 use crate::providers::anthropic::AnthropicProvider;
+use crate::providers::defaults::default_model_for_provider;
 #[cfg(feature = "provider-ollama")]
 use crate::providers::ollama::OllamaProvider;
 use crate::providers::openai_compat::OpenAiCompatProvider;
@@ -46,18 +47,12 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
     }
 
     if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        cfg.provider.api_key = Some(key.clone());
-        if key.contains("sk-ant-oat") && cfg.model.is_empty() {
-            cfg.model = "claude-sonnet-4-5".to_string();
-        }
+        cfg.provider.api_key = Some(key);
     }
 
     if cfg.provider.api_key.is_none() {
         if let Ok(token) = resolve_openclaw_token("anthropic") {
             cfg.provider.api_key = Some(token);
-            if cfg.model.is_empty() {
-                cfg.model = "claude-sonnet-4-5".to_string();
-            }
         }
         #[cfg(feature = "provider-anthropic")]
         {
@@ -67,7 +62,6 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
                 let _ = _provider;
                 if let Ok((token, _, _)) = crate::providers::oauth::load_oauth_token_from_file() {
                     cfg.provider.api_key = Some(token);
-                    cfg.model = "claude-sonnet-4-5".to_string();
                 }
             }
         }
@@ -109,7 +103,24 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
         }
     }
 
+    apply_default_model(&mut cfg);
+
     cfg
+}
+
+/// Fill in the model for the configured provider when none was chosen.
+///
+/// Credential detection can change the provider, so this runs once at the end
+/// from whichever provider actually won. It only ever fills a blank: a model
+/// already in the config is never replaced, including when the credential that
+/// was detected belongs to a different provider.
+fn apply_default_model(cfg: &mut Config) {
+    if !cfg.model.trim().is_empty() {
+        return;
+    }
+    if let Some(model) = default_model_for_provider(&cfg.provider.name) {
+        cfg.model = model.to_string();
+    }
 }
 
 pub fn build_provider(cfg: &Config) -> Arc<dyn Provider> {
@@ -433,5 +444,51 @@ mod tests {
         let path = dir.path().join("apollo.json");
         std::fs::write(&path, "{}").unwrap();
         require_config_file(path.to_str().unwrap()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod default_model_tests {
+    use super::*;
+
+    fn config_with(provider: &str, model: &str) -> Config {
+        let mut cfg = Config::default_config();
+        cfg.provider.name = provider.to_string();
+        cfg.model = model.to_string();
+        cfg
+    }
+
+    #[test]
+    fn a_blank_model_is_filled_from_the_provider() {
+        let mut cfg = config_with("xai", "");
+        apply_default_model(&mut cfg);
+        assert_eq!(cfg.model, "grok-build-0.1");
+
+        let mut cfg = config_with("chatgpt", "");
+        apply_default_model(&mut cfg);
+        assert_eq!(cfg.model, "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn a_configured_model_is_never_replaced() {
+        // Regression: credential detection used to overwrite the model even
+        // when the config named one, so an OAuth user lost their choice.
+        let mut cfg = config_with("anthropic", "claude-haiku-4-5");
+        apply_default_model(&mut cfg);
+        assert_eq!(cfg.model, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn whitespace_counts_as_unset() {
+        let mut cfg = config_with("anthropic", "   ");
+        apply_default_model(&mut cfg);
+        assert_eq!(cfg.model, "claude-fable-5");
+    }
+
+    #[test]
+    fn an_unknown_provider_leaves_the_model_alone() {
+        let mut cfg = config_with("some-private-gateway", "");
+        apply_default_model(&mut cfg);
+        assert!(cfg.model.is_empty(), "must not invent a model id");
     }
 }

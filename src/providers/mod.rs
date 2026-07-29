@@ -1,6 +1,7 @@
 //! LLM Provider abstraction — swap backends without changing agent logic.
 //! Enable only what you need via Cargo features.
 
+pub mod defaults;
 pub mod retry;
 pub mod traits;
 

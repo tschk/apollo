@@ -460,13 +460,17 @@ impl Provider for AnthropicProvider {
                 break;
             };
             // The paused turn has to go back exactly as it arrived — the server
-            // reads its own tool blocks out of it to resume.
-            if let Some(messages) = body["messages"].as_array_mut() {
-                messages.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": content,
-                }));
-            }
+            // reads its own tool blocks out of it to resume. Failing to append
+            // would re-send the same request and be billed for the same pause,
+            // so stop instead of retrying something that cannot change.
+            let Some(messages) = body["messages"].as_array_mut() else {
+                tracing::warn!("anthropic request had no message list; cannot resume");
+                break;
+            };
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": content,
+            }));
             tracing::debug!("resuming a paused anthropic turn (attempt {})", attempt + 1);
         }
 
