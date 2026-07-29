@@ -118,6 +118,7 @@ impl Provider for CopilotProvider {
             streaming: true,
             vision: true,
             max_context: 128_000,
+            native_web_search: false,
         }
     }
 

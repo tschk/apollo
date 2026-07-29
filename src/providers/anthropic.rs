@@ -396,7 +396,7 @@ impl Provider for AnthropicProvider {
             // Capture response headers for rate limit tracking
             let headers = resp.headers().clone();
 
-            let data: Value = resp.json().await?;
+            let mut data: Value = resp.json().await?;
 
             // Record usage for cost tracking
             self.record_usage(&data, request.model).await;
@@ -455,10 +455,13 @@ impl Provider for AnthropicProvider {
                 break;
             }
 
-            let Some(content) = data.get("content").cloned() else {
+            // Taken, not cloned: `data` is not read past this point and the
+            // block list can be large when searches ran.
+            let content = data["content"].take();
+            if content.is_null() {
                 tracing::warn!("anthropic paused the turn without content; cannot resume");
                 break;
-            };
+            }
             // The paused turn has to go back exactly as it arrived — the server
             // reads its own tool blocks out of it to resume. Failing to append
             // would re-send the same request and be billed for the same pause,

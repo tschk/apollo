@@ -178,10 +178,15 @@ src/
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
-cargo test
+cargo test --all-features
 ```
+
+`--all-features` is not optional. Several providers are behind non-default
+features, so a `ProviderCapabilities` field added without it compiles locally
+and breaks for anyone enabling `provider-copilot` — which is how 0.3.0 shipped
+broken.
 
 If `ndarray-stats` fails to compile against `indexmap 1.9.3` (`IndexMap` "takes
 3 generic arguments"), the build-script artifacts in `target/` are corrupt —
