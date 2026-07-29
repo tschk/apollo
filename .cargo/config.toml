@@ -9,5 +9,8 @@
 # machine with a different layout:
 #   export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$(xcrun --show-sdk-path)"
 # (only safe if that path has no spaces).
-[env]
-BINDGEN_EXTRA_CLANG_ARGS = { value = "--sysroot=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk", force = false }
+[target.aarch64-apple-darwin.env]
+BINDGEN_EXTRA_CLANG_ARGS = "--sysroot=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+
+[target.x86_64-apple-darwin.env]
+BINDGEN_EXTRA_CLANG_ARGS = "--sysroot=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
