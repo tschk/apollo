@@ -656,20 +656,30 @@ impl AgentRunner {
 
         // Skill injection with template preprocessing
         {
-            let skills = self.skills.read().await;
-            if let Some(skill) = skills::match_skill(&skills, &effective_text) {
-                if let Some(content) = skills::load_skill_content(skill) {
-                    let preprocessed = skills::preprocess_skill_content(
+            let matched = {
+                let skills = self.skills.read().await;
+                skills::match_skill(&skills, &effective_text)
+                    .map(|skill| (skill.name.clone(), skill.location.clone()))
+            };
+            if let Some((skill_name, location)) = matched {
+                let chat_id = msg.chat_id.clone();
+                let workspace = self.workspace.clone();
+                let preprocessed = tokio::task::spawn_blocking(move || {
+                    let content = std::fs::read_to_string(&location).ok()?;
+                    Some(skills::preprocess_skill_content(
                         &content,
-                        skill.location.parent(),
-                        Some(&msg.chat_id),
-                        Some(&self.workspace),
-                    );
+                        location.parent(),
+                        Some(&chat_id),
+                        Some(&workspace),
+                    ))
+                })
+                .await?;
+                if let Some(preprocessed) = preprocessed {
                     messages.push(ChatMessage::system(format!(
                         "# Active Skill: {}\n{}\n\nFollow the instructions above for this skill.",
-                        skill.name, preprocessed
+                        skill_name, preprocessed
                     )));
-                    tracing::info!("Skill matched: {} (preprocessed)", skill.name);
+                    tracing::info!("Skill matched: {} (preprocessed)", skill_name);
                 }
             }
         }

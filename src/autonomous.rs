@@ -177,10 +177,10 @@ impl AutonomousLoop {
                 || status.state == AutonomousState::Succeeded
                 || status.state == AutonomousState::Failed
             {
-                let workspace_changed = workspace_has_changes(&workspace);
+                let workspace_changed = workspace_has_changes(&workspace).await;
                 if workspace_changed {
                     tracing::info!("[autonomous] workspace has changes, stashing before new task");
-                    git_stash(&workspace);
+                    git_stash(&workspace).await;
                 }
             }
 
@@ -220,7 +220,7 @@ impl AutonomousLoop {
 
                     // Run validation tests
                     if !config.test_command.is_empty() {
-                        match run_test_command(&config.test_command, &workspace) {
+                        match run_test_command(&config.test_command, &workspace).await {
                             Ok(true) => {
                                 tracing::info!("[autonomous] tests passed");
                                 status.consecutive_failures = 0;
@@ -233,7 +233,8 @@ impl AutonomousLoop {
                                         &config.git_remote,
                                         &config.git_branch,
                                         &workspace,
-                                    );
+                                    )
+                                    .await;
                                 }
                             }
                             Ok(false) => {
@@ -280,13 +281,14 @@ impl AutonomousLoop {
 }
 
 /// Run a test command, return true if it passes.
-fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
+async fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
     tracing::info!("[autonomous] running tests: {}", cmd);
-    let output = std::process::Command::new("sh")
+    let output = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
-        .output()?;
+        .output()
+        .await?;
 
     if output.status.success() {
         Ok(true)
@@ -301,11 +303,12 @@ fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
 }
 
 /// Check if workspace has uncommitted changes.
-fn workspace_has_changes(workspace: &Path) -> bool {
-    let output = std::process::Command::new("git")
+async fn workspace_has_changes(workspace: &Path) -> bool {
+    let output = tokio::process::Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(workspace)
-        .output();
+        .output()
+        .await;
 
     match output {
         Ok(out) => !out.stdout.is_empty(),
@@ -314,30 +317,34 @@ fn workspace_has_changes(workspace: &Path) -> bool {
 }
 
 /// Stash workspace changes.
-fn git_stash(workspace: &Path) {
-    let _ = std::process::Command::new("git")
+async fn git_stash(workspace: &Path) {
+    let _ = tokio::process::Command::new("git")
         .args(["stash", "push", "-m", "autonomous: pre-task stash"])
         .current_dir(workspace)
-        .output();
+        .output()
+        .await;
 }
 
 /// Commit all changes and push.
-fn git_commit_and_push(message: &str, remote: &str, branch: &str, cwd: &Path) {
-    let _ = std::process::Command::new("git")
+async fn git_commit_and_push(message: &str, remote: &str, branch: &str, cwd: &Path) {
+    let _ = tokio::process::Command::new("git")
         .args(["add", "-A"])
         .current_dir(cwd)
-        .output();
+        .output()
+        .await;
 
-    let _ = std::process::Command::new("git")
+    let _ = tokio::process::Command::new("git")
         .args(["commit", "-m", message])
         .current_dir(cwd)
-        .output();
+        .output()
+        .await;
 
     tracing::info!("[autonomous] pushing to {}/{}", remote, branch);
-    if let Ok(output) = std::process::Command::new("git")
+    if let Ok(output) = tokio::process::Command::new("git")
         .args(["push", remote, branch])
         .current_dir(cwd)
         .output()
+        .await
     {
         if output.status.success() {
             tracing::info!("[autonomous] push successful");
