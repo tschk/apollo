@@ -70,10 +70,14 @@ impl EmbeddingsClient {
     }
 }
 
-/// Cosine similarity between two vectors
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+/// Cosine similarity between two vectors, or `None` when they are not
+/// comparable.
+///
+/// Vectors of different lengths come from different embedding models and have
+/// no meaningful similarity, so no score is produced for them.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
     if a.len() != b.len() || a.is_empty() {
-        return 0.0;
+        return None;
     }
 
     let dot_product: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
@@ -81,10 +85,10 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let magnitude_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
 
     if magnitude_a == 0.0 || magnitude_b == 0.0 {
-        return 0.0;
+        return Some(0.0);
     }
 
-    dot_product / (magnitude_a * magnitude_b)
+    Some(dot_product / (magnitude_a * magnitude_b))
 }
 
 #[cfg(test)]
@@ -95,11 +99,11 @@ mod tests {
     fn test_cosine_similarity() {
         let a = vec![1.0, 0.0, 0.0];
         let b = vec![1.0, 0.0, 0.0];
-        assert!((cosine_similarity(&a, &b) - 1.0).abs() < 1e-6);
+        assert!((cosine_similarity(&a, &b).unwrap() - 1.0).abs() < 1e-6);
 
         let a = vec![1.0, 0.0];
         let b = vec![0.0, 1.0];
-        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
+        assert!((cosine_similarity(&a, &b).unwrap() - 0.0).abs() < 1e-6);
     }
 
     #[test]
@@ -107,16 +111,16 @@ mod tests {
         // Empty vectors
         let a: Vec<f32> = vec![];
         let b: Vec<f32> = vec![];
-        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
+        assert_eq!(cosine_similarity(&a, &b), None);
 
         // Mismatched lengths
         let a = vec![1.0];
         let b = vec![1.0, 0.0];
-        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
+        assert_eq!(cosine_similarity(&a, &b), None);
 
         // Zero vectors
         let a = vec![0.0, 0.0];
         let b = vec![0.0, 0.0];
-        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
+        assert_eq!(cosine_similarity(&a, &b), Some(0.0));
     }
 }

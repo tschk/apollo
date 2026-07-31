@@ -51,6 +51,10 @@ struct EmbeddingRow {
     vector: Vec<f32>,
     text: String,
     created_at: String,
+    #[serde(default)]
+    dim: Option<i64>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,13 +138,20 @@ const SCHEMA_SQL: &str = r#"
     DEFINE FIELD IF NOT EXISTS vector ON embeddings TYPE array;
     DEFINE FIELD IF NOT EXISTS text ON embeddings TYPE string;
     DEFINE FIELD IF NOT EXISTS created_at ON embeddings TYPE string;
+    DEFINE FIELD IF NOT EXISTS dim ON embeddings TYPE option<int>;
+    DEFINE FIELD IF NOT EXISTS model ON embeddings TYPE option<string>;
     DEFINE INDEX IF NOT EXISTS embedding_lookup_idx ON embeddings FIELDS namespace, key UNIQUE;
     DEFINE INDEX IF NOT EXISTS embedding_namespace_idx ON embeddings FIELDS namespace;
+    DEFINE INDEX IF NOT EXISTS embedding_namespace_dim_idx ON embeddings FIELDS namespace, dim;
     -- TODO: define an MTREE index on `vector` for ANN-accelerated KNN when
     -- the embedding dimension is fixed at deploy time. MTREE requires a
     -- fixed DIMENSION, so it cannot be used while the table stores vectors
     -- from multiple providers (e.g. OpenAI 1536-dim, Gemini 768-dim).
     -- Example: DEFINE INDEX embedding_vector_mtree ON embeddings FIELDS vector MTREE DIMENSION 1536 DISTANCE COSINE;
+    -- Note: rows now carry `dim` and `model`, so a future MTREE index would
+    -- have to be per-dimension (one index per distinct DIMENSION, over a
+    -- separate or dimension-partitioned table). Recording `dim` does not by
+    -- itself make a single MTREE index possible.
 
     DEFINE TABLE IF NOT EXISTS files SCHEMALESS;
     DEFINE FIELD IF NOT EXISTS path ON files TYPE string;
@@ -476,10 +487,13 @@ impl MemoryBackend for SurrealMemory {
         key: &str,
         vector: &[f32],
         text: &str,
+        model: &str,
     ) -> Result<()> {
         let row = EmbeddingRow {
             namespace: namespace.to_string(),
             key: key.to_string(),
+            dim: Some(vector.len() as i64),
+            model: Some(model.to_string()),
             vector: vector.to_vec(),
             text: text.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -500,63 +514,40 @@ impl MemoryBackend for SurrealMemory {
         query_vector: &[f32],
         limit: usize,
     ) -> Result<Vec<EmbeddingEntry>> {
-        // Use SurrealDB's built-in KNN vector search (<| |> operator).
-        // This performs a server-side nearest-neighbour scan and avoids
-        // loading every embedding into the client. When an MTREE index is
-        // defined on the vector field the query planner uses it; otherwise
-        // it falls back to a brute-force scan inside the database engine.
-        //
-        // If the KNN query fails (e.g. dimension mismatch, empty table) we
-        // fall back to the in-process cosine similarity scan below.
-        let knn_result = self
-            .db()
-            .await?
-            .query(
-                "SELECT * FROM embeddings
-                 WHERE namespace = $namespace
-                   AND vector <| $query_vector |>
-                 LIMIT $limit",
-            )
-            .bind(("namespace", namespace.to_string()))
-            .bind(("query_vector", query_vector.to_vec()))
-            .bind(("limit", limit as i64))
-            .await;
-
-        if let Ok(mut result) = knn_result {
-            let rows: std::result::Result<Vec<EmbeddingRow>, _> = result.take(0);
-            if let Ok(rows) = rows {
-                if !rows.is_empty() {
-                    return Ok(rows
-                        .into_iter()
-                        .map(|row| EmbeddingEntry {
-                            namespace: row.namespace,
-                            key: row.key,
-                            vector: row.vector,
-                            text: row.text,
-                            created_at: parse_timestamp(&row.created_at),
-                        })
-                        .collect());
-                }
-            }
+        if query_vector.is_empty() {
+            return Ok(Vec::new());
         }
+        let dim = query_vector.len() as i64;
 
-        // Fallback: load all embeddings for the namespace and do cosine
-        // search in-process. This handles mixed-dimension vectors or any
-        // case where the KNN operator is unavailable.
+        // Brute-force cosine scan over the namespace's embeddings of the
+        // matching dimension.
+        //
+        // SurrealDB's KNN operator is not used here. `vector <|K,COSINE|> $v`
+        // only produces matches when an MTREE index is defined on the field,
+        // and there deliberately is none (see SCHEMA_SQL) — the earlier form
+        // `vector <| $v |>` did not even parse, so the KNN path silently
+        // errored and every search already fell through to this scan.
+        //
+        // The `dim` filter is what keeps the comparison meaningful: vectors
+        // produced by a different embedding model have a different length and
+        // are not comparable, so they must never enter the candidate set.
+        // Rows written before `dim` was recorded have no dimension and are
+        // therefore excluded; they are picked up again on their next write.
         let mut result = self
             .db()
             .await?
-            .query("SELECT * FROM embeddings WHERE namespace = $namespace")
+            .query("SELECT * FROM embeddings WHERE namespace = $namespace AND dim = $dim")
             .bind(("namespace", namespace.to_string()))
+            .bind(("dim", dim))
             .await?;
         let rows: Vec<EmbeddingRow> = result.take(0)?;
 
+        // `cosine_similarity` returns None for mismatched lengths rather than
+        // scoring them, so a stale row that slipped past the `dim` filter is
+        // dropped instead of ranked.
         let mut scored: Vec<(f32, EmbeddingRow)> = rows
             .into_iter()
-            .map(|row| {
-                let sim = cosine_similarity(query_vector, &row.vector);
-                (sim, row)
-            })
+            .filter_map(|row| cosine_similarity(query_vector, &row.vector).map(|sim| (sim, row)))
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
@@ -650,9 +641,14 @@ impl MemoryBackend for SurrealMemory {
     }
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+/// Cosine similarity, or `None` when the two vectors are not comparable.
+///
+/// Vectors of different lengths come from different embedding models and have
+/// no meaningful similarity; returning `None` forces callers to drop the pair
+/// rather than treat a fabricated score as a real one.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
     if a.len() != b.len() || a.is_empty() {
-        return 0.0;
+        return None;
     }
 
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
@@ -660,10 +656,10 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let mb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
 
     if ma == 0.0 || mb == 0.0 {
-        return 0.0;
+        return Some(0.0);
     }
 
-    dot / (ma * mb)
+    Some(dot / (ma * mb))
 }
 
 /// Simple hash for file path → record ID
@@ -774,13 +770,13 @@ mod tests {
         let vec2 = vec![0.0, 1.0, 0.0];
         let vec3 = vec![0.9, 0.1, 0.0];
 
-        mem.store_embedding("ns", "e1", &vec1, "first")
+        mem.store_embedding("ns", "e1", &vec1, "first", "test-model")
             .await
             .unwrap();
-        mem.store_embedding("ns", "e2", &vec2, "second")
+        mem.store_embedding("ns", "e2", &vec2, "second", "test-model")
             .await
             .unwrap();
-        mem.store_embedding("ns", "e3", &vec3, "third")
+        mem.store_embedding("ns", "e3", &vec3, "third", "test-model")
             .await
             .unwrap();
 
@@ -788,6 +784,67 @@ mod tests {
         assert!(!results.is_empty());
         // The closest to [1,0,0] should be e1 or e3
         assert!(results[0].key == "e1" || results[0].key == "e3");
+    }
+
+    #[test]
+    fn test_cosine_similarity_rejects_mismatched_lengths() {
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0, 0.0]), None);
+        assert_eq!(cosine_similarity(&[], &[]), None);
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]), Some(1.0));
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn test_search_embeddings_excludes_other_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+
+        // Simulates a provider switch: 3-dim rows from the old model coexist
+        // with 8-dim rows from the new one.
+        let old_dim = vec![1.0f32, 0.0, 0.0];
+        let new_dim = vec![0.25f32; 8];
+        mem.store_embedding("ns", "old", &old_dim, "old model", "old-model")
+            .await
+            .unwrap();
+        mem.store_embedding("ns", "new", &new_dim, "new model", "new-model")
+            .await
+            .unwrap();
+
+        let results = mem.search_embeddings("ns", &new_dim, 10).await.unwrap();
+        assert!(
+            results.iter().all(|e| e.key != "old"),
+            "a vector of a different dimension must never be returned"
+        );
+        assert!(results.iter().any(|e| e.key == "new"));
+
+        // And symmetrically for the old dimension.
+        let results = mem.search_embeddings("ns", &old_dim, 10).await.unwrap();
+        assert!(results.iter().all(|e| e.key != "new"));
+        assert!(results.iter().any(|e| e.key == "old"));
+    }
+
+    #[tokio::test]
+    async fn test_search_embeddings_skips_rows_without_dimension() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let db = mem.db().await.unwrap();
+
+        // A legacy row written before `dim`/`model` were recorded.
+        db.query(
+            "CREATE embeddings:legacy SET namespace = 'ns', key = 'legacy',
+             vector = [1.0, 0.0, 0.0], text = 'legacy', created_at = '2024-01-01T00:00:00Z'",
+        )
+        .await
+        .unwrap();
+
+        let results = mem
+            .search_embeddings("ns", &[1.0, 0.0, 0.0], 10)
+            .await
+            .unwrap();
+        assert!(
+            results.is_empty(),
+            "rows with no recorded dimension must not be returned"
+        );
     }
 
     #[tokio::test]

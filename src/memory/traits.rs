@@ -133,18 +133,27 @@ pub trait MemoryBackend: Send + Sync {
     // ── Embeddings ──
 
     /// Store a vector embedding for a memory key
+    ///
+    /// `model` identifies the embedding model that produced `vector`. It is
+    /// persisted alongside the vector's dimension so that later searches can
+    /// exclude rows that are not comparable with the current query vector.
     async fn store_embedding(
         &self,
         namespace: &str,
         key: &str,
         vector: &[f32],
         text: &str,
+        model: &str,
     ) -> anyhow::Result<()> {
-        let _ = (namespace, key, vector, text);
+        let _ = (namespace, key, vector, text, model);
         Ok(())
     }
 
     /// Search embeddings by cosine similarity (returns nearest matches)
+    ///
+    /// Only rows whose recorded dimension matches `query_vector.len()` are
+    /// considered; vectors of a different dimension are not comparable and are
+    /// never returned.
     async fn search_embeddings(
         &self,
         namespace: &str,

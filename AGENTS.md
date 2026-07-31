@@ -137,11 +137,22 @@ embedded storage engine, selected by the `kv-rocksdb` feature on the
   `librocksdb-sys` that SurrealDB already pulls in, so it costs no extra
   compilation and should not be "consolidated away".
 
-Vector search uses SurrealDB's native KNN `<| |>` operator with an in-process
-cosine scan as fallback. There is deliberately **no MTREE index**: MTREE
-requires a fixed `DIMENSION`, and the `embeddings` table holds vectors from
-providers with different dimensions. Vector search is therefore a brute-force
-scan — fine at current scale, and the constraint to solve before it is not.
+Vector search is an in-process brute-force cosine scan. There is deliberately
+**no MTREE index**: MTREE requires a fixed `DIMENSION`, and the `embeddings`
+table holds vectors from providers with different dimensions. That is fine at
+current scale, and not the constraint to solve first.
+
+SurrealDB's native KNN operator is *not* used, despite what earlier notes said.
+The query was written `vector <| $v |>`, which does not parse (K must be a
+literal integer), so it errored on every call and the code silently fell
+through to the scan. The correct form `vector <|K,COSINE|> $v` parses but
+returns nothing without an MTREE index, so the KNN path was removed rather
+than left as a dead round-trip.
+
+Every embedding row records the `dim` and `model` that produced it, and
+searches filter on `dim`. Vectors of a different dimension are not comparable,
+and before this filter existed they were scored `0.0` and still returned as
+"similar" results. Rows predating the field have no `dim` and are excluded.
 
 ### Telegram (telegram.rs)
 - Markdown sanitizer: single-pass state machine (not asterisk counting)

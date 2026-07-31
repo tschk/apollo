@@ -92,7 +92,13 @@ impl Tool for EmbeddingStoreTool {
         let args: EmbeddingStoreArgs = serde_json::from_str(arguments)?;
         let vector = self.provider.embed_one(&args.text).await?;
         self.memory
-            .store_embedding(&args.namespace, &args.key, &vector, &args.text)
+            .store_embedding(
+                &args.namespace,
+                &args.key,
+                &vector,
+                &args.text,
+                self.provider.name(),
+            )
             .await?;
         Ok(ToolResult::success(format!(
             "Stored embedding for {}/{} with {} dimensions",
