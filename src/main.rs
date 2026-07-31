@@ -759,105 +759,117 @@ async fn main() -> anyhow::Result<()> {
 
             let _self_update_handle = self_updater.start();
 
-            match channel.as_str() {
-                #[cfg(feature = "channel-cli")]
-                "cli" => {
-                    println!(
-                        "apollo v{} — {} via {}",
-                        env!("CARGO_PKG_VERSION"),
-                        cfg.model,
-                        cfg.provider.name
-                    );
-                    println!("   Workspace: {}", workspace.display());
-                    println!("   Channel: CLI");
-                    println!("   Type /quit to exit");
-                    println!(
-                        "   Agent HTTP: http://{}/v1/chat (APOLLO_HTTP_PORT)",
-                        apollo::agent_http::http_listen_addr()
-                    );
-                    println!();
+            // Every channel arm parks forever; `/shutdown` unwinds this scope
+            // so the state layer's destructors run.
+            let serve_channels = async {
+                match channel.as_str() {
+                    #[cfg(feature = "channel-cli")]
+                    "cli" => {
+                        println!(
+                            "apollo v{} — {} via {}",
+                            env!("CARGO_PKG_VERSION"),
+                            cfg.model,
+                            cfg.provider.name
+                        );
+                        println!("   Workspace: {}", workspace.display());
+                        println!("   Channel: CLI");
+                        println!("   Type /quit to exit");
+                        println!(
+                            "   Agent HTTP: http://{}/v1/chat (APOLLO_HTTP_PORT)",
+                            apollo::agent_http::http_listen_addr()
+                        );
+                        println!();
 
-                    // Start heartbeat background task
-                    let heartbeat_cfg = HeartbeatConfig {
-                        workspace: workspace.clone(),
-                        deliver_chat_id: cfg.memory.heartbeat_chat_id.clone(),
-                        ..Default::default()
-                    };
-                    let (hb_tx, hb_rx) = tokio::sync::mpsc::channel(16);
-                    let _heartbeat_handle = heartbeat::start_heartbeat(heartbeat_cfg, hb_tx);
+                        // Start heartbeat background task
+                        let heartbeat_cfg = HeartbeatConfig {
+                            workspace: workspace.clone(),
+                            deliver_chat_id: cfg.memory.heartbeat_chat_id.clone(),
+                            ..Default::default()
+                        };
+                        let (hb_tx, hb_rx) = tokio::sync::mpsc::channel(16);
+                        let _heartbeat_handle = heartbeat::start_heartbeat(heartbeat_cfg, hb_tx);
 
-                    let mut ch = CliChannel::new();
-                    if let Some((cron_rx, cron_shutdown, cron_sched)) = cron_runtime.take() {
-                        runner_arc
-                            .run_with_runtime_rx(&mut ch, hb_rx, cron_rx, cron_sched)
-                            .await?;
-                        cron_shutdown.notify_waiters();
-                    } else {
-                        runner_arc.run_with_extra_rx(&mut ch, hb_rx).await?;
+                        let mut ch = CliChannel::new();
+                        if let Some((cron_rx, cron_shutdown, cron_sched)) = cron_runtime.take() {
+                            runner_arc
+                                .run_with_runtime_rx(&mut ch, hb_rx, cron_rx, cron_sched)
+                                .await?;
+                            cron_shutdown.notify_waiters();
+                        } else {
+                            runner_arc.run_with_extra_rx(&mut ch, hb_rx).await?;
+                        }
+                    }
+                    #[cfg(feature = "channel-telegram")]
+                    "telegram" => {
+                        let token = telegram_token
+                            .ok_or_else(|| anyhow::anyhow!("--telegram-token required"))?;
+                        let chat_id = telegram_chat_id
+                            .ok_or_else(|| anyhow::anyhow!("--telegram-chat-id required"))?;
+                        run_telegram_chat(TelegramChatRun {
+                            runner: runner_arc,
+                            memory,
+                            token,
+                            chat_id,
+                            model: cfg.model.clone(),
+                            skills_count: discovered_skills.len(),
+                            workspace: workspace.clone(),
+                            channel_cfg: &cfg.channel,
+                            cron_runtime: cron_runtime.take(),
+                        })
+                        .await?;
+                    }
+                    #[cfg(feature = "channel-discord")]
+                    "discord" => {
+                        let token = _discord_token
+                            .ok_or_else(|| anyhow::anyhow!("--discord-token required"))?;
+                        let channel_id = _discord_channel_id
+                            .ok_or_else(|| anyhow::anyhow!("--discord-channel-id required"))?;
+
+                        println!("apollo — {} via Discord", cfg.model);
+                        println!("   Channel ID: {}", channel_id);
+                        println!("   Listening for messages...");
+
+                        let mut ch = DiscordChannel::new(token, channel_id);
+                        if let Some((cron_rx, cron_shutdown, cron_sched)) = cron_runtime.take() {
+                            let (_extra_tx, extra_rx) = tokio::sync::mpsc::channel(1);
+                            runner_arc
+                                .run_with_runtime_rx(&mut ch, extra_rx, cron_rx, cron_sched)
+                                .await?;
+                            cron_shutdown.notify_waiters();
+                        } else {
+                            runner_arc.run(&mut ch).await?;
+                        }
+                    }
+                    "none" => {
+                        println!(
+                            "apollo v{} — {} via {}",
+                            env!("CARGO_PKG_VERSION"),
+                            cfg.model,
+                            cfg.provider.name
+                        );
+                        println!("   Workspace: {}", workspace.display());
+                        println!(
+                            "   Agent HTTP: http://{}/v1/chat (APOLLO_HTTP_PORT)",
+                            apollo::agent_http::http_listen_addr()
+                        );
+                        // ponytail: headless park. No cron/heartbeat here — wire them
+                        // in if `apollo serve` ever needs to outlive an attached client.
+                        std::future::pending::<()>().await;
+                    }
+                    other => {
+                        anyhow::bail!(
+                            "Unknown channel: {} (supported: cli, telegram, discord, none)",
+                            other
+                        );
                     }
                 }
-                #[cfg(feature = "channel-telegram")]
-                "telegram" => {
-                    let token = telegram_token
-                        .ok_or_else(|| anyhow::anyhow!("--telegram-token required"))?;
-                    let chat_id = telegram_chat_id
-                        .ok_or_else(|| anyhow::anyhow!("--telegram-chat-id required"))?;
-                    run_telegram_chat(TelegramChatRun {
-                        runner: runner_arc,
-                        memory,
-                        token,
-                        chat_id,
-                        model: cfg.model.clone(),
-                        skills_count: discovered_skills.len(),
-                        workspace: workspace.clone(),
-                        channel_cfg: &cfg.channel,
-                        cron_runtime: cron_runtime.take(),
-                    })
-                    .await?;
-                }
-                #[cfg(feature = "channel-discord")]
-                "discord" => {
-                    let token = _discord_token
-                        .ok_or_else(|| anyhow::anyhow!("--discord-token required"))?;
-                    let channel_id = _discord_channel_id
-                        .ok_or_else(|| anyhow::anyhow!("--discord-channel-id required"))?;
+                Ok::<(), anyhow::Error>(())
+            };
 
-                    println!("apollo — {} via Discord", cfg.model);
-                    println!("   Channel ID: {}", channel_id);
-                    println!("   Listening for messages...");
-
-                    let mut ch = DiscordChannel::new(token, channel_id);
-                    if let Some((cron_rx, cron_shutdown, cron_sched)) = cron_runtime.take() {
-                        let (_extra_tx, extra_rx) = tokio::sync::mpsc::channel(1);
-                        runner_arc
-                            .run_with_runtime_rx(&mut ch, extra_rx, cron_rx, cron_sched)
-                            .await?;
-                        cron_shutdown.notify_waiters();
-                    } else {
-                        runner_arc.run(&mut ch).await?;
-                    }
-                }
-                "none" => {
-                    println!(
-                        "apollo v{} — {} via {}",
-                        env!("CARGO_PKG_VERSION"),
-                        cfg.model,
-                        cfg.provider.name
-                    );
-                    println!("   Workspace: {}", workspace.display());
-                    println!(
-                        "   Agent HTTP: http://{}/v1/chat (APOLLO_HTTP_PORT)",
-                        apollo::agent_http::http_listen_addr()
-                    );
-                    // ponytail: headless park. No cron/heartbeat here — wire them
-                    // in if `apollo serve` ever needs to outlive an attached client.
-                    std::future::pending::<()>().await;
-                }
-                other => {
-                    anyhow::bail!(
-                        "Unknown channel: {} (supported: cli, telegram, discord, none)",
-                        other
-                    );
+            tokio::select! {
+                result = serve_channels => result?,
+                _ = apollo::agent_http::wait_for_shutdown() => {
+                    println!("shutting down");
                 }
             }
         }
@@ -1602,22 +1614,51 @@ async fn start_background_server(
     if let Some(workspace) = workspace {
         cmd.arg("--workspace").arg(workspace);
     }
+    // Keep the server's own diagnostics: a bad config is the usual failure and
+    // discarding stderr leaves nothing to report.
+    let log_path = std::env::temp_dir().join("apollo-serve.log");
+    let log = std::fs::File::create(&log_path)?;
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let child = cmd.spawn()?;
-    // Drop the handle without killing it, so the process is reparented and
-    // survives this one.
-    std::mem::forget(child);
+        .stderr(std::process::Stdio::from(log));
+    let mut child = cmd.spawn()?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !server_healthy().await {
-        if std::time::Instant::now() > deadline {
-            anyhow::bail!("background apollo serve did not become healthy in 30s");
+    let health = async {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if server_healthy().await {
+                return Ok(());
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(anyhow::anyhow!(
+                    "background apollo serve did not become healthy in 30s (see {})",
+                    log_path.display()
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    Ok(())
+    };
+
+    let result = tokio::select! {
+        result = health => result,
+        status = child.wait() => {
+            let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let tail = detail.lines().rev().take(10).collect::<Vec<_>>();
+            Err(anyhow::anyhow!(
+                "background apollo serve exited ({}) before becoming healthy:\n{}",
+                status
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|e| format!("wait failed: {e}")),
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            ))
+        }
+    };
+
+    // `kill_on_drop` is off, so dropping the handle leaves the server running;
+    // tokio's Drop also queues the child for reaping, which `mem::forget`
+    // would skip and leave a zombie behind.
+    drop(child);
+    result
 }
 
 /// Register (or remove) a login item that runs `apollo serve` at startup.

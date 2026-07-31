@@ -296,10 +296,40 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) {
             "apollo agent HTTP http://{}/v1/chat · WS /v1/chat/stream",
             addr
         );
-        if let Err(e) = axum::serve(listener, app).await {
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(wait_for_shutdown())
+            .await
+        {
             tracing::error!("apollo http server: {}", e);
         }
     });
+}
+
+/// Signalled by `/shutdown`. The process unwinds from `main` so destructors
+/// run — RocksDB in particular needs its handle dropped to flush the WAL and
+/// close cleanly.
+static SHUTDOWN: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Resolves once a shutdown has been requested over HTTP.
+pub async fn wait_for_shutdown() {
+    loop {
+        // Register before re-reading the flag, so a signal raised between the
+        // check and the await cannot be missed.
+        let notified = SHUTDOWN.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+/// Request shutdown (also used by tests).
+pub fn request_shutdown() {
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    SHUTDOWN.notify_waiters();
 }
 
 /// Stop a detached server started by `apollo tui`.
@@ -309,11 +339,9 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) {
 async fn shutdown_handler(headers: axum::http::HeaderMap) -> Result<&'static str, StatusCode> {
     authorize(&headers)?;
     tracing::info!("shutdown requested over HTTP");
-    tokio::spawn(async {
-        // Let the response flush before the process goes away.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        std::process::exit(0);
-    });
+    // Graceful: axum finishes in-flight requests (including this response),
+    // then `main` unwinds so RocksDB and friends are dropped properly.
+    request_shutdown();
     Ok("stopping")
 }
 
