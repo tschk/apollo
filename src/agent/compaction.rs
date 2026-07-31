@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::providers::ChatMessage;
-use crate::text::truncate_chars;
+use crate::text::truncate_chars_counted;
 
 // ── Config ────────────────────────────────────────────────────────────────
 
@@ -100,10 +100,9 @@ impl Compactor for DefaultCompactor {
                 "tool_result" => "Tool Result",
                 _ => &m.role,
             };
-            let content = if m.content.len() > 500 {
-                format!("{}...", truncate_chars(&m.content, 500))
-            } else {
-                m.content.clone()
+            let content = match truncate_chars_counted(&m.content, 500) {
+                Some((head, _)) => format!("{head}..."),
+                None => m.content.clone(),
             };
             summary_input.push_str(&format!("[{}]: {}\n", role_label, content));
         }

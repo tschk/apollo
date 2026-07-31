@@ -23,7 +23,7 @@ use crate::memory::MemoryBackend;
 use crate::plugin::{HookManager, LifecycleEvent, PluginRegistry};
 use crate::providers::{ChatMessage, ChatRequest, Provider};
 use crate::skills;
-use crate::text::truncate_chars;
+use crate::text::{truncate_chars, truncate_chars_counted};
 use crate::tools::guardrails::{GuardrailDecision, ToolGuardrails};
 use crate::tools::Tool;
 use crate::trajectory::Trajectory;
@@ -1342,15 +1342,11 @@ impl AgentRunner {
                 }
 
                 let limit = self.agent_config.max_tool_result_chars;
-                let truncated_output = if result.output.len() > limit {
-                    format!(
-                        "{}...\n⚠️ [Truncated {} → {} chars]",
-                        truncate_chars(&result.output, limit),
-                        result.output.len(),
-                        limit
-                    )
-                } else {
-                    result.output.clone()
+                let truncated_output = match truncate_chars_counted(&result.output, limit) {
+                    Some((head, dropped)) => {
+                        format!("{head}...\n⚠️ [Truncated: {dropped} chars dropped, {limit} kept]")
+                    }
+                    None => result.output.clone(),
                 };
 
                 messages.push(ChatMessage::tool_result(&tc.id, &truncated_output));
@@ -1860,7 +1856,7 @@ fn extract_tool_hint(name: &str, arguments: &str) -> String {
     };
     hint.map(|s| {
         let s = s.trim();
-        if s.len() > 60 {
+        if s.chars().count() > 60 {
             format!("{}…", truncate_chars(s, 57))
         } else {
             s.to_string()

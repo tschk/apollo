@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use super::network::validate_public_http_url;
 use super::traits::*;
-use crate::text::truncate_chars;
+use crate::text::truncate_chars_counted;
 
 pub struct WebFetchTool {
     client: reqwest::Client,
@@ -100,14 +100,11 @@ impl Tool for WebFetchTool {
         // Simple HTML stripping (remove tags, decode entities)
         let cleaned = strip_html(&text);
 
-        let truncated = if cleaned.len() > args.max_chars {
-            format!(
-                "{}...\n[truncated at {} chars]",
-                truncate_chars(&cleaned, args.max_chars),
-                args.max_chars
-            )
-        } else {
-            cleaned
+        let truncated = match truncate_chars_counted(&cleaned, args.max_chars) {
+            Some((head, dropped)) => {
+                format!("{head}...\n[truncated: {dropped} chars dropped]")
+            }
+            None => cleaned,
         };
 
         Ok(ToolResult::success(truncated))
