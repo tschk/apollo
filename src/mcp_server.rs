@@ -111,7 +111,7 @@ impl TelegramHttpChannel {
     fn new(token: String) -> Self {
         Self {
             token,
-            client: reqwest::Client::new(),
+            client: crate::http::shared(),
             last_edit: std::sync::Mutex::new(None),
         }
     }

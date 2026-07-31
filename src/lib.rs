@@ -26,6 +26,7 @@ pub mod cron_scheduler;
 pub mod diagnostics;
 pub mod embeddings;
 pub mod heartbeat;
+pub mod http;
 pub mod mcp;
 pub mod mcp_server;
 pub mod memory;

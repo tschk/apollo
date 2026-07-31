@@ -264,9 +264,7 @@ impl Provider for AnthropicProvider {
 
     async fn chat(&self, request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
         // Create client with 120s socket timeout (LLM calls can be slow)
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
+        let client = crate::http::long();
 
         // Split system message from conversation (combine multiple system msgs)
         // Use prompt caching for system prompts (cache_control breakpoint)

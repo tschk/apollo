@@ -53,7 +53,7 @@ impl GeminiEmbedding {
     pub fn new(api_key: String, model: Option<String>) -> Self {
         let model = model.unwrap_or_else(|| "text-embedding-004".to_string());
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared(),
             api_key,
             model,
             dimensions: 768,
@@ -73,7 +73,7 @@ impl OpenAiEmbedding {
         };
 
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared(),
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
             model,

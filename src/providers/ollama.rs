@@ -69,7 +69,7 @@ impl Provider for OllamaProvider {
     }
 
     async fn chat(&self, request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
-        let client = reqwest::Client::new();
+        let client = crate::http::shared();
         let body = self.build_request_body(request);
 
         let resp = send_with_retry(

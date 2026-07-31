@@ -52,9 +52,7 @@ impl CopilotProvider {
     }
 
     async fn fetch_new_token(&self) -> anyhow::Result<String> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
+        let client = crate::http::standard();
 
         let resp = client
             .get(COPILOT_TOKEN_URL)
@@ -126,9 +124,7 @@ impl Provider for CopilotProvider {
         let token = self.ensure_token().await?;
         let base_url = self.base_url.read().await.clone();
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
+        let client = crate::http::long();
 
         let messages: Vec<Value> = request
             .messages

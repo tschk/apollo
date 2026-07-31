@@ -44,7 +44,7 @@ impl Channel for SlackChannel {
 
         // Poll Slack conversations.history for new messages
         tokio::spawn(async move {
-            let client = reqwest::Client::new();
+            let client = crate::http::shared();
             let mut last_ts = String::new();
 
             loop {
@@ -104,7 +104,7 @@ impl Channel for SlackChannel {
     }
 
     async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
-        let client = reqwest::Client::new();
+        let client = crate::http::shared();
 
         let mut body = serde_json::json!({
             "channel": &message.chat_id,

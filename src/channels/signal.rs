@@ -37,7 +37,7 @@ impl Channel for SignalChannel {
         let phone = self.phone_number.clone();
 
         tokio::spawn(async move {
-            let client = reqwest::Client::new();
+            let client = crate::http::shared();
 
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -84,7 +84,7 @@ impl Channel for SignalChannel {
     }
 
     async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
-        let client = reqwest::Client::new();
+        let client = crate::http::shared();
 
         let body = serde_json::json!({
             "message": &message.text,

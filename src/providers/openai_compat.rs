@@ -161,7 +161,7 @@ impl Provider for OpenAiCompatProvider {
     }
 
     async fn chat(&self, request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
-        let client = reqwest::Client::new();
+        let client = crate::http::shared();
 
         let messages: Vec<Value> = request
             .messages

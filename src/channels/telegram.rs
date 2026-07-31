@@ -125,7 +125,7 @@ impl TelegramChannel {
         Self {
             bot_token,
             chat_id,
-            client: reqwest::Client::new(),
+            client: crate::http::shared(),
             memory: None,
             ingress: TelegramIngressFilter::default(),
         }

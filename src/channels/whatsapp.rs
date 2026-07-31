@@ -142,7 +142,7 @@ impl Channel for WhatsAppChannel {
     }
 
     async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
-        let client = reqwest::Client::new();
+        let client = crate::http::shared();
         let formatted = format_outgoing_text(FormatTarget::WhatsApp, &message.text);
 
         let body = serde_json::json!({

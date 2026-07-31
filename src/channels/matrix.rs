@@ -39,7 +39,7 @@ impl Channel for MatrixChannel {
         let token = self.access_token.clone();
 
         tokio::spawn(async move {
-            let client = reqwest::Client::new();
+            let client = crate::http::shared();
             let mut since = String::new();
 
             loop {
@@ -105,7 +105,7 @@ impl Channel for MatrixChannel {
     }
 
     async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
-        let client = reqwest::Client::new();
+        let client = crate::http::shared();
         let txn_id = uuid::Uuid::new_v4().to_string();
 
         let body = serde_json::json!({

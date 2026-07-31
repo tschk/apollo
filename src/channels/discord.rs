@@ -28,7 +28,7 @@ impl DiscordChannel {
             "https://discordapp.com/api/channels/{}/messages",
             channel_id
         );
-        let _resp = reqwest::Client::new()
+        let _resp = crate::http::shared()
             .post(&url)
             .header("Authorization", format!("Bot {}", self.bot_token))
             .json(&serde_json::json!({

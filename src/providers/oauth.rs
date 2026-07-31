@@ -109,9 +109,7 @@ impl OAuthTokenCache {
     }
 
     async fn fetch_new_token(refresh_token: &str) -> anyhow::Result<RefreshResponse> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
+        let client = crate::http::standard();
 
         let response = client
             .post(CLAUDE_TOKEN_URL)

@@ -132,7 +132,7 @@ impl Tool for ListModelsTool {
         }
 
         let is_oauth = api_key.contains("sk-ant-oat");
-        let client = reqwest::Client::new();
+        let client = crate::http::shared();
 
         let mut req = client
             .get("https://api.anthropic.com/v1/models")

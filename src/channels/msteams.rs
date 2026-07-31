@@ -76,7 +76,7 @@ impl Channel for TeamsChannel {
     }
 
     async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
-        let client = reqwest::Client::new();
+        let client = crate::http::shared();
 
         // Get Bot Framework token
         let token_resp = client

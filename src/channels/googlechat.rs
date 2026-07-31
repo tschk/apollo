@@ -80,7 +80,7 @@ impl Channel for GoogleChatChannel {
     }
 
     async fn send(&self, message: OutgoingMessage) -> anyhow::Result<Option<String>> {
-        let client = reqwest::Client::new();
+        let client = crate::http::shared();
 
         let body = serde_json::json!({
             "text": &message.text,

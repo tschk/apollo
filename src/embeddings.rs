@@ -30,7 +30,7 @@ impl EmbeddingsClient {
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
-            client: reqwest::Client::new(),
+            client: crate::http::shared(),
         }
     }
 

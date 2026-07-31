@@ -93,9 +93,7 @@ impl WebSearchTool {
     }
 
     fn client() -> anyhow::Result<reqwest::Client> {
-        Ok(reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?)
+        Ok(crate::http::standard())
     }
 
     async fn search_searxng(base_url: &str, query: &str) -> anyhow::Result<String> {
