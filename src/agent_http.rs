@@ -78,8 +78,106 @@ fn reject_browser_origin(headers: &axum::http::HeaderMap) -> Result<(), StatusCo
     Ok(())
 }
 
+static HTTP_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Where the shared bearer token lives.
+///
+/// Per-user rather than per-workspace, because the listen port is per-user
+/// too: one running agent serves whatever workspace it was started in, and a
+/// client has no way to know which that was.
+pub fn token_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+    Some(std::path::PathBuf::from(home).join(".apollo/http-token"))
+}
+
+/// Load the bearer token, generating and persisting one on first run.
+///
+/// `APOLLO_HTTP_TOKEN` wins when set, so a supervisor can inject the same
+/// value into the server and its clients without touching disk.
+pub fn load_or_create_token() -> anyhow::Result<String> {
+    if let Ok(token) = std::env::var("APOLLO_HTTP_TOKEN") {
+        if !token.trim().is_empty() {
+            return Ok(token.trim().to_string());
+        }
+    }
+
+    let path = token_path().ok_or_else(|| anyhow::anyhow!("cannot locate HOME for token file"))?;
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if !existing.trim().is_empty() {
+            return Ok(existing.trim().to_string());
+        }
+    }
+
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, &token)?;
+    // Readable only by the owner — anyone who can read it can drive the agent.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    tracing::info!("wrote a new apollo HTTP token to {}", path.display());
+    Ok(token)
+}
+
+/// Compare in constant time, so a caller cannot learn the token byte by byte
+/// from how long a rejection takes.
+fn secret_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn check_auth(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
+    let Some(expected) = HTTP_TOKEN.get() else {
+        // No token was established, so the server cannot authenticate anyone.
+        // Refuse rather than serving the agent openly.
+        tracing::error!("apollo HTTP has no token configured; refusing request");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    verify_token(expected, headers)
+}
+
+fn verify_token(expected: &str, headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+
+    if secret_eq(presented.trim(), expected) {
+        Ok(())
+    } else {
+        tracing::warn!("rejected apollo HTTP request with a missing or invalid token");
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// Both gates every agent-driving route must pass.
+fn authorize(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
+    reject_browser_origin(headers)?;
+    check_auth(headers)
+}
+
 pub fn spawn_http_server(runner: Arc<AgentRunner>) {
     let addr = http_listen_addr();
+    match load_or_create_token() {
+        Ok(token) => {
+            let _ = HTTP_TOKEN.set(token);
+        }
+        Err(e) => {
+            tracing::error!("apollo http token: {e}; /v1/chat will refuse all requests");
+        }
+    }
     tokio::spawn(async move {
         let app = Router::new()
             .route("/health", get(|| async { "ok" }))
@@ -108,7 +206,7 @@ async fn chat_handler(
     headers: axum::http::HeaderMap,
     Json(body): Json<ChatRequestBody>,
 ) -> Result<Json<ChatResponseBody>, StatusCode> {
-    reject_browser_origin(&headers)?;
+    authorize(&headers)?;
     if body.message.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -126,8 +224,8 @@ async fn ws_chat_upgrade(
     State(runner): State<Arc<AgentRunner>>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if reject_browser_origin(&headers).is_err() {
-        return StatusCode::FORBIDDEN.into_response();
+    if let Err(status) = authorize(&headers) {
+        return status.into_response();
     }
     ws.on_upgrade(move |socket| handle_ws_chat(socket, runner))
 }
@@ -207,5 +305,60 @@ async fn handle_ws_chat(mut socket: WebSocket, runner: Arc<AgentRunner>) {
         if let Ok(json) = serde_json::to_string(&ev) {
             let _ = socket.send(Message::Text(json)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    fn headers(pairs: &[(header::HeaderName, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(name.clone(), HeaderValue::from_str(value).unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn secret_eq_matches_only_identical_secrets() {
+        assert!(secret_eq("abc", "abc"));
+        assert!(!secret_eq("abc", "abd"));
+        assert!(!secret_eq("abc", "ab"));
+        assert!(!secret_eq("", "abc"));
+        assert!(secret_eq("", ""));
+    }
+
+    #[test]
+    fn a_correct_bearer_token_is_accepted() {
+        let h = headers(&[(header::AUTHORIZATION, "Bearer s3cret")]);
+        assert!(verify_token("s3cret", &h).is_ok());
+    }
+
+    #[test]
+    fn a_wrong_missing_or_malformed_token_is_rejected() {
+        for h in [
+            headers(&[(header::AUTHORIZATION, "Bearer wrong")]),
+            headers(&[(header::AUTHORIZATION, "s3cret")]),
+            headers(&[(header::AUTHORIZATION, "Basic s3cret")]),
+            headers(&[]),
+        ] {
+            assert_eq!(verify_token("s3cret", &h), Err(StatusCode::UNAUTHORIZED));
+        }
+    }
+
+    #[test]
+    fn an_origin_header_is_refused_even_with_a_valid_token() {
+        let h = headers(&[
+            (header::AUTHORIZATION, "Bearer s3cret"),
+            (header::ORIGIN, "https://evil.example"),
+        ]);
+        assert_eq!(reject_browser_origin(&h), Err(StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn requests_without_an_origin_pass_the_browser_check() {
+        assert!(reject_browser_origin(&headers(&[])).is_ok());
     }
 }

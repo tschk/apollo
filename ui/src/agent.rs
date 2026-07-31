@@ -6,6 +6,8 @@
 
 use std::sync::mpsc::Sender;
 
+use tungstenite::client::IntoClientRequest;
+
 /// One update from the agent while a turn is in flight.
 ///
 /// Mirrors `apollo::agent::stream::AgentStreamEvent`, kept as a separate type
@@ -22,6 +24,24 @@ pub enum AgentEvent {
 
 pub fn http_port() -> String {
     std::env::var("APOLLO_HTTP_PORT").unwrap_or_else(|_| "31338".into())
+}
+
+/// Bearer token shared with the agent server.
+///
+/// The server writes this to `~/.apollo/http-token` on first run. Without it
+/// the agent API answers 401, so a client that cannot read the file cannot
+/// drive the agent — which is the point.
+fn auth_token() -> Option<String> {
+    if let Ok(token) = std::env::var("APOLLO_HTTP_TOKEN") {
+        if !token.trim().is_empty() {
+            return Some(token.trim().to_string());
+        }
+    }
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+    let path = std::path::PathBuf::from(home).join(".apollo/http-token");
+    let token = std::fs::read_to_string(path).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 /// True when an apollo agent is listening locally.
@@ -70,7 +90,16 @@ pub fn run_turn(prompt: &str, chat_id: &str, tx: &Sender<AgentEvent>) {
 /// terminal event has been forwarded this returns `Ok`.
 fn stream_over_ws(prompt: &str, chat_id: &str, tx: &Sender<AgentEvent>) -> Result<(), String> {
     let url = format!("ws://127.0.0.1:{}/v1/chat/stream", http_port());
-    let (mut socket, _) = tungstenite::connect(&url).map_err(|e| e.to_string())?;
+    let mut handshake = url.into_client_request().map_err(|e| e.to_string())?;
+    if let Some(token) = auth_token() {
+        handshake.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {token}")
+                .parse()
+                .map_err(|_| "invalid token".to_string())?,
+        );
+    }
+    let (mut socket, _) = tungstenite::connect(handshake).map_err(|e| e.to_string())?;
 
     let request = serde_json::json!({ "message": prompt, "chat_id": chat_id }).to_string();
     socket
@@ -129,11 +158,13 @@ fn ask_via_http(prompt: &str, chat_id: &str) -> Result<String, String> {
         .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = client
+    let mut request = client
         .post(&url)
-        .json(&serde_json::json!({ "message": prompt, "chat_id": chat_id }))
-        .send()
-        .map_err(|e| e.to_string())?;
+        .json(&serde_json::json!({ "message": prompt, "chat_id": chat_id }));
+    if let Some(token) = auth_token() {
+        request = request.bearer_auth(token);
+    }
+    let resp = request.send().map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
     }
