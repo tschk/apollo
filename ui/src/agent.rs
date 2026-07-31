@@ -62,9 +62,10 @@ pub fn agent_online() -> bool {
 pub fn run_turn(prompt: &str, chat_id: &str, tx: &Sender<AgentEvent>) {
     match stream_over_ws(prompt, chat_id, tx) {
         Ok(()) => {}
-        Err(failure) if failure.forwarded => {
-            // The turn already ran and its output reached the UI. Retrying it
-            // would re-run mutating tools, so report the break instead.
+        Err(failure) if failure.turn_started => {
+            // The server already has the prompt and runs the turn to
+            // completion whether or not the client is still listening.
+            // Retrying it would re-run mutating tools, so report the break.
             let _ = tx.send(AgentEvent::Error(format!(
                 "stream interrupted mid-turn: {}",
                 failure.reason
@@ -98,19 +99,21 @@ pub fn run_turn(prompt: &str, chat_id: &str, tx: &Sender<AgentEvent>) {
 /// ended without a terminal event, so the caller can fall back. Once a
 /// terminal event has been forwarded this returns `Ok`.
 ///
-/// `forwarded` records whether any event already reached the UI. Re-running
-/// the prompt after that would re-execute mutating tools, so it is only safe
-/// to fall back when nothing was forwarded.
+/// `turn_started` records whether the prompt was handed to the server. What
+/// must not repeat is the turn starting server-side, not the UI seeing output:
+/// the server spawns the chat task and runs it to completion even if the
+/// socket dies before the first frame. So falling back is only safe while the
+/// request has not been sent.
 struct StreamFailure {
     reason: String,
-    forwarded: bool,
+    turn_started: bool,
 }
 
 impl StreamFailure {
-    fn before_any_output(reason: impl Into<String>) -> Self {
+    fn before_the_turn_started(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
-            forwarded: false,
+            turn_started: false,
         }
     }
 }
@@ -123,31 +126,33 @@ fn stream_over_ws(
     let url = format!("ws://127.0.0.1:{}/v1/chat/stream", http_port());
     let mut handshake = url
         .into_client_request()
-        .map_err(|e| StreamFailure::before_any_output(e.to_string()))?;
+        .map_err(|e| StreamFailure::before_the_turn_started(e.to_string()))?;
     if let Some(token) = auth_token() {
         handshake.headers_mut().insert(
             "Authorization",
             format!("Bearer {token}")
                 .parse()
-                .map_err(|_| StreamFailure::before_any_output("invalid token"))?,
+                .map_err(|_| StreamFailure::before_the_turn_started("invalid token"))?,
         );
     }
     let (mut socket, _) = tungstenite::connect(handshake)
-        .map_err(|e| StreamFailure::before_any_output(e.to_string()))?;
+        .map_err(|e| StreamFailure::before_the_turn_started(e.to_string()))?;
 
     let request = serde_json::json!({ "message": prompt, "chat_id": chat_id }).to_string();
     socket
         .send(tungstenite::Message::Text(request))
-        .map_err(|e| StreamFailure::before_any_output(e.to_string()))?;
+        .map_err(|e| StreamFailure::before_the_turn_started(e.to_string()))?;
 
-    let mut forwarded = false;
+    // From here the server owns the turn: every later failure must be
+    // reported, never retried.
+    let turn_started = true;
     loop {
         let message = match socket.read() {
             Ok(m) => m,
             Err(e) => {
                 return Err(StreamFailure {
                     reason: format!("stream closed: {e}"),
-                    forwarded,
+                    turn_started,
                 })
             }
         };
@@ -156,7 +161,7 @@ fn stream_over_ws(
             tungstenite::Message::Close(_) => {
                 return Err(StreamFailure {
                     reason: "stream closed early".into(),
-                    forwarded,
+                    turn_started,
                 })
             }
             _ => continue,
@@ -169,7 +174,6 @@ fn stream_over_ws(
             // Receiver dropped — the window is gone.
             return Ok(());
         }
-        forwarded = true;
         if terminal {
             let _ = socket.close(None);
             return Ok(());
@@ -426,8 +430,12 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn mid_stream_drop_does_not_rerun_the_turn() {
+    /// `APOLLO_HTTP_PORT` is process-wide, so the turn tests take turns.
+    static PORT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run one turn against a throwaway WS server that drops the connection
+    /// after `frames` have been sent, and collect what the UI was told.
+    fn turn_against_dropping_server(frames: &'static [&'static str]) -> Vec<AgentEvent> {
         use std::io::Write;
         use std::net::TcpListener;
 
@@ -437,40 +445,67 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut socket = tungstenite::accept(stream).unwrap();
+            // The request has been handed over: the server owns the turn now.
             let _ = socket.read().unwrap();
-            socket
-                .send(tungstenite::Message::Text(
-                    r#"{"type":"delta","text":"partial"}"#.to_string(),
-                ))
-                .unwrap();
+            for frame in frames {
+                socket
+                    .send(tungstenite::Message::Text(frame.to_string()))
+                    .unwrap();
+            }
             socket.flush().unwrap();
             // Cut the connection mid-turn, without a terminal event.
             let _ = socket.get_mut().flush();
             drop(socket);
         });
 
+        let guard = PORT_ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("APOLLO_HTTP_PORT", port.to_string());
         let (tx, rx) = std::sync::mpsc::channel();
         run_turn("do something destructive", "chat", &tx);
         std::env::remove_var("APOLLO_HTTP_PORT");
+        drop(guard);
         server.join().unwrap();
 
-        let events: Vec<AgentEvent> = rx.try_iter().collect();
-        assert!(
-            matches!(events.first(), Some(AgentEvent::Delta(t)) if t == "partial"),
-            "expected the forwarded delta first, got {events:?}"
-        );
+        rx.try_iter().collect()
+    }
+
+    fn assert_reported_not_retried(events: &[AgentEvent]) {
         let Some(AgentEvent::Error(message)) = events.last() else {
             panic!("expected a terminal error, got {events:?}");
         };
         assert!(
             message.contains("stream interrupted mid-turn"),
-            "a partially streamed turn must not be re-run: {message}"
+            "a turn the server already started must not be re-run: {message}"
         );
         assert!(
             !message.contains("no agent reachable"),
             "the HTTP/CLI fallback must not have run: {message}"
         );
+    }
+
+    #[test]
+    fn mid_stream_drop_does_not_rerun_the_turn() {
+        let events = turn_against_dropping_server(&[r#"{"type":"delta","text":"partial"}"#]);
+        assert!(
+            matches!(events.first(), Some(AgentEvent::Delta(t)) if t == "partial"),
+            "expected the forwarded delta first, got {events:?}"
+        );
+        assert_reported_not_retried(&events);
+    }
+
+    #[test]
+    fn drop_before_the_first_frame_does_not_rerun_the_turn() {
+        // The server has the prompt and runs the turn to completion; nothing
+        // reached the UI, but re-sending it would execute its tools twice.
+        assert_reported_not_retried(&turn_against_dropping_server(&[]));
+    }
+
+    #[test]
+    fn drop_after_only_unparseable_frames_does_not_rerun_the_turn() {
+        assert_reported_not_retried(&turn_against_dropping_server(&[
+            r#"{"type":"who_knows"}"#,
+            "not json",
+        ]));
     }
 
     #[test]
