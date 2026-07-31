@@ -72,6 +72,7 @@ struct App {
     status: String,
     model: String,
     engine: String,
+    project: String,
     online: bool,
     spinner_start: Instant,
     cursor_start: Instant,
@@ -94,6 +95,7 @@ impl App {
             status: "ready".into(),
             model,
             engine,
+            project: project_name(),
             online: agent::agent_online(),
             spinner_start: Instant::now(),
             cursor_start: Instant::now(),
@@ -266,7 +268,16 @@ impl App {
         );
         tpl.set("cursor", blink_cursor(self.cursor_start));
         tpl.set("busy", self.busy);
-        tpl.set("spinner", spinner_frame(self.spinner_start));
+        // Idle spinner frames would rotate every 80ms and defeat the
+        // changed_keys() redraw gate, repainting a still screen at 12Hz.
+        tpl.set(
+            "spinner",
+            if self.busy {
+                spinner_frame(self.spinner_start)
+            } else {
+                ""
+            },
+        );
         tpl.set("status", self.status.clone());
         tpl.set("model", self.model.clone());
         tpl.set("engine", self.engine.clone());
@@ -275,7 +286,7 @@ impl App {
             "conn_color",
             if self.online { "green-400" } else { "red-400" },
         );
-        tpl.set("project", project_name());
+        tpl.set("project", self.project.clone());
     }
 }
 
