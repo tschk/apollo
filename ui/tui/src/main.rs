@@ -34,14 +34,15 @@ const MODEL_ROWS: usize = 5;
 ///
 /// apollo's server-side surface decides what can be here: telekinesis'
 /// /scope, /subagent, /todo, /budget, /review, /mcp and /plan have no apollo
-/// endpoint to drive, so they are absent rather than inert.
-const COMMANDS: [(&str, &str); 9] = [
+/// endpoint to drive, so they are absent rather than inert. /compact is absent
+/// for the same reason: apollo compacts a turn's in-flight messages, never a
+/// stored chat, so there is nothing for a command to ask for.
+const COMMANDS: [(&str, &str); 8] = [
     ("/help", "keys and commands"),
     ("/model", "switch model — no argument opens the selector"),
     ("/clear", "clear the transcript"),
     ("/cost", "spend and tokens so far"),
     ("/context", "context use against the compaction budget"),
-    ("/compact", "ask the agent to compact this chat"),
     ("/project", "project, branch and agent connection"),
     ("/quit", "leave"),
     ("/exit", "leave"),
@@ -433,13 +434,6 @@ impl App {
                 );
                 self.note(text);
                 self.refresh_state();
-            }
-            "/compact" => {
-                let result = agent::post_chat_action("/v1/compact", CHAT_ID);
-                match result {
-                    Ok(message) => self.note(message),
-                    Err(message) => self.note(format!("compact: {message}")),
-                }
             }
             "/project" => {
                 let text = format!(
@@ -943,10 +937,10 @@ mod tests {
     fn the_palette_only_offers_matching_commands() {
         assert!(palette_matches("hello").is_empty());
         assert!(palette_matches("/model claude").is_empty());
-        assert_eq!(palette_matches("/co").len(), 3);
-        assert!(palette_matches("/comp")
+        assert_eq!(palette_matches("/co").len(), 2);
+        assert!(palette_matches("/cos")
             .iter()
-            .all(|(name, _)| *name == "/compact"));
+            .all(|(name, _)| *name == "/cost"));
         assert_eq!(palette_matches("/").len(), COMMANDS.len());
     }
 
