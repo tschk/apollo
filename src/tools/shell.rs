@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::traits::*;
 use crate::policy::ExecutionPolicy;
-use crate::text::truncate_chars;
+use crate::text::truncate_chars_counted;
 
 pub struct ShellTool {
     workspace: PathBuf,
@@ -167,14 +167,9 @@ impl Tool for ShellTool {
         };
 
         // Truncate if too long
-        let truncated = if result.len() > 20_000 {
-            format!(
-                "{}...\n[truncated {} chars]",
-                truncate_chars(&result, 20_000),
-                result.len() - 20_000
-            )
-        } else {
-            result
+        let truncated = match truncate_chars_counted(&result, 20_000) {
+            Some((head, dropped)) => format!("{}...\n[truncated {} chars]", head, dropped),
+            None => result,
         };
 
         Ok(if output.status.success() {
@@ -334,5 +329,29 @@ mod tests {
                 "should have allowed: {cmd}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn truncates_multibyte_output_by_chars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = super::ShellTool::new(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
+        );
+        let args = serde_json::json!({
+            "command": "printf '日%.0s' {1..30000}"
+        })
+        .to_string();
+        let result = crate::tools::Tool::execute(&tool, &args).await.unwrap();
+        let body = result.output;
+        assert!(
+            body.chars().count() < 21_000,
+            "multibyte output must be truncated, got {} chars",
+            body.chars().count()
+        );
+        assert!(
+            body.contains("[truncated 10000 chars]"),
+            "footer must report the real dropped char count"
+        );
     }
 }

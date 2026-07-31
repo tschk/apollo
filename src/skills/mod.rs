@@ -246,13 +246,11 @@ pub fn expand_inline_shell(content: &str, cwd: Option<&Path>, _timeout_secs: u64
             {
                 Ok(output) if output.status.success() => {
                     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if stdout.len() > 4000 {
-                        format!(
-                            "{}… [truncated]",
-                            crate::text::truncate_chars(&stdout, 4000)
-                        )
-                    } else {
-                        stdout
+                    match crate::text::truncate_chars_counted(&stdout, 4000) {
+                        Some((head, dropped)) => {
+                            format!("{}… [truncated {} chars]", head, dropped)
+                        }
+                        None => stdout,
                     }
                 }
                 Ok(output) => {

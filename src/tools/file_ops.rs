@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::sandbox::{resolve_workspace_existing_path, resolve_workspace_write_path};
 use super::traits::*;
-use crate::text::truncate_chars;
+use crate::text::truncate_chars_counted;
 
 // ============================================================
 // Read tool — read file contents with optional offset/limit
@@ -84,13 +84,11 @@ impl Tool for FileReadTool {
                 let result = selected.join("\n");
 
                 // Truncate if too large
-                let truncated = if result.len() > 50_000 {
-                    format!(
-                        "{}...\n[truncated at 50KB]",
-                        truncate_chars(&result, 50_000)
-                    )
-                } else {
-                    result
+                let truncated = match truncate_chars_counted(&result, 50_000) {
+                    Some((head, dropped)) => {
+                        format!("{}...\n[truncated {} chars]", head, dropped)
+                    }
+                    None => result,
                 };
 
                 let remaining = total_lines.saturating_sub(offset + limit);

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use super::traits::*;
 use crate::config::PolicyConfig;
 use crate::policy::ExecutionPolicy;
-use crate::text::truncate_chars;
+use crate::text::truncate_chars_counted;
 
 /// Directory where dynamic tools live
 fn tools_dir() -> PathBuf {
@@ -168,10 +168,9 @@ impl Tool for DynamicTool {
         };
 
         // Truncate
-        let truncated = if result.len() > 20_000 {
-            format!("{}...\n[truncated]", truncate_chars(&result, 20_000))
-        } else {
-            result
+        let truncated = match truncate_chars_counted(&result, 20_000) {
+            Some((head, dropped)) => format!("{}...\n[truncated {} chars]", head, dropped),
+            None => result,
         };
 
         Ok(if output.status.success() {
