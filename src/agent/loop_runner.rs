@@ -778,9 +778,7 @@ impl AgentRunner {
             let text = self
                 .run_via_rotary(&messages, &tools_snapshot, &main_model)
                 .await?;
-            self.finish_execution(msg, &text, &draft_id, channel)
-                .await?;
-            return Ok(text);
+            return self.finish_execution(msg, &text, &draft_id, channel).await;
         }
 
         // ═══════════════════════════════════════════════════════
@@ -1091,15 +1089,11 @@ impl AgentRunner {
                             continue;
                         }
                         tracing::info!("Done after {} round(s) [{:?}]", round + 1, state);
-                        self.finish_execution(msg, &text, &draft_id, channel)
-                            .await?;
-                        return Ok(String::new());
+                        return self.finish_execution(msg, &text, &draft_id, channel).await;
                     }
                     AgentState::Summarizing | AgentState::Direct | AgentState::Planning => {
                         tracing::info!("Done after {} round(s) [{:?}]", round + 1, state);
-                        self.finish_execution(msg, &text, &draft_id, channel)
-                            .await?;
-                        return Ok(String::new());
+                        return self.finish_execution(msg, &text, &draft_id, channel).await;
                     }
                 }
             }
@@ -1218,9 +1212,9 @@ impl AgentRunner {
                         match decision {
                             GuardrailDecision::Stop(reason) => {
                                 tracing::warn!("Guardrail stop: {}", reason);
-                                self.finish_execution(msg, &reason, &draft_id, channel)
-                                    .await?;
-                                return Ok(reason);
+                                return self
+                                    .finish_execution(msg, &reason, &draft_id, channel)
+                                    .await;
                             }
                             GuardrailDecision::Warn(warning) => {
                                 tracing::warn!("Guardrail warn: {}", warning);
@@ -1410,7 +1404,7 @@ impl AgentRunner {
         text: &str,
         draft_id: &Option<String>,
         channel: &dyn Channel,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<String> {
         self.persist_conversation(msg, text).await?;
 
         // Mark trajectory as successful, record final response
@@ -1446,9 +1440,15 @@ impl AgentRunner {
             },
         );
 
-        if let Some(ref mid) = draft_id {
+        // Draft-capable channels already have the text on screen; returning it
+        // as well would post it twice. Every other channel relies on the
+        // returned string being the reply.
+        let delivered_via_draft = if let Some(ref mid) = draft_id {
             let _ = channel.finalize_draft(&msg.chat_id, mid, text).await;
-        }
+            true
+        } else {
+            false
+        };
 
         #[cfg(feature = "zkr-memory")]
         if self.zkr_config.self_improve {
@@ -1459,7 +1459,11 @@ impl AgentRunner {
             }
         }
 
-        Ok(())
+        if delivered_via_draft {
+            Ok(String::new())
+        } else {
+            Ok(text.to_string())
+        }
     }
 
     async fn classify_request(&self, text: &str, _model: &str) -> bool {
