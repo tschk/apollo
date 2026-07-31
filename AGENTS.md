@@ -135,9 +135,48 @@ embedded storage engine, selected by the `kv-rocksdb` feature on the
   compilation and should not be "consolidated away".
 
 Vector search is an in-process brute-force cosine scan. There is deliberately
-**no MTREE index**: MTREE requires a fixed `DIMENSION`, and the `embeddings`
-table holds vectors from providers with different dimensions. That is fine at
-current scale, and not the constraint to solve first.
+**no MTREE index**, and that is now a measured decision rather than an
+assumption — see `bench_search_embeddings_scaling` and
+`bench_mtree_feasibility` in `src/memory/surreal.rs`. Both are `#[ignore]`d;
+run them under `--release` or the numbers are meaningless:
+
+```bash
+APOLLO_BENCH_SIZES=100,1000,10000 \
+  cargo test --release -p apollo-agent --lib bench_ -- --ignored --nocapture
+```
+
+Scan latency, dim 1536, release, macOS arm64, 100 queries per size:
+
+| rows | median | p95 | insert/row |
+|------|--------|-----|------------|
+| 100 | 30ms | 34ms | 1.8ms |
+| 1 000 | 278ms | 321ms | 0.9ms |
+| 10 000 | 2 538ms | 5 018ms | 1.2ms |
+
+(50 000 was not measured: a 10k corpus already costs ~900MB on disk, so 50k
+needs ~4.5GB free that the benchmark host did not have. The curve is linear —
+~0.27ms per candidate row with no meaningful constant — so 50k extrapolates to
+roughly 13s.)
+
+So the scan *is* too slow for an interactive agent above a few hundred rows —
+it crosses 50ms at around 200 rows. MTREE is nonetheless the wrong fix, on all
+three axes:
+
+- **It cannot coexist with mixed dimensions.** One MTREE index locks the whole
+  table to its `DIMENSION`; a subsequent 3-dim insert fails with `Incorrect
+  vector dimension (3). Expected a vector of 1536 dimension.` Recording `dim`
+  per row does not enable "one index per dimension" — that would require
+  dimension-partitioned *tables*.
+- **It is ~25x more expensive to write**: 29.76ms/row versus ~1.2ms/row.
+- **It is slower to read.** At 2 000 rows, `vector <|10,COSINE|> $q` measured a
+  2 558ms median against 961ms for the scan.
+
+The bottleneck is materializing a 1536-element array as SurrealDB `Value`s for
+every candidate row, not the cosine arithmetic. Pushing the score into the
+engine (`vector::similarity::cosine(...) ORDER BY score LIMIT k`) was measured
+too and is ~1.6x slower, because it walks the same arrays. A real fix has to
+make a row cheaper to read — a compact vector encoding, or an ANN index kept
+outside SurrealDB. Do not re-litigate MTREE without new numbers.
 
 SurrealDB's native KNN operator is *not* used, despite what earlier notes said.
 The query was written `vector <| $v |>`, which does not parse (K must be a
@@ -223,10 +262,22 @@ and before this filter existed they were scored `0.0` and still returned as
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo build --release
-cargo test --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo build --release -p apollo-agent -p apollo-tui
+cargo test --workspace --all-features
 ```
+
+The repository root is both the workspace root *and* a package, so a bare
+`cargo build --release` builds `apollo-agent` alone and silently skips
+`apollo-tui`. That is how the TUI first shipped unbuilt — `apollo` falls back
+to the line-based chat when the `apollo-tui` binary is absent, so the gap
+surfaced as a missing feature rather than a build error. Name both binaries.
+
+Do **not** routinely run `cargo build --workspace --release`. That pulls in
+`apollo-ui`, whose GPUI dependency tree produces well over 20GB of release
+artifacts and has filled this machine's disk. Build `apollo-ui` deliberately
+when you are working on it, not as part of a validation sweep. `clippy` and
+`test` over the whole workspace are check-only and stay cheap.
 
 `--all-features` is not optional. Several providers are behind non-default
 features, so a `ProviderCapabilities` field added without it compiles locally

@@ -497,16 +497,25 @@ async fn main() -> anyhow::Result<()> {
             model: None,
             workspace: None,
         },
-        None => Commands::Chat {
-            config: "apollo.json".into(),
-            model: None,
-            workspace: None,
-            channel: "cli".into(),
-            telegram_token: None,
-            telegram_chat_id: None,
-            discord_token: None,
-            discord_channel_id: None,
-        },
+        None => {
+            // Say so rather than degrading quietly — a bare `cargo build
+            // --release` builds apollo-agent alone, so the usual reason the
+            // binary is missing is that nobody knew to ask for it.
+            eprintln!(
+                "apollo-tui not found — starting the line-based chat instead.\n\
+                 Build the terminal UI with: cargo build --release -p apollo-tui"
+            );
+            Commands::Chat {
+                config: "apollo.json".into(),
+                model: None,
+                workspace: None,
+                channel: "cli".into(),
+                telegram_token: None,
+                telegram_chat_id: None,
+                discord_token: None,
+                discord_channel_id: None,
+            }
+        }
     };
 
     match command {

@@ -61,10 +61,15 @@ pub fn http_listen_addr() -> SocketAddr {
 /// Reject anything that arrives with an `Origin` header.
 ///
 /// This endpoint drives the agent, which has shell, edit and file tools over
-/// the workspace, and it is unauthenticated — binding to loopback is the only
-/// thing keeping it private. Loopback is not a boundary against a browser: any
-/// page the user visits can reach 127.0.0.1, and WebSocket upgrades ignore the
-/// same-origin policy entirely, so CORS alone would not cover `/v1/chat/stream`.
+/// the workspace. Loopback is not a boundary against a browser: any page the
+/// user visits can reach 127.0.0.1, and WebSocket upgrades ignore the
+/// same-origin policy entirely, so CORS alone would not cover
+/// `/v1/chat/stream`.
+///
+/// This runs alongside the bearer token in `check_auth`, not instead of it.
+/// The token is the actual authentication; refusing `Origin` additionally
+/// means a page that somehow learned the token still cannot use it from a
+/// browser.
 ///
 /// Native clients (the TUI, apollo-ui, curl) never send `Origin`; browsers
 /// always do and cannot forge its absence. Refusing the header therefore blocks
