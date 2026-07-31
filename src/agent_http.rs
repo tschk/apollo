@@ -620,5 +620,4 @@ mod tests {
         );
         assert_eq!(mode_name(&AgentMode::Swarm { parallelism: 2 }), "swarm");
     }
-
 }
