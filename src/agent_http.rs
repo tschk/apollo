@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::{Method, StatusCode};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tower_http::cors::{Any, CorsLayer};
 
 use crate::agent::stream::AgentStreamEvent;
 use crate::agent::AgentRunner;
@@ -58,11 +58,24 @@ pub fn http_listen_addr() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
 }
 
-fn cors_layer() -> CorsLayer {
-    CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers(Any)
+/// Reject anything that arrives with an `Origin` header.
+///
+/// This endpoint drives the agent, which has shell, edit and file tools over
+/// the workspace, and it is unauthenticated — binding to loopback is the only
+/// thing keeping it private. Loopback is not a boundary against a browser: any
+/// page the user visits can reach 127.0.0.1, and WebSocket upgrades ignore the
+/// same-origin policy entirely, so CORS alone would not cover `/v1/chat/stream`.
+///
+/// Native clients (the TUI, apollo-ui, curl) never send `Origin`; browsers
+/// always do and cannot forge its absence. Refusing the header therefore blocks
+/// web-page-driven access on both the POST and the WebSocket path without
+/// affecting any legitimate caller.
+fn reject_browser_origin(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
+    if headers.contains_key(axum::http::header::ORIGIN) {
+        tracing::warn!("rejected apollo HTTP request carrying an Origin header");
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
 }
 
 pub fn spawn_http_server(runner: Arc<AgentRunner>) {
@@ -72,7 +85,6 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) {
             .route("/health", get(|| async { "ok" }))
             .route("/v1/chat", post(chat_handler))
             .route("/v1/chat/stream", get(ws_chat_upgrade))
-            .layer(cors_layer())
             .with_state(runner);
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => l,
@@ -93,8 +105,10 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) {
 
 async fn chat_handler(
     State(runner): State<Arc<AgentRunner>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<ChatRequestBody>,
 ) -> Result<Json<ChatResponseBody>, StatusCode> {
+    reject_browser_origin(&headers)?;
     if body.message.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -110,7 +124,11 @@ async fn chat_handler(
 async fn ws_chat_upgrade(
     ws: WebSocketUpgrade,
     State(runner): State<Arc<AgentRunner>>,
-) -> impl axum::response::IntoResponse {
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if reject_browser_origin(&headers).is_err() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     ws.on_upgrade(move |socket| handle_ws_chat(socket, runner))
 }
 
