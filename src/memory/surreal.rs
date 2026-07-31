@@ -3,15 +3,18 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use surrealdb::engine::local::RocksDb;
 use surrealdb::Surreal;
+use tokio::sync::OnceCell;
 
 use super::traits::*;
 
 #[derive(Clone)]
 pub struct SurrealMemory {
-    db: Surreal<surrealdb::engine::local::Db>,
+    path: PathBuf,
+    cell: Arc<OnceCell<Surreal<surrealdb::engine::local::Db>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,15 +71,30 @@ struct ChunkRow {
 }
 
 impl SurrealMemory {
-    pub fn db(&self) -> Surreal<surrealdb::engine::local::Db> {
-        self.db.clone()
+    pub async fn db(&self) -> Result<Surreal<surrealdb::engine::local::Db>> {
+        let db = self
+            .cell
+            .get_or_try_init(|| async {
+                let db = Surreal::new::<RocksDb>(self.path.as_path()).await?;
+                db.use_ns("claw").use_db("memory").await?;
+                db.query(SCHEMA_SQL).await?;
+                Ok::<_, anyhow::Error>(db)
+            })
+            .await?;
+        Ok(db.clone())
     }
 
     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let db = Surreal::new::<RocksDb>(path.as_ref()).await?;
-        db.use_ns("claw").use_db("memory").await?;
-        db.query(SCHEMA_SQL).await?;
-        Ok(Self { db })
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
+        Ok(Self {
+            path,
+            cell: Arc::new(OnceCell::new()),
+        })
     }
 
     fn memory_id(namespace: &str, key: &str) -> String {
@@ -198,7 +216,8 @@ impl MemoryBackend for SurrealMemory {
             created_at,
         };
         let _: Option<MemoryRow> = self
-            .db
+            .db()
+            .await?
             .upsert(("memories", Self::memory_id(namespace, key)))
             .content(row)
             .await?;
@@ -207,7 +226,8 @@ impl MemoryBackend for SurrealMemory {
 
     async fn recall(&self, namespace: &str, key: &str) -> Result<Option<MemoryEntry>> {
         let row: Option<MemoryRow> = self
-            .db
+            .db()
+            .await?
             .select(("memories", Self::memory_id(namespace, key)))
             .await?;
         Ok(row.map(|entry| MemoryEntry {
@@ -221,7 +241,8 @@ impl MemoryBackend for SurrealMemory {
     async fn search(&self, namespace: &str, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
         // Try full-text search with BM25 ranking first
         let mut result = self
-            .db
+            .db()
+            .await?
             .query(
                 "SELECT *, search::score(1) AS score
                  FROM memories
@@ -250,7 +271,7 @@ impl MemoryBackend for SurrealMemory {
 
         // Fallback to CONTAINS for partial matches
         let query_lower = query.to_lowercase();
-        let mut result = self.db
+        let mut result = self.db().await?
             .query(
                 "SELECT * FROM memories
                  WHERE namespace = $namespace
@@ -276,14 +297,15 @@ impl MemoryBackend for SurrealMemory {
 
     async fn forget(&self, namespace: &str, key: &str) -> Result<()> {
         let _: Option<MemoryRow> = self
-            .db
+            .db()
+            .await?
             .delete(("memories", Self::memory_id(namespace, key)))
             .await?;
         Ok(())
     }
 
     async fn list(&self, namespace: &str) -> Result<Vec<MemoryEntry>> {
-        let mut result = self.db
+        let mut result = self.db().await?
             .query("SELECT key, value, metadata, created_at FROM memories WHERE namespace = $namespace ORDER BY created_at DESC")
             .bind(("namespace", namespace.to_string()))
             .await?;
@@ -315,7 +337,12 @@ impl MemoryBackend for SurrealMemory {
             seq: now.timestamp_millis(),
             created_at: now.to_rfc3339(),
         };
-        let _: Option<ConversationRow> = self.db.create("conversations").content(row).await?;
+        let _: Option<ConversationRow> = self
+            .db()
+            .await?
+            .create("conversations")
+            .content(row)
+            .await?;
         Ok(())
     }
 
@@ -330,7 +357,12 @@ impl MemoryBackend for SurrealMemory {
                 seq: now.timestamp_millis() + offset as i64,
                 created_at: now.to_rfc3339(),
             };
-            let _: Option<ConversationRow> = self.db.create("conversations").content(row).await?;
+            let _: Option<ConversationRow> = self
+                .db()
+                .await?
+                .create("conversations")
+                .content(row)
+                .await?;
         }
         Ok(())
     }
@@ -341,7 +373,8 @@ impl MemoryBackend for SurrealMemory {
         limit: usize,
     ) -> Result<Vec<(String, String)>> {
         let mut result = self
-            .db
+            .db()
+            .await?
             .query(
                 "SELECT * FROM conversations
                  WHERE chat_id = $chat_id
@@ -367,7 +400,8 @@ impl MemoryBackend for SurrealMemory {
     ) -> Result<Vec<ConversationSearchHit>> {
         let query = query.to_lowercase();
         let mut result = if let Some(chat_id) = chat_id {
-            self.db
+            self.db()
+                .await?
                 .query(
                     "SELECT * FROM conversations
                      WHERE chat_id = $chat_id
@@ -380,7 +414,8 @@ impl MemoryBackend for SurrealMemory {
                 .bind(("limit", limit as i64))
                 .await?
         } else {
-            self.db
+            self.db()
+                .await?
                 .query(
                     "SELECT * FROM conversations
                      WHERE string::lowercase(content) CONTAINS $query
@@ -404,7 +439,11 @@ impl MemoryBackend for SurrealMemory {
     }
 
     async fn get_sticker_cache(&self, sticker_id: &str) -> Result<Option<String>> {
-        let row: Option<StickerRow> = self.db.select(("sticker_cache", sticker_id)).await?;
+        let row: Option<StickerRow> = self
+            .db()
+            .await?
+            .select(("sticker_cache", sticker_id))
+            .await?;
         Ok(row.map(|entry| entry.description))
     }
 
@@ -421,7 +460,8 @@ impl MemoryBackend for SurrealMemory {
             analyzed_at: chrono::Utc::now().to_rfc3339(),
         };
         let _: Option<StickerRow> = self
-            .db
+            .db()
+            .await?
             .upsert(("sticker_cache", sticker_id))
             .content(row)
             .await?;
@@ -445,7 +485,12 @@ impl MemoryBackend for SurrealMemory {
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         let id = Self::memory_id(namespace, key);
-        let _: Option<EmbeddingRow> = self.db.upsert(("embeddings", &id)).content(row).await?;
+        let _: Option<EmbeddingRow> = self
+            .db()
+            .await?
+            .upsert(("embeddings", &id))
+            .content(row)
+            .await?;
         Ok(())
     }
 
@@ -464,7 +509,8 @@ impl MemoryBackend for SurrealMemory {
         // If the KNN query fails (e.g. dimension mismatch, empty table) we
         // fall back to the in-process cosine similarity scan below.
         let knn_result = self
-            .db
+            .db()
+            .await?
             .query(
                 "SELECT * FROM embeddings
                  WHERE namespace = $namespace
@@ -498,7 +544,8 @@ impl MemoryBackend for SurrealMemory {
         // search in-process. This handles mixed-dimension vectors or any
         // case where the KNN operator is unavailable.
         let mut result = self
-            .db
+            .db()
+            .await?
             .query("SELECT * FROM embeddings WHERE namespace = $namespace")
             .bind(("namespace", namespace.to_string()))
             .await?;
@@ -536,13 +583,13 @@ impl MemoryBackend for SurrealMemory {
         };
         // Use path hash as record ID to avoid special chars
         let id = format!("{:x}", md5_hash(path));
-        let _: Option<FileIndexRow> = self.db.upsert(("files", &id)).content(row).await?;
+        let _: Option<FileIndexRow> = self.db().await?.upsert(("files", &id)).content(row).await?;
         Ok(())
     }
 
     async fn get_file_index(&self, path: &str) -> Result<Option<FileIndex>> {
         let id = format!("{:x}", md5_hash(path));
-        let row: Option<FileIndexRow> = self.db.select(("files", &id)).await?;
+        let row: Option<FileIndexRow> = self.db().await?.select(("files", &id)).await?;
         Ok(row.map(|r| FileIndex {
             path: r.path,
             hash: r.hash,
@@ -568,13 +615,14 @@ impl MemoryBackend for SurrealMemory {
             embedding: embedding.map(|e| e.to_vec()),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
-        let _: Option<ChunkRow> = self.db.create("chunks").content(row).await?;
+        let _: Option<ChunkRow> = self.db().await?.create("chunks").content(row).await?;
         Ok(())
     }
 
     async fn get_chunks_for_file(&self, file_path: &str) -> Result<Vec<Chunk>> {
         let mut result = self
-            .db
+            .db()
+            .await?
             .query("SELECT * FROM chunks WHERE file_path = $file_path ORDER BY start_line ASC")
             .bind(("file_path", file_path.to_string()))
             .await?;
@@ -593,7 +641,8 @@ impl MemoryBackend for SurrealMemory {
     }
 
     async fn delete_chunks_for_file(&self, file_path: &str) -> Result<()> {
-        self.db
+        self.db()
+            .await?
             .query("DELETE FROM chunks WHERE file_path = $file_path")
             .bind(("file_path", file_path.to_string()))
             .await?;

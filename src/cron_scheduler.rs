@@ -107,7 +107,7 @@ impl CronScheduler {
         };
 
         if let Some(ref memory) = self.memory {
-            let db = memory.db();
+            let db = memory.db().await?;
             let created: Option<CronJob> = db.create("cron_jobs").content(job).await?;
             let created = created.ok_or_else(|| anyhow::anyhow!("Failed to create cron job"))?;
             Ok(created
@@ -153,7 +153,8 @@ impl CronScheduler {
             run_token: None,
         };
         if let Some(ref memory) = self.memory {
-            let created: Option<CronJob> = memory.db().create("cron_jobs").content(job).await?;
+            let created: Option<CronJob> =
+                memory.db().await?.create("cron_jobs").content(job).await?;
             Ok(created
                 .and_then(|job| job.id)
                 .ok_or_else(|| anyhow::anyhow!("Created one-shot job is missing an id"))?)
@@ -166,7 +167,7 @@ impl CronScheduler {
     /// List all cron jobs.
     pub async fn list(&self) -> anyhow::Result<Vec<CronJob>> {
         if let Some(ref memory) = self.memory {
-            let db = memory.db();
+            let db = memory.db().await?;
             let mut result: surrealdb::Response =
                 db.query("SELECT * FROM cron_jobs ORDER BY name").await?;
             let jobs: Vec<CronJob> = result.take(0)?;
@@ -180,7 +181,7 @@ impl CronScheduler {
     /// Remove a cron job by ID or name.
     pub async fn remove(&self, id_or_name: &str) -> anyhow::Result<bool> {
         if let Some(ref memory) = self.memory {
-            let db = memory.db();
+            let db = memory.db().await?;
             let mut result: surrealdb::Response = db
                 .query("DELETE FROM cron_jobs WHERE id = $target OR name = $target")
                 .bind(("target", id_or_name.to_string()))
@@ -198,7 +199,7 @@ impl CronScheduler {
     /// Enable a cron job.
     pub async fn enable(&self, id_or_name: &str) -> anyhow::Result<bool> {
         if let Some(ref memory) = self.memory {
-            let db = memory.db();
+            let db = memory.db().await?;
             let mut result: surrealdb::Response = db
                 .query("UPDATE cron_jobs SET enabled = true WHERE id = $target OR name = $target")
                 .bind(("target", id_or_name.to_string()))
@@ -219,7 +220,7 @@ impl CronScheduler {
     /// Disable a cron job.
     pub async fn disable(&self, id_or_name: &str) -> anyhow::Result<bool> {
         if let Some(ref memory) = self.memory {
-            let db = memory.db();
+            let db = memory.db().await?;
             let mut result: surrealdb::Response = db
                 .query("UPDATE cron_jobs SET enabled = false WHERE id = $target OR name = $target")
                 .bind(("target", id_or_name.to_string()))
@@ -241,7 +242,7 @@ impl CronScheduler {
     pub async fn due_jobs(&self) -> anyhow::Result<Vec<CronJob>> {
         let now = chrono::Utc::now().to_rfc3339();
         if let Some(ref memory) = self.memory {
-            let db = memory.db();
+            let db = memory.db().await?;
             let mut result: surrealdb::Response = db
                 .query("SELECT * FROM cron_jobs WHERE enabled = true AND ((status = 'active' OR status = NONE) AND next_run != NONE AND next_run <= $now OR status = 'running' AND lease_until != NONE AND lease_until <= $now)")
                 .bind(("now", now))
@@ -277,7 +278,7 @@ impl CronScheduler {
             let run_token = uuid::Uuid::new_v4().to_string();
             if let Some(ref memory) = self.memory {
                 let mut result = memory
-                    .db()
+                    .db().await?
                     .query("UPDATE cron_jobs SET status = 'running', lease_until = $lease, run_token = $run_token WHERE id = $id AND enabled = true AND (status = 'active' OR status = NONE OR status = 'running' AND lease_until <= $now) RETURN AFTER")
                     .bind(("id", job_id.to_string()))
                     .bind(("lease", lease_until.clone()))
@@ -322,7 +323,7 @@ impl CronScheduler {
         };
 
         if let Some(ref memory) = self.memory {
-            let db = memory.db();
+            let db = memory.db().await?;
             let _ = db
                 .query("UPDATE cron_jobs SET last_run = $last, next_run = $next, status = $status, retry_count = 0, last_error = NONE, lease_until = NONE, run_token = NONE WHERE id = $id AND status = 'running' AND run_token = $run_token")
                 .bind(("last", now.to_rfc3339()))
@@ -351,7 +352,7 @@ impl CronScheduler {
     pub async fn release_run(&self, job_id: &str, run_token: &str) -> anyhow::Result<()> {
         if let Some(ref memory) = self.memory {
             let _ = memory
-                .db()
+                .db().await?
                 .query("UPDATE cron_jobs SET status = 'active', lease_until = NONE, run_token = NONE WHERE id = $id AND status = 'running' AND run_token = $run_token")
                 .bind(("id", job_id.to_string()))
                 .bind(("run_token", run_token.to_string()))
@@ -372,7 +373,7 @@ impl CronScheduler {
     pub async fn fail_run(&self, job_id: &str, run_token: &str, error: &str) -> anyhow::Result<()> {
         let redacted = crate::redaction::redact_text(error);
         if let Some(ref memory) = self.memory {
-            let db = memory.db();
+            let db = memory.db().await?;
             let Some(job) = self.list().await?.into_iter().find(|job| {
                 job.id.as_deref() == Some(job_id) && job.run_token.as_deref() == Some(run_token)
             }) else {

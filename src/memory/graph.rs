@@ -61,6 +61,7 @@ impl SurrealMemory {
         };
         let _: Option<GraphNode> = self
             .db()
+            .await?
             .upsert(("memory_nodes", id.as_str()))
             .content(row)
             .await?;
@@ -77,6 +78,7 @@ impl SurrealMemory {
         };
         let _: Option<GraphEdge> = self
             .db()
+            .await?
             .upsert(("memory_edges", edge_id.as_str()))
             .content(row)
             .await?;
@@ -86,6 +88,7 @@ impl SurrealMemory {
     pub async fn graph_neighbors(&self, node_id: &str, limit: usize) -> Result<Vec<GraphNode>> {
         let mut res = self
             .db()
+            .await?
             .query("SELECT * FROM memory_edges WHERE from_id = $id OR to_id = $id LIMIT 50")
             .bind(("id", node_id.to_string()))
             .await?;
@@ -97,7 +100,7 @@ impl SurrealMemory {
             } else {
                 e.from_id.as_str()
             };
-            let n: Option<GraphNode> = self.db().select(("memory_nodes", other)).await?;
+            let n: Option<GraphNode> = self.db().await?.select(("memory_nodes", other)).await?;
             if let Some(n) = n {
                 nodes.push(n);
             }
@@ -116,6 +119,7 @@ impl SurrealMemory {
         }
         let mut res = self
             .db()
+            .await?
             .query("SELECT * FROM memory_nodes LIMIT 200")
             .await?;
         let all: Vec<GraphNode> = res.take(0)?;

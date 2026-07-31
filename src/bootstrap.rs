@@ -365,6 +365,14 @@ pub async fn build_memory_backend(
 
     let surreal_path = storage_root.join("memory.surreal");
     let memory = SurrealMemory::new(surreal_path.as_path()).await?;
+
+    let warmup = memory.clone();
+    tokio::spawn(async move {
+        if let Err(e) = warmup.db().await {
+            tracing::error!("memory backend failed to open: {e:#}");
+        }
+    });
+
     Ok(Arc::new(memory))
 }
 
