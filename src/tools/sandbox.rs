@@ -33,6 +33,35 @@ const DENIED_FILE_PREFIXES: &[&str] = &[".env."];
 /// directory. `~/.apollo` holds the HTTP token that drives the agent.
 const DENIED_HOME_DIRS: &[&str] = &[".apollo"];
 
+/// Directories inside the *workspace* that apollo itself loads code and state
+/// from: `.apollo/skills/*/SKILL.md` is executed through `sh -c` on the next
+/// skill load, and `.apollo/plugins/manifest.json` names what gets loaded. A
+/// write there turns prompt injection into reboot-persistent code execution,
+/// so writes are refused. Reads stay allowed — skill and plugin loading use
+/// `std::fs` directly and never pass through this module, so nothing apollo
+/// needs is affected, and a denied read would only stop the model inspecting
+/// its own non-secret skills.
+const DENIED_WORKSPACE_WRITE_DIRS: &[&str] = &[".apollo"];
+
+fn ensure_write_not_denied(
+    workspace: &Path,
+    resolved: &Path,
+    original: &str,
+) -> anyhow::Result<()> {
+    let canonical_workspace = workspace_canonical(workspace);
+    for dir in DENIED_WORKSPACE_WRITE_DIRS {
+        if resolved.starts_with(canonical_workspace.join(dir)) {
+            anyhow::bail!(
+                "Access denied: '{}' is inside the workspace's {} directory, which holds \
+                 apollo's own skills, plugins and state.",
+                original,
+                dir
+            );
+        }
+    }
+    Ok(())
+}
+
 fn ensure_not_denied(resolved: &Path, original: &str) -> anyhow::Result<()> {
     if let Some(name) = resolved.file_name().and_then(|n| n.to_str()) {
         let denied = DENIED_FILE_NAMES.contains(&name)
@@ -152,6 +181,7 @@ pub fn resolve_workspace_write_path(workspace: &Path, raw_path: &str) -> anyhow:
     };
     let resolved = resolve_write_candidate(&requested);
     ensure_not_denied(&resolved, raw_path)?;
+    ensure_write_not_denied(workspace, &resolved, raw_path)?;
     validate_within_workspace(workspace, &resolved, raw_path)
 }
 
@@ -200,6 +230,50 @@ mod tests {
         resolve_workspace_existing_path(&ws, "notes.md").unwrap();
         resolve_workspace_write_path(&ws, "sub/new.txt").unwrap();
         resolve_workspace_write_path(&ws, "environment.json").unwrap();
+    }
+
+    #[test]
+    fn refuses_to_write_anywhere_under_the_workspace_apollo_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        for path in [
+            ".apollo/skills/evil/SKILL.md",
+            ".apollo/plugins/manifest.json",
+            ".apollo/state.surreal",
+            ".apollo/graph_memory.json",
+            "./.apollo/skills/x/SKILL.md",
+            "sub/../.apollo/skills/x/SKILL.md",
+        ] {
+            let err = resolve_workspace_write_path(&ws, path).unwrap_err();
+            assert!(err.to_string().contains("Access denied"), "{path}: {err}");
+        }
+        let absolute = ws.join(".apollo/skills/evil/SKILL.md");
+        let err = resolve_workspace_write_path(&ws, absolute.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("Access denied"), "{err}");
+    }
+
+    /// The deny is scoped to the directory itself, not to any name containing
+    /// it, and ordinary work in the workspace is untouched.
+    #[test]
+    fn apollo_deny_does_not_swallow_neighbouring_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        resolve_workspace_write_path(&ws, ".apollo-notes.md").unwrap();
+        resolve_workspace_write_path(&ws, "src/apollo/main.rs").unwrap();
+        resolve_workspace_write_path(&ws, "docs/.apollos/x.md").unwrap();
+    }
+
+    /// Skill loading reads `.apollo/skills` with `std::fs`, so denying writes
+    /// must not deny reads.
+    #[test]
+    fn reads_under_workspace_apollo_still_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(ws.join(".apollo/skills/demo")).unwrap();
+        std::fs::write(ws.join(".apollo/skills/demo/SKILL.md"), "# demo").unwrap();
+        resolve_workspace_existing_path(&ws, ".apollo/skills/demo/SKILL.md").unwrap();
     }
 
     #[test]
