@@ -312,26 +312,42 @@ impl CronScheduler {
         schedule: &str,
     ) -> anyhow::Result<()> {
         let now = chrono::Utc::now();
-        let next_run = cron::Schedule::from_str(schedule)
-            .ok()
-            .and_then(|s| s.upcoming(chrono::Utc).next())
-            .map(|t| t.to_rfc3339());
-        let status = if schedule.is_empty() {
-            "completed"
+        // A job with no computable next run must not stay 'active': the
+        // due-jobs query requires next_run != NONE, so it would be silently
+        // unschedulable forever with nothing recorded.
+        let (next_run, status, last_error) = if schedule.is_empty() {
+            (None, "completed", None)
         } else {
-            "active"
+            match cron::Schedule::from_str(schedule) {
+                Err(e) => {
+                    let reason = format!("invalid cron expression {schedule:?}: {e}");
+                    tracing::error!("cron job {}: {}", job_id, reason);
+                    (None, "invalid_schedule", Some(reason))
+                }
+                Ok(parsed) => match parsed.upcoming(chrono::Utc).next() {
+                    Some(next) => (Some(next.to_rfc3339()), "active", None),
+                    None => {
+                        let reason =
+                            format!("cron expression {schedule:?} has no future occurrences");
+                        tracing::info!("cron job {}: {}", job_id, reason);
+                        (None, "exhausted", Some(reason))
+                    }
+                },
+            }
         };
 
         if let Some(ref memory) = self.memory {
             let db = memory.db().await?;
-            let _ = db
-                .query("UPDATE cron_jobs SET last_run = $last, next_run = $next, status = $status, retry_count = 0, last_error = NONE, lease_until = NONE, run_token = NONE WHERE id = $id AND status = 'running' AND run_token = $run_token")
+            let mut result = db
+                .query("UPDATE cron_jobs SET last_run = $last, next_run = $next, status = $status, retry_count = 0, last_error = $last_error, lease_until = NONE, run_token = NONE WHERE id = $id AND status = 'running' AND run_token = $run_token")
                 .bind(("last", now.to_rfc3339()))
                 .bind(("next", next_run))
                 .bind(("status", status.to_string()))
+                .bind(("last_error", last_error.clone()))
                 .bind(("id", job_id.to_string()))
                 .bind(("run_token", run_token.to_string()))
                 .await?;
+            let _: Vec<CronJob> = result.take(0)?;
         } else {
             let mut jobs = self.noop_jobs.lock().unwrap();
             if let Some(job) = jobs.iter_mut().find(|job| {
@@ -341,7 +357,7 @@ impl CronScheduler {
                 job.next_run = next_run;
                 job.status = status.to_string();
                 job.retry_count = 0;
-                job.last_error = None;
+                job.last_error = last_error.clone();
                 job.lease_until = None;
                 job.run_token = None;
             }
@@ -351,12 +367,13 @@ impl CronScheduler {
 
     pub async fn release_run(&self, job_id: &str, run_token: &str) -> anyhow::Result<()> {
         if let Some(ref memory) = self.memory {
-            let _ = memory
+            let mut result = memory
                 .db().await?
                 .query("UPDATE cron_jobs SET status = 'active', lease_until = NONE, run_token = NONE WHERE id = $id AND status = 'running' AND run_token = $run_token")
                 .bind(("id", job_id.to_string()))
                 .bind(("run_token", run_token.to_string()))
                 .await?;
+            let _: Vec<CronJob> = result.take(0)?;
         } else {
             let mut jobs = self.noop_jobs.lock().unwrap();
             if let Some(job) = jobs.iter_mut().find(|job| {
@@ -387,7 +404,7 @@ impl CronScheduler {
             };
             let delay = 2_i64.saturating_pow(retry_count.min(10)) * 60;
             let next_run = (chrono::Utc::now() + chrono::Duration::seconds(delay)).to_rfc3339();
-            let _ = db
+            let mut result = db
                 .query("UPDATE cron_jobs SET status = $status, retry_count = $retry_count, last_error = $error, next_run = $next_run, lease_until = NONE, run_token = NONE WHERE id = $id AND status = 'running' AND run_token = $run_token")
                 .bind(("status", status.to_string()))
                 .bind(("retry_count", retry_count))
@@ -396,6 +413,7 @@ impl CronScheduler {
                 .bind(("id", job_id.to_string()))
                 .bind(("run_token", run_token.to_string()))
                 .await?;
+            let _: Vec<CronJob> = result.take(0)?;
         } else {
             let mut jobs = self.noop_jobs.lock().unwrap();
             if let Some(job) = jobs.iter_mut().find(|job| {
@@ -523,5 +541,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(scheduler.list().await.unwrap()[0].status, "active");
+    }
+
+    async fn mark_run_with_schedule(schedule: &str) -> CronJob {
+        let scheduler = CronScheduler::new_noop();
+        let mut job = due_job("cli");
+        job.schedule = schedule.to_string();
+        scheduler.noop_jobs.lock().unwrap().push(job);
+        let claimed = scheduler.claim_due_jobs("cli").await.unwrap().remove(0);
+        scheduler
+            .mark_run("job-1", claimed.run_token.as_deref().unwrap(), schedule)
+            .await
+            .unwrap();
+        scheduler.list().await.unwrap().remove(0)
+    }
+
+    #[tokio::test]
+    async fn exhausted_schedule_is_not_left_active() {
+        // Year-pinned in the past: validates, fires, then has no next run.
+        let job = mark_run_with_schedule("0 0 12 1 1 * 2020").await;
+        assert_eq!(job.status, "exhausted");
+        assert!(job.next_run.is_none());
+        assert!(job.last_error.is_some(), "the reason must be recorded");
+    }
+
+    #[tokio::test]
+    async fn unparseable_schedule_is_not_left_active() {
+        let job = mark_run_with_schedule("not a cron expression").await;
+        assert_eq!(job.status, "invalid_schedule");
+        assert!(job.next_run.is_none());
+        assert!(job.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn valid_schedule_stays_active_with_a_next_run() {
+        let job = mark_run_with_schedule("0 0 * * * * *").await;
+        assert_eq!(job.status, "active");
+        assert!(job.next_run.is_some());
+        assert!(job.last_error.is_none());
     }
 }
