@@ -74,6 +74,12 @@ fn web_search_tool_type(model: &str) -> &'static str {
     }
 }
 
+/// Claude subscription OAuth access tokens carry the `sk-ant-oat` prefix;
+/// API keys carry `sk-ant-api`.
+fn is_oauth_credential(key: &str) -> bool {
+    key.contains("sk-ant-oat")
+}
+
 pub struct AnthropicProvider {
     api_key: String,
     /// Present when the credential is an OAuth token loaded from the Claude
@@ -95,6 +101,29 @@ impl AnthropicProvider {
             cost_tracker: None,
             native_web_search: false,
         }
+    }
+
+    /// Build from a credential resolved elsewhere (config, env, or an OAuth
+    /// login copied into the config at startup).
+    ///
+    /// A plain API key never expires, so it is used as given. An OAuth token
+    /// does expire — around six hours — so it is paired with the token cache
+    /// that owns refresh and write-back. Without this a long-running
+    /// `apollo serve` keeps replaying the token it snapshotted at startup and
+    /// starts failing the moment it expires.
+    pub fn from_credential(api_key: impl Into<String>) -> Self {
+        let key = api_key.into();
+        let mut provider = Self::new(key.clone());
+        if is_oauth_credential(&key) {
+            match super::oauth::OAuthTokenCache::from_credentials_file() {
+                Ok(cache) => provider.oauth = Some(cache),
+                Err(e) => tracing::warn!(
+                    "anthropic OAuth token has no refreshable credential on disk, \
+                     it will stop working at expiry: {e}"
+                ),
+            }
+        }
+        provider
     }
 
     /// Create from OAuth token (Claude.dev) or fallback to environment/file
@@ -323,7 +352,7 @@ impl Provider for AnthropicProvider {
 
         // Detect OAuth tokens (sk-ant-oat) vs API keys (sk-ant-api)
         let api_key = self.resolve_key().await;
-        let is_oauth = api_key.contains("sk-ant-oat");
+        let is_oauth = is_oauth_credential(&api_key);
 
         // OAuth tokens require the system prompt to start with the Claude Code identity prefix
         if is_oauth {

@@ -129,7 +129,7 @@ pub fn build_provider(cfg: &Config) -> Arc<dyn Provider> {
     match cfg.provider.name.as_str() {
         #[cfg(feature = "provider-anthropic")]
         "anthropic" | "claude" => {
-            let mut p = AnthropicProvider::new(&api_key)
+            let mut p = AnthropicProvider::from_credential(&api_key)
                 .with_native_web_search(cfg.provider.native_web_search);
             if let Some(url) = &cfg.provider.base_url {
                 p = p.with_base_url(url);

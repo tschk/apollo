@@ -43,6 +43,7 @@ pub struct OAuthTokenCache {
     refresh_token: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<i64>>,
     store: Arc<RwLock<Option<TokenStore>>>,
+    token_url: Arc<String>,
 }
 
 impl OAuthTokenCache {
@@ -52,7 +53,16 @@ impl OAuthTokenCache {
             refresh_token: Arc::new(RwLock::new(refresh_token)),
             expires_at: Arc::new(RwLock::new(expires_at)),
             store: Arc::new(RwLock::new(None)),
+            token_url: Arc::new(CLAUDE_TOKEN_URL.to_string()),
         }
+    }
+
+    /// Point the refresh at another token endpoint. Used by the tests to hit a
+    /// local server instead of Anthropic.
+    #[cfg(test)]
+    fn with_token_url(mut self, url: impl Into<String>) -> Self {
+        self.token_url = Arc::new(url.into());
+        self
     }
 
     fn from_parts(tokens: (String, Option<String>, i64), store: TokenStore) -> Self {
@@ -62,6 +72,7 @@ impl OAuthTokenCache {
             refresh_token: Arc::new(RwLock::new(refresh_token)),
             expires_at: Arc::new(RwLock::new(expires_at)),
             store: Arc::new(RwLock::new(Some(store))),
+            token_url: Arc::new(CLAUDE_TOKEN_URL.to_string()),
         }
     }
 
@@ -108,7 +119,7 @@ impl OAuthTokenCache {
                 .ok_or_else(|| anyhow::anyhow!("No refresh token available"))?
         };
 
-        let body = Self::fetch_new_token(&refresh_token).await?;
+        let body = Self::fetch_new_token(&self.token_url, &refresh_token).await?;
 
         let expires_in = body.expires_in.unwrap_or(3600) * 1000; // Convert to ms
         let new_expires = chrono::Utc::now().timestamp_millis() + expires_in;
@@ -139,11 +150,11 @@ impl OAuthTokenCache {
         Ok(())
     }
 
-    async fn fetch_new_token(refresh_token: &str) -> anyhow::Result<RefreshResponse> {
+    async fn fetch_new_token(url: &str, refresh_token: &str) -> anyhow::Result<RefreshResponse> {
         let client = crate::http::standard();
 
         let response = client
-            .post(CLAUDE_TOKEN_URL)
+            .post(url)
             .json(&serde_json::json!({
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
@@ -315,6 +326,77 @@ mod tests {
         assert_eq!(token, "tok");
         assert_eq!(refresh.as_deref(), Some("ref"));
         assert_eq!(expires, 99);
+    }
+
+    /// Serve one canned token response and record how many requests arrived.
+    async fn token_server(payload: Value) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&seen);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let body = payload.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+
+        (format!("http://{addr}/v1/oauth/token"), seen)
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_is_refreshed_rather_than_used() {
+        use std::sync::atomic::Ordering;
+
+        let (url, seen) = token_server(serde_json::json!({
+            "access_token": "fresh",
+            "refresh_token": "next-refresh",
+            "expires_in": 3600,
+        }))
+        .await;
+
+        let cache = OAuthTokenCache::new(
+            "stale".to_string(),
+            Some("refresh".to_string()),
+            chrono::Utc::now().timestamp_millis() - 1,
+        )
+        .with_token_url(url);
+
+        assert_eq!(cache.get_token().await.unwrap(), "fresh");
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        // The rotated refresh token replaces the old one, so the next refresh
+        // does not replay a token the server has already retired.
+        assert_eq!(
+            cache.refresh_token.read().await.as_deref(),
+            Some("next-refresh")
+        );
+        // Still valid, so a second call must not hit the endpoint again.
+        assert_eq!(cache.get_token().await.unwrap(), "fresh");
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_without_a_refresh_token_reports_why() {
+        let cache = OAuthTokenCache::new("stale".to_string(), None, 1);
+        let err = cache.get_token().await.unwrap_err().to_string();
+        assert!(err.contains("No refresh token available"), "got {err}");
     }
 
     #[test]
