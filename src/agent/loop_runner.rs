@@ -222,6 +222,16 @@ impl AgentRunner {
         self.cost_tracker.summary().await
     }
 
+    /// The name of the provider currently backing model calls.
+    pub fn provider_name(&self) -> &str {
+        self.provider.name()
+    }
+
+    /// The conversation store, for callers that need to read or clear history.
+    pub fn memory(&self) -> &Arc<dyn MemoryBackend> {
+        &self.memory
+    }
+
     pub fn get_model(&self) -> String {
         self.model.read().unwrap().clone()
     }

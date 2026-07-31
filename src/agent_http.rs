@@ -32,13 +32,10 @@ pub struct ChatResponseBody {
 }
 
 /// Everything a client needs to render a status bar.
-///
-/// Fields the running agent cannot report are absent rather than zeroed:
-/// `AgentRunner` keeps its memory backend private, so per-chat message counts
-/// and the provider name are not observable from here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateBody {
     pub model: String,
+    pub provider: String,
     pub engine: String,
     pub mode: String,
     pub cost_usd: f64,
@@ -52,6 +49,9 @@ pub struct StateBody {
     /// should measure against, not the provider's hard window.
     pub context_window: usize,
     pub context_pct: u8,
+    /// Stored messages for the chat this state was asked about — `chat_id` on
+    /// the query string, or the default chat when it is absent.
+    pub message_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +61,12 @@ pub struct ModelRequestBody {
 
 #[derive(Debug, Deserialize)]
 pub struct ChatIdRequestBody {
+    #[serde(default = "default_chat_id")]
+    pub chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChatIdQuery {
     #[serde(default = "default_chat_id")]
     pub chat_id: String,
 }
@@ -82,8 +88,20 @@ fn context_percent(used: usize, window: usize) -> u8 {
     ((used * 100) / window).min(100) as u8
 }
 
-pub async fn build_state(runner: &AgentRunner) -> StateBody {
+/// How many stored messages to count before giving up.
+///
+/// A count is a status-bar decoration; reading an unbounded conversation to
+/// produce it is not worth the query.
+const MESSAGE_COUNT_CAP: usize = 10_000;
+
+pub async fn build_state(runner: &AgentRunner, chat_id: &str) -> StateBody {
     let summary = runner.get_cost_summary().await;
+    let message_count = runner
+        .memory()
+        .get_conversation_history(chat_id, MESSAGE_COUNT_CAP)
+        .await
+        .map(|history| history.len())
+        .unwrap_or(0);
     let context_tokens = runner
         .cost_tracker()
         .history(1)
@@ -94,6 +112,7 @@ pub async fn build_state(runner: &AgentRunner) -> StateBody {
     let context_window = runner.agent_config.max_context_chars / 4;
     StateBody {
         model: runner.get_model(),
+        provider: runner.provider_name().to_string(),
         engine: match runner.agent_config.engine() {
             crate::config::AgentEngine::Rx4 => "rx4".into(),
             crate::config::AgentEngine::Legacy => "legacy".into(),
@@ -105,6 +124,7 @@ pub async fn build_state(runner: &AgentRunner) -> StateBody {
         context_tokens,
         context_window,
         context_pct: context_percent(context_tokens, context_window),
+        message_count,
     }
 }
 
@@ -323,14 +343,16 @@ async fn chat_handler(
 
 async fn state_handler(
     State(runner): State<Arc<AgentRunner>>,
+    axum::extract::Query(query): axum::extract::Query<ChatIdQuery>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<StateBody>, StatusCode> {
     authorize(&headers)?;
-    Ok(Json(build_state(&runner).await))
+    Ok(Json(build_state(&runner, &query.chat_id).await))
 }
 
 async fn model_handler(
     State(runner): State<Arc<AgentRunner>>,
+    axum::extract::Query(query): axum::extract::Query<ChatIdQuery>,
     headers: axum::http::HeaderMap,
     Json(body): Json<ModelRequestBody>,
 ) -> Result<Json<StateBody>, StatusCode> {
@@ -345,7 +367,7 @@ async fn model_handler(
         runner.set_model(model);
     }
     tracing::info!("model switched over HTTP to {}", runner.get_model());
-    Ok(Json(build_state(&runner).await))
+    Ok(Json(build_state(&runner, &query.chat_id).await))
 }
 
 /// Why compaction and history clearing are not served yet.
@@ -552,6 +574,7 @@ mod tests {
     fn state_round_trips_through_json_with_every_field() {
         let state = StateBody {
             model: "claude-sonnet-4-5".into(),
+            provider: "anthropic".into(),
             engine: "legacy".into(),
             mode: "auto".into(),
             cost_usd: 0.25,
@@ -560,11 +583,13 @@ mod tests {
             context_tokens: 8000,
             context_window: 32_000,
             context_pct: 25,
+            message_count: 12,
         };
         let json = serde_json::to_string(&state).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         for key in [
             "model",
+            "provider",
             "engine",
             "mode",
             "cost_usd",
@@ -573,6 +598,7 @@ mod tests {
             "context_tokens",
             "context_window",
             "context_pct",
+            "message_count",
         ] {
             assert!(value.get(key).is_some(), "missing field: {key}");
         }
