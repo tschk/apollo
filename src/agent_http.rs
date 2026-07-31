@@ -218,13 +218,8 @@ pub fn load_or_create_token() -> anyhow::Result<String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, &token)?;
     // Readable only by the owner — anyone who can read it can drive the agent.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    crate::fs_secure::write_secret_file(&path, &token)?;
     tracing::info!("wrote a new apollo HTTP token to {}", path.display());
     Ok(token)
 }

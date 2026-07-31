@@ -725,13 +725,7 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
 
 /// Write a secrets file readable only by its owner.
 fn write_private(path: &Path, content: &str) -> anyhow::Result<()> {
-    std::fs::write(path, content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    apollo::fs_secure::write_secret_file(path, content)
 }
 
 /// Run the wizard when there is no config yet, so a bare `apollo` sets itself
