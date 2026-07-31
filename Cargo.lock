@@ -6770,9 +6770,9 @@ dependencies = [
 
 [[package]]
 name = "rs_ai_oauth"
-version = "0.2.24"
+version = "0.2.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01440df75a8d302ca03931374b2eea0c1ce5e582cb632dc59039a1d0bc27dbb8"
+checksum = "252b80d4223c624339627458f54661ceda4dad3d8f4c8b51558c48c172465e65"
 dependencies = [
  "oauth2",
  "reqwest",
