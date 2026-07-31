@@ -206,24 +206,87 @@ impl CronScheduler {
         }
     }
 
+    /// Look up a job by id or name.
+    async fn find(&self, id_or_name: &str) -> anyhow::Result<Option<CronJob>> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .find(|job| job.id.as_deref() == Some(id_or_name) || job.name == id_or_name))
+    }
+
     /// Enable a cron job.
+    ///
+    /// Enabling is the documented recovery from a dead status, so it also
+    /// recomputes `next_run` and clears the status. Setting `enabled = true`
+    /// alone leaves a job matching no branch of the due query while `list`
+    /// reports it as enabled.
     pub async fn enable(&self, id_or_name: &str) -> anyhow::Result<bool> {
+        let Some(job) = self.find(id_or_name).await? else {
+            return Ok(false);
+        };
+
+        // A running job owns a lease; do not disturb its schedule state.
+        let revived = if job.status == "running" {
+            None
+        } else if job.one_shot || job.schedule.is_empty() {
+            let pending = job
+                .next_run
+                .as_deref()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .is_some_and(|t| t > chrono::Utc::now());
+            if !pending {
+                anyhow::bail!(
+                    "cannot enable one-shot job {id_or_name:?}: its run time has already passed"
+                );
+            }
+            Some(job.next_run.clone())
+        } else {
+            let parsed = cron::Schedule::from_str(&job.schedule).map_err(|e| {
+                anyhow::anyhow!(
+                    "cannot enable {id_or_name:?}: invalid cron expression {:?}: {e}",
+                    job.schedule
+                )
+            })?;
+            let next = parsed.upcoming(chrono::Utc).next().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot enable {id_or_name:?}: cron expression {:?} has no future occurrences",
+                    job.schedule
+                )
+            })?;
+            Some(Some(next.to_rfc3339()))
+        };
+
         if let Some(ref memory) = self.memory {
             let db = memory.db().await?;
+            let query = if revived.is_some() {
+                "UPDATE cron_jobs SET enabled = true, status = 'active', next_run = $next, retry_count = 0, last_error = NONE WHERE id = $target OR name = $target"
+            } else {
+                "UPDATE cron_jobs SET enabled = true WHERE id = $target OR name = $target"
+            };
             let mut result: surrealdb::Response = db
-                .query("UPDATE cron_jobs SET enabled = true WHERE id = $target OR name = $target")
+                .query(query)
                 .bind(("target", id_or_name.to_string()))
+                .bind(("next", revived.clone().unwrap_or_default()))
                 .await?;
             let updated: Vec<CronJob> = result.take(0)?;
             Ok(!updated.is_empty())
         } else {
             let mut jobs = self.noop_jobs.lock().unwrap();
-            if let Some(job) = jobs.iter_mut().find(|j| j.name == id_or_name) {
-                job.enabled = true;
-                Ok(true)
-            } else {
-                Ok(false)
+            let Some(job) = jobs
+                .iter_mut()
+                .find(|j| j.id.as_deref() == Some(id_or_name) || j.name == id_or_name)
+            else {
+                return Ok(false);
+            };
+            job.enabled = true;
+            if let Some(next_run) = revived {
+                job.next_run = next_run;
+                job.status = "active".to_string();
+                job.retry_count = 0;
+                job.last_error = None;
             }
+            Ok(true)
         }
     }
 
@@ -239,7 +302,10 @@ impl CronScheduler {
             Ok(!updated.is_empty())
         } else {
             let mut jobs = self.noop_jobs.lock().unwrap();
-            if let Some(job) = jobs.iter_mut().find(|j| j.name == id_or_name) {
+            if let Some(job) = jobs
+                .iter_mut()
+                .find(|j| j.id.as_deref() == Some(id_or_name) || j.name == id_or_name)
+            {
                 job.enabled = false;
                 Ok(true)
             } else {
@@ -603,6 +669,59 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(scheduler.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn enable_revives_a_job_left_with_a_dead_status() {
+        let scheduler = CronScheduler::new_noop();
+        let mut job = due_job("cli");
+        job.schedule = "0 0 * * * * *".to_string();
+        job.status = "exhausted".to_string();
+        job.next_run = None;
+        job.last_error = Some("dead".to_string());
+        scheduler.noop_jobs.lock().unwrap().push(job);
+
+        assert!(scheduler.disable("job-1").await.unwrap());
+        assert!(scheduler.enable("job-1").await.unwrap());
+
+        let job = scheduler.list().await.unwrap().remove(0);
+        assert!(job.enabled);
+        assert_eq!(
+            job.status, "active",
+            "enable must clear a recoverable status"
+        );
+        assert!(job.next_run.is_some(), "enable must recompute next_run");
+        assert!(job.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn enable_fails_loudly_when_the_schedule_cannot_produce_a_next_run() {
+        let scheduler = CronScheduler::new_noop();
+        let mut job = due_job("cli");
+        job.schedule = "0 0 12 1 1 * 2020".to_string();
+        job.status = "exhausted".to_string();
+        job.next_run = None;
+        scheduler.noop_jobs.lock().unwrap().push(job);
+
+        let error = scheduler
+            .enable("job-1")
+            .await
+            .expect_err("a job that cannot be revived must not report success");
+        assert!(
+            error.to_string().contains("no future occurrences"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enable_leaves_a_running_job_alone() {
+        let scheduler = CronScheduler::new_noop();
+        scheduler.noop_jobs.lock().unwrap().push(due_job("cli"));
+        let claimed = scheduler.claim_due_jobs("cli").await.unwrap().remove(0);
+        assert!(scheduler.enable("job-1").await.unwrap());
+        let job = scheduler.list().await.unwrap().remove(0);
+        assert_eq!(job.status, "running");
+        assert_eq!(job.run_token, claimed.run_token);
     }
 
     #[tokio::test]
