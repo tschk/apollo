@@ -190,29 +190,149 @@ impl Tool for ShellTool {
 }
 
 /// Helper: block catastrophic commands like `rm -rf /` or `mkfs`.
+///
+/// ponytail: a typo-and-accident guard, not a security boundary. A determined
+/// caller can always evade it (`eval`, base64, a shell script, an alias), so
+/// the real controls are `policy.allow_shell` and the permission hooks. Keep
+/// this cheap and obvious rather than growing it into a pattern zoo that
+/// invites misplaced trust.
 fn check_catastrophic_command(cmd: &str) -> Option<&'static str> {
     let lower = cmd.to_lowercase();
 
-    // rm -rf / or similar
-    if (lower.contains("rm ")
-        && lower.contains("-rf")
-        && (lower.contains(" /") || lower.contains(" *")))
-        || (lower.contains("rm ")
-            && lower.contains("-fr")
-            && (lower.contains(" /") || lower.contains(" *")))
+    // Whitespace-insensitive, so reflowed variants still match.
+    if lower
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .contains(":(){:|:&};:")
     {
-        return Some("Destructive recursive delete on root or wildcard.");
-    }
-
-    // Disk formatting
-    if lower.contains("mkfs") || lower.contains("fdisk") || lower.contains("dd if=") {
-        return Some("Disk formatting or low-level block write.");
-    }
-
-    // Fork bomb
-    if lower.contains(":(){ :|:& };:") {
         return Some("Fork bomb.");
     }
 
-    None
+    // Check each command in a pipeline or list separately, so the target of an
+    // `rm` is not confused with an argument to something else.
+    lower
+        .split(['&', '|', ';', '\n'])
+        .find_map(check_catastrophic_segment)
+}
+
+/// Paths whose recursive deletion destroys the machine or the whole workspace.
+///
+/// Trailing slashes and globs are stripped first, so `/`, `/*` and `/ *` all
+/// reduce to the same root target, while `./build` and `*.log` do not.
+fn is_catastrophic_target(token: &str) -> bool {
+    matches!(
+        token.trim_end_matches(['*', '/']),
+        "" | "." | "~" | "$home" | "${home}"
+    )
+}
+
+fn check_catastrophic_segment(segment: &str) -> Option<&'static str> {
+    let mut tokens = segment.split_whitespace();
+    let program = tokens.next()?;
+    // Strip any path prefix so `/bin/rm` is treated as `rm`.
+    let program = program.rsplit('/').next().unwrap_or(program);
+    let args: Vec<&str> = tokens.collect();
+
+    if program.starts_with("mkfs") || program == "fdisk" {
+        return Some("Disk formatting or low-level block write.");
+    }
+
+    if program == "dd" {
+        if args
+            .iter()
+            .any(|a| a.starts_with("of=/dev/") || a.starts_with("if=/dev/"))
+        {
+            return Some("Disk formatting or low-level block write.");
+        }
+        return None;
+    }
+
+    if program != "rm" {
+        return None;
+    }
+
+    let recursive = args.iter().any(|a| {
+        *a == "--recursive" || (a.starts_with('-') && !a.starts_with("--") && a.contains('r'))
+    });
+    if !recursive {
+        return None;
+    }
+
+    if args.contains(&"--no-preserve-root") {
+        return Some("Destructive recursive delete on root or wildcard.");
+    }
+
+    let targets_root = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .any(|a| is_catastrophic_target(a));
+
+    targets_root.then_some("Destructive recursive delete on root or wildcard.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_catastrophic_command;
+
+    #[test]
+    fn blocks_recursive_deletes_of_root_in_any_flag_form() {
+        for cmd in [
+            "rm -rf /",
+            "rm -rf /*",
+            "rm -fr /",
+            "rm -r -f /",
+            "rm --recursive --force /",
+            "rm  -rf  /",
+            "rm -rf ~",
+            "rm -rf ~/",
+            "rm -rf $HOME",
+            "rm -rf .",
+            "rm -rf *",
+            "/bin/rm -rf /",
+            "rm -r --no-preserve-root /tmp/x",
+            "echo hi && rm -rf /",
+        ] {
+            assert!(
+                check_catastrophic_command(cmd).is_some(),
+                "should have blocked: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocks_disk_writes_and_fork_bombs() {
+        for cmd in [
+            "mkfs.ext4 /dev/sda1",
+            "fdisk /dev/sda",
+            "dd if=/dev/zero of=/dev/sda",
+            "dd of=/dev/sda if=/dev/zero",
+            ":(){ :|:& };:",
+            ":(){:|:&};:",
+        ] {
+            assert!(
+                check_catastrophic_command(cmd).is_some(),
+                "should have blocked: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_ordinary_work() {
+        for cmd in [
+            "rm -rf ./build",
+            "rm -rf target",
+            "rm -rf node_modules",
+            "rm file.txt",
+            "cargo build --release",
+            "dd if=input.img of=output.img",
+            "git status",
+            "grep -r 'rm -rf /' src",
+        ] {
+            assert!(
+                check_catastrophic_command(cmd).is_none(),
+                "should have allowed: {cmd}"
+            );
+        }
+    }
 }
