@@ -256,6 +256,36 @@ enum Commands {
 
     /// Launch the desktop UI (apollo-ui)
     Ui,
+
+    /// Run the agent headless, serving only the HTTP/WS API
+    Serve {
+        /// Configuration file path
+        #[arg(short, long, default_value = "apollo.json")]
+        config: String,
+
+        /// Override the model
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Workspace directory
+        #[arg(short, long)]
+        workspace: Option<PathBuf>,
+    },
+
+    /// Launch the terminal UI, starting a background server if none is running
+    Tui {
+        /// Configuration file path
+        #[arg(short, long, default_value = "apollo.json")]
+        config: String,
+
+        /// Override the model
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Workspace directory
+        #[arg(short, long)]
+        workspace: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -438,17 +468,46 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default();
     init_tracing(&tracing_cfg)?;
 
-    // Hermes-style: bare `apollo` starts interactive chat.
-    let command = cli.command.unwrap_or(Commands::Chat {
-        config: "apollo.json".into(),
-        model: None,
-        workspace: None,
-        channel: "cli".into(),
-        telegram_token: None,
-        telegram_chat_id: None,
-        discord_token: None,
-        discord_channel_id: None,
-    });
+    // ponytail: `serve` is `chat` with a channel that never reads stdin, so the
+    // whole runner/tool/plugin setup below is shared verbatim.
+    let command = match cli.command {
+        Some(Commands::Serve {
+            config,
+            model,
+            workspace,
+        }) => Some(Commands::Chat {
+            config,
+            model,
+            workspace,
+            channel: "none".into(),
+            telegram_token: None,
+            telegram_chat_id: None,
+            discord_token: None,
+            discord_channel_id: None,
+        }),
+        other => other,
+    };
+
+    // Hermes-style: bare `apollo` opens the TUI against a background server,
+    // falling back to the line-based CLI chat where apollo-tui isn't installed.
+    let command = match command {
+        Some(command) => command,
+        None if find_sibling_binary("apollo-tui").await.is_some() => Commands::Tui {
+            config: "apollo.json".into(),
+            model: None,
+            workspace: None,
+        },
+        None => Commands::Chat {
+            config: "apollo.json".into(),
+            model: None,
+            workspace: None,
+            channel: "cli".into(),
+            telegram_token: None,
+            telegram_chat_id: None,
+            discord_token: None,
+            discord_channel_id: None,
+        },
+    };
 
     match command {
         Commands::Chat {
@@ -706,9 +765,25 @@ async fn main() -> anyhow::Result<()> {
                         runner_arc.run(&mut ch).await?;
                     }
                 }
+                "none" => {
+                    println!(
+                        "apollo v{} — {} via {}",
+                        env!("CARGO_PKG_VERSION"),
+                        cfg.model,
+                        cfg.provider.name
+                    );
+                    println!("   Workspace: {}", workspace.display());
+                    println!(
+                        "   Agent HTTP: http://{}/v1/chat (APOLLO_HTTP_PORT)",
+                        apollo::agent_http::http_listen_addr()
+                    );
+                    // ponytail: headless park. No cron/heartbeat here — wire them
+                    // in if `apollo serve` ever needs to outlive an attached client.
+                    std::future::pending::<()>().await;
+                }
                 other => {
                     anyhow::bail!(
-                        "Unknown channel: {} (supported: cli, telegram, discord)",
+                        "Unknown channel: {} (supported: cli, telegram, discord, none)",
                         other
                     );
                 }
@@ -1660,6 +1735,16 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ui => {
             launch_apollo_ui().await?;
         }
+
+        Commands::Tui {
+            config,
+            model,
+            workspace,
+        } => {
+            launch_apollo_tui(config, model, workspace).await?;
+        }
+
+        Commands::Serve { .. } => unreachable!("rewritten to Chat above"),
     }
 
     Ok(())
@@ -1684,6 +1769,90 @@ async fn launch_apollo_ui() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn server_healthy() -> bool {
+    let url = format!("http://{}/health", apollo::agent_http::http_listen_addr());
+    reqwest::Client::new()
+        .get(url)
+        .timeout(std::time::Duration::from_millis(500))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+async fn launch_apollo_tui(
+    config: String,
+    model: Option<String>,
+    workspace: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let binary = find_sibling_binary("apollo-tui").await.ok_or_else(|| {
+        eprintln!("apollo-tui binary not found.");
+        eprintln!("  cargo build --release -p apollo-tui");
+        anyhow::anyhow!("apollo-tui binary not found")
+    })?;
+
+    // ponytail: reuse an already-running server rather than owning a pidfile.
+    let mut server = None;
+    if !server_healthy().await {
+        let exe = std::env::current_exe()?;
+        let mut cmd = tokio::process::Command::new(exe);
+        cmd.arg("serve").arg("--config").arg(&config);
+        if let Some(model) = &model {
+            cmd.arg("--model").arg(model);
+        }
+        if let Some(workspace) = &workspace {
+            cmd.arg("--workspace").arg(workspace);
+        }
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let child = cmd.spawn()?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !server_healthy().await {
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!("background apollo serve did not become healthy in 30s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        server = Some(child);
+    }
+
+    let status = tokio::process::Command::new(&binary)
+        .current_dir(std::env::current_dir()?)
+        .status()
+        .await?;
+
+    if let Some(mut child) = server.take() {
+        let _ = child.kill().await;
+    }
+
+    if !status.success() {
+        anyhow::bail!("apollo-tui exited with status: {status}");
+    }
+    Ok(())
+}
+
+async fn find_sibling_binary(name: &str) -> Option<PathBuf> {
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(dir) = current.parent() {
+            let sibling = dir.join(name);
+            if sibling.is_file() {
+                return Some(sibling);
+            }
+        }
+    }
+
+    let on_path = tokio::process::Command::new("which")
+        .arg(name)
+        .output()
+        .await
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    on_path.then(|| PathBuf::from(name))
 }
 
 async fn find_apollo_ui_binary() -> Option<PathBuf> {
@@ -1833,7 +2002,9 @@ fn config_path_for_cli(cli: &Cli) -> Option<String> {
         | Some(Commands::Audit { config, .. })
         | Some(Commands::SelfUpdate { config, .. })
         | Some(Commands::Mcp { config, .. })
-        | Some(Commands::Autonomous { config, .. }) => Some(config.clone()),
+        | Some(Commands::Autonomous { config, .. })
+        | Some(Commands::Serve { config, .. })
+        | Some(Commands::Tui { config, .. }) => Some(config.clone()),
         Some(_) => None,
     }
 }

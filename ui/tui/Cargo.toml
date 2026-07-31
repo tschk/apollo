@@ -1,0 +1,20 @@
+[package]
+name = "apollo-tui"
+version = "0.2.2"
+edition = "2021"
+license = "MPL-2.0"
+description = "Terminal UI for apollo-agent (crepuscularity-tui + ratatui)"
+repository = "https://github.com/tschk/apollo"
+publish = false
+
+[[bin]]
+name = "apollo-tui"
+path = "src/main.rs"
+
+[dependencies]
+crepuscularity-tui = "0.4.22"
+crossterm = "0.28"
+anyhow = "1"
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+tungstenite = "0.24"

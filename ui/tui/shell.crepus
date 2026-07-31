@@ -1,0 +1,40 @@
+div w-full h-fit flex-col
+  div h-fit flex-col px-1
+    for message in {live}
+      if {is_tool}
+        div h-fit flex-col
+          span text-xs text-zinc-500
+            "| {tool_name}"
+          for line in {lines}
+            span text-xs text-zinc-500
+              "  {text}"
+      else if {is_user}
+        div h-fit flex-col
+          for line in {lines}
+            span text-sm text-blue-400
+              "{text}"
+      else
+        div h-fit flex-col
+          for line in {lines}
+            span text-sm text-zinc-200
+              "{text}"
+
+  div h-fit flex-col px-1
+    span text-sm text-{input_color}
+      "› {input}{cursor}"
+
+  div h-fit flex-col px-1
+    div flex-row gap-2
+      if {busy}
+        span w-fit text-xs text-amber-400
+          "{spinner} {status}"
+      else
+        span w-fit text-xs text-zinc-600
+          "{status}"
+    div flex-row gap-2
+      span w-fit text-xs text-indigo-400
+        "{model} · {engine}"
+      span w-fit text-xs text-{conn_color}
+        "· {conn}"
+      span w-fit text-xs text-zinc-600
+        "· {project}"
