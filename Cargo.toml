@@ -14,7 +14,7 @@ repository = "https://github.com/tschk/apollo"
 homepage = "https://github.com/tschk/apollo"
 keywords = ["agent", "ai", "llm", "telegram", "automation"]
 categories = ["command-line-utilities", "web-programming::http-client"]
-exclude = [".cursor/"]
+exclude = ["/.cursor/", "/memory/", "/USER.md", "/SOUL.md", "/IDENTITY.md", "/MEMORY.md", "/NOW.md", "/HEARTBEAT.md", "/gemini.md", "/apollo.json", "/reminder_system.v"]
 
 [[bin]]
 name = "apollo"
