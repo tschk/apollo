@@ -17,7 +17,6 @@ pub struct Config {
     pub hosting: HostingConfig,
     pub observability: ObservabilityConfig,
     pub channel: ChannelConfig,
-    pub gateway: GatewayConfig,
     pub policy: PolicyConfig,
     pub plugin_layer: PluginLayerConfig,
     pub group_chat: GroupChatConfig,
@@ -186,19 +185,6 @@ pub struct ChannelConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GatewayConfig {
-    pub bind: String,
-    pub auth_token: Option<String>,
-    pub enable_admin_api: bool,
-    pub request_body_limit_kb: usize,
-    pub request_timeout_secs: u64,
-    pub rate_limit_per_minute: usize,
-    pub trusted_proxies: Vec<String>,
-    pub allowed_origins: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
 pub struct PolicyConfig {
     pub allow_shell: bool,
     pub allow_dynamic_tools: bool,
@@ -363,7 +349,6 @@ impl Config {
             hosting: HostingConfig::default(),
             observability: ObservabilityConfig::default(),
             channel: ChannelConfig::default(),
-            gateway: GatewayConfig::default(),
             policy: PolicyConfig::default(),
             plugin_layer: PluginLayerConfig::default(),
             group_chat: GroupChatConfig::default(),
@@ -465,21 +450,6 @@ impl Default for ChannelConfig {
             token: None,
             allowed_chat_ids: Vec::new(),
             allowed_sender_ids: Vec::new(),
-        }
-    }
-}
-
-impl Default for GatewayConfig {
-    fn default() -> Self {
-        Self {
-            bind: "127.0.0.1:8080".to_string(),
-            auth_token: None,
-            enable_admin_api: false,
-            request_body_limit_kb: 512,
-            request_timeout_secs: 60,
-            rate_limit_per_minute: 120,
-            trusted_proxies: Vec::new(),
-            allowed_origins: Vec::new(),
         }
     }
 }

@@ -45,7 +45,6 @@ pub struct Finding {
 pub struct ToolClassification {
     pub name: String,
     pub risk: Severity,
-    pub denied_over_gateway_http_by_default: bool,
     pub approval_required: bool,
 }
 
@@ -82,99 +81,12 @@ pub fn classify_tool(name: &str) -> ToolClassification {
     ToolClassification {
         name: name.to_string(),
         risk,
-        denied_over_gateway_http_by_default: denied,
         approval_required: approval,
     }
 }
 
 pub fn audit_config(cfg: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let bind = cfg.gateway.bind.trim();
-    let is_loopback = is_loopback_bind(bind);
-    let auth_token = cfg.gateway.auth_token.as_deref().unwrap_or("").trim();
-    let has_auth = !auth_token.is_empty();
-
-    if !is_loopback && !has_auth {
-        findings.push(Finding {
-            code: "gateway_bind_no_auth",
-            severity: Severity::Critical,
-            title: "Gateway binds beyond loopback without auth",
-            detail: format!("gateway.bind=\"{bind}\" but no gateway.auth_token is configured."),
-            remediation: Some("Bind to localhost or configure a long random bearer token.".into()),
-        });
-    } else if is_loopback && !has_auth {
-        findings.push(Finding {
-            code: "gateway_loopback_no_auth",
-            severity: Severity::Warn,
-            title: "Gateway auth missing on loopback",
-            detail: "The gateway is loopback-only, but any local process can call it without a bearer token."
-                .into(),
-            remediation: Some("Set gateway.auth_token even for local-only deployments.".into()),
-        });
-    }
-
-    if has_auth && auth_token.len() < 24 {
-        findings.push(Finding {
-            code: "gateway_token_short",
-            severity: Severity::Warn,
-            title: "Gateway token looks short",
-            detail: format!(
-                "gateway.auth_token is only {} characters; use a long random token.",
-                auth_token.len()
-            ),
-            remediation: Some("Use at least 24 random characters.".into()),
-        });
-    }
-
-    if cfg.gateway.enable_admin_api {
-        findings.push(Finding {
-            code: "gateway_admin_api_enabled",
-            severity: if is_loopback {
-                Severity::Warn
-            } else {
-                Severity::Critical
-            },
-            title: "Gateway admin API is enabled",
-            detail: "Admin endpoints for memory/tools/swarm/plugins are enabled. This should stay disabled unless you are intentionally exposing a control-plane surface.".into(),
-            remediation: Some("Keep gateway.enable_admin_api=false unless you are actively wiring and securing those endpoints.".into()),
-        });
-    }
-
-    if cfg.gateway.rate_limit_per_minute == 0 {
-        findings.push(Finding {
-            code: "gateway_rate_limit_disabled",
-            severity: Severity::Warn,
-            title: "Gateway rate limiting is disabled",
-            detail: "gateway.rate_limit_per_minute is 0, so authenticated clients can send unlimited requests.".into(),
-            remediation: Some("Set a sane per-minute request limit for hosted deployments.".into()),
-        });
-    }
-
-    if cfg.gateway.request_timeout_secs > 300 {
-        findings.push(Finding {
-            code: "gateway_timeout_high",
-            severity: Severity::Warn,
-            title: "Gateway request timeout is unusually high",
-            detail: format!(
-                "gateway.request_timeout_secs is set to {} seconds.",
-                cfg.gateway.request_timeout_secs
-            ),
-            remediation: Some(
-                "Keep request timeouts bounded to reduce stuck sessions and resource exhaustion."
-                    .into(),
-            ),
-        });
-    }
-
-    if !is_loopback && cfg.gateway.allowed_origins.is_empty() {
-        findings.push(Finding {
-            code: "gateway_origins_unrestricted",
-            severity: Severity::Warn,
-            title: "Gateway allowed origins are unrestricted",
-            detail: "The gateway is not loopback-only and gateway.allowed_origins is empty.".into(),
-            remediation: Some("Set explicit allowed origins when exposing the gateway behind a browser-facing frontend.".into()),
-        });
-    }
 
     if cfg.policy.allow_shell {
         findings.push(Finding {
@@ -247,8 +159,7 @@ pub fn audit_config(cfg: &Config) -> Vec<Finding> {
             detail: "No API key is configured in the config or common environment variables."
                 .into(),
             remediation: Some(
-                "Set provider.api_key or export a provider API key before starting chat/gateway."
-                    .into(),
+                "Set provider.api_key or export a provider API key before starting chat.".into(),
             ),
         });
     }
@@ -328,27 +239,6 @@ pub async fn collect_doctor_report(
         } else {
             "No provider credentials detected".into()
         },
-        soft_warn: false,
-    });
-
-    checks.push(Check {
-        name: "Gateway bind".into(),
-        ok: is_loopback_bind(cfg.gateway.bind.trim()),
-        detail: cfg.gateway.bind.clone(),
-        soft_warn: false,
-    });
-
-    checks.push(Check {
-        name: "Gateway rate limit".into(),
-        ok: cfg.gateway.rate_limit_per_minute > 0,
-        detail: format!("{} req/min", cfg.gateway.rate_limit_per_minute),
-        soft_warn: false,
-    });
-
-    checks.push(Check {
-        name: "Gateway timeout".into(),
-        ok: cfg.gateway.request_timeout_secs > 0,
-        detail: format!("{}s", cfg.gateway.request_timeout_secs),
         soft_warn: false,
     });
 
@@ -472,15 +362,6 @@ fn local_bin_on_path() -> bool {
         .any(|entry| Path::new(entry) == local_bin.as_path())
 }
 
-fn is_loopback_bind(bind: &str) -> bool {
-    let host = if let Some(stripped) = bind.strip_prefix('[') {
-        stripped.split(']').next().unwrap_or(bind)
-    } else {
-        bind.rsplit_once(':').map(|(host, _)| host).unwrap_or(bind)
-    };
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
-}
-
 async fn check_cmd(cmd: &str) -> bool {
     tokio::process::Command::new("which")
         .arg(cmd)
@@ -493,105 +374,12 @@ async fn check_cmd(cmd: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-
-    #[test]
-    fn audit_flags_non_loopback_gateway_without_auth() {
-        let mut cfg = Config::default_config();
-        cfg.gateway.bind = "0.0.0.0:8080".into();
-        cfg.gateway.auth_token = None;
-        let findings = audit_config(&cfg);
-        assert!(findings.iter().any(|f| f.code == "gateway_bind_no_auth"));
-    }
 
     #[test]
     fn classify_exec_as_high_risk() {
         let tool = classify_tool("exec");
         assert_eq!(tool.risk, Severity::Critical);
-        assert!(tool.denied_over_gateway_http_by_default);
         assert!(tool.approval_required);
-    }
-
-    #[test]
-    fn audit_flags_loopback_gateway_without_auth() {
-        let mut cfg = Config::default_config();
-        cfg.gateway.bind = "127.0.0.1:8080".into();
-        cfg.gateway.auth_token = None;
-        let findings = audit_config(&cfg);
-        assert!(findings
-            .iter()
-            .any(|f| f.code == "gateway_loopback_no_auth" && f.severity == Severity::Warn));
-    }
-
-    #[test]
-    fn audit_flags_short_auth_token() {
-        let mut cfg = Config::default_config();
-        cfg.gateway.bind = "127.0.0.1:8080".into();
-        cfg.gateway.auth_token = Some("short".into());
-        let findings = audit_config(&cfg);
-        assert!(findings
-            .iter()
-            .any(|f| f.code == "gateway_token_short" && f.severity == Severity::Warn));
-    }
-
-    #[test]
-    fn audit_flags_admin_api_enabled_loopback() {
-        let mut cfg = Config::default_config();
-        cfg.gateway.bind = "127.0.0.1:8080".into();
-        cfg.gateway.auth_token = Some("a_very_long_auth_token_string_here_for_testing".into());
-        cfg.gateway.enable_admin_api = true;
-        let findings = audit_config(&cfg);
-        assert!(findings
-            .iter()
-            .any(|f| f.code == "gateway_admin_api_enabled" && f.severity == Severity::Warn));
-    }
-
-    #[test]
-    fn audit_flags_admin_api_enabled_non_loopback() {
-        let mut cfg = Config::default_config();
-        cfg.gateway.bind = "0.0.0.0:8080".into();
-        cfg.gateway.auth_token = Some("a_very_long_auth_token_string_here_for_testing".into());
-        cfg.gateway.enable_admin_api = true;
-        let findings = audit_config(&cfg);
-        assert!(findings
-            .iter()
-            .any(|f| f.code == "gateway_admin_api_enabled" && f.severity == Severity::Critical));
-    }
-
-    #[test]
-    fn audit_flags_rate_limit_disabled() {
-        let mut cfg = Config::default_config();
-        cfg.gateway.bind = "127.0.0.1:8080".into();
-        cfg.gateway.auth_token = Some("a_very_long_auth_token_string_here_for_testing".into());
-        cfg.gateway.rate_limit_per_minute = 0;
-        let findings = audit_config(&cfg);
-        assert!(findings
-            .iter()
-            .any(|f| f.code == "gateway_rate_limit_disabled" && f.severity == Severity::Warn));
-    }
-
-    #[test]
-    fn audit_flags_timeout_high() {
-        let mut cfg = Config::default_config();
-        cfg.gateway.bind = "127.0.0.1:8080".into();
-        cfg.gateway.auth_token = Some("a_very_long_auth_token_string_here_for_testing".into());
-        cfg.gateway.request_timeout_secs = 301;
-        let findings = audit_config(&cfg);
-        assert!(findings
-            .iter()
-            .any(|f| f.code == "gateway_timeout_high" && f.severity == Severity::Warn));
-    }
-
-    #[test]
-    fn audit_flags_origins_unrestricted() {
-        let mut cfg = Config::default_config();
-        cfg.gateway.bind = "0.0.0.0:8080".into();
-        cfg.gateway.auth_token = Some("a_very_long_auth_token_string_here_for_testing".into());
-        cfg.gateway.allowed_origins = vec![];
-        let findings = audit_config(&cfg);
-        assert!(findings
-            .iter()
-            .any(|f| f.code == "gateway_origins_unrestricted" && f.severity == Severity::Warn));
     }
 
     #[test]

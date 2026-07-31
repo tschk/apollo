@@ -84,9 +84,6 @@ src/
   embeddings.rs        — embedding provider trait
 ```
 
-> **Note:** `src/gateway/` exists on disk but is not declared as a module in
-> `lib.rs` — it is dormant code from the hosted-gateway era. Do not rely on it.
-
 ## 3) Engineering Principles
 
 ### 3.1 Async-First
