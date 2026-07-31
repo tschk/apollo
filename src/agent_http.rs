@@ -464,19 +464,26 @@ async fn handle_ws_chat(mut socket: WebSocket, runner: Arc<AgentRunner>) {
     let runner_bg = Arc::clone(&runner);
     let message = body.message.trim().to_string();
     let chat_id = body.chat_id.clone();
+    // Per-turn sink: a global one would cross-wire concurrent connections.
     let mut chat_task = tokio::spawn(async move {
-        runner_bg.set_stream_sink(Some(stream_tx));
-        let result = chat_once(&runner_bg, &message, &chat_id).await;
-        runner_bg.set_stream_sink(None);
-        result
+        crate::agent::stream::with_turn_sink(Some(stream_tx), async {
+            chat_once(&runner_bg, &message, &chat_id).await
+        })
+        .await
     });
+
+    // Once the client is gone we stop sending but keep draining, so the
+    // receiver outlives the still-running chat task.
+    let mut client_gone = false;
 
     loop {
         tokio::select! {
             Some(ev) = stream_rx.recv() => {
-                if let Ok(json) = serde_json::to_string(&ev) {
-                    if socket.send(Message::text(json)).await.is_err() {
-                        return;
+                if !client_gone {
+                    if let Ok(json) = serde_json::to_string(&ev) {
+                        if socket.send(Message::text(json)).await.is_err() {
+                            client_gone = true;
+                        }
                     }
                 }
             }
