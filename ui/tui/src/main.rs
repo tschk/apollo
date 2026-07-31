@@ -37,9 +37,15 @@ const MODEL_ROWS: usize = 5;
 /// endpoint to drive, so they are absent rather than inert. /compact is absent
 /// for the same reason: apollo compacts a turn's in-flight messages, never a
 /// stored chat, so there is nothing for a command to ask for.
-const COMMANDS: [(&str, &str); 8] = [
+const COMMANDS: [(&str, &str); 11] = [
     ("/help", "keys and commands"),
     ("/model", "switch model — no argument opens the selector"),
+    ("/config", "show config, or `/config <key> [value]`"),
+    (
+        "/login",
+        "which providers have a credential, and how to add one",
+    ),
+    ("/doctor", "run apollo's diagnostics"),
     ("/clear", "clear the transcript"),
     ("/cost", "spend and tokens so far"),
     ("/context", "context use against the compaction budget"),
@@ -71,6 +77,8 @@ struct Msg {
 enum UiEvent {
     Agent(AgentEvent),
     State(AgentState),
+    /// Output of a command that ran off the UI thread.
+    Note(String),
 }
 
 fn spinner_frame(start: Instant) -> &'static str {
@@ -224,6 +232,76 @@ fn model_catalogue() -> Vec<(String, Vec<String>)> {
     catalogue
 }
 
+/// The `apollo config` invocation a `/config` argument asks for.
+///
+/// A value keeps its spaces: only the key is split off.
+fn config_args(argument: &str) -> (&'static str, Vec<String>) {
+    let mut parts = argument.trim().splitn(2, char::is_whitespace);
+    let key = parts.next().unwrap_or("").trim().to_string();
+    let value = parts.next().unwrap_or("").trim().to_string();
+    match (key.is_empty(), value.is_empty()) {
+        (true, _) => ("reading config", vec!["config".into(), "list".into()]),
+        (false, true) => ("reading config", vec!["config".into(), "get".into(), key]),
+        (false, false) => (
+            "writing config",
+            vec!["config".into(), "set".into(), key, value],
+        ),
+    }
+}
+
+/// The credential picture, built from `apollo doctor --json`.
+///
+/// apollo has no OAuth flow of its own — logins come from `tk login` or from
+/// an existing Claude Code session, shared through `rs_ai_oauth`'s store — so
+/// this reports what is there and names the command that adds one, rather
+/// than pretending to open a browser.
+fn login_report(doctor_json: &str, tk_present: bool) -> String {
+    let checks = serde_json::from_str::<serde_json::Value>(doctor_json)
+        .ok()
+        .and_then(|v| v.get("checks").cloned());
+    let check = |name: &str| -> Option<(bool, String)> {
+        let list = checks.as_ref()?.as_array()?;
+        let found = list
+            .iter()
+            .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))?;
+        Some((
+            found.get("ok").and_then(|o| o.as_bool()).unwrap_or(false),
+            found
+                .get("detail")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string(),
+        ))
+    };
+
+    let mut text = String::from("logins:\n");
+    for (label, name) in [
+        ("shared store (rs_ai)", "Shared login (rs_ai)"),
+        ("provider credentials", "Provider credentials"),
+    ] {
+        match check(name) {
+            Some((ok, detail)) => {
+                let mark = if ok { "ok" } else { "--" };
+                text.push_str(&format!("  [{mark}] {label}: {detail}\n"));
+            }
+            None => text.push_str(&format!("  [??] {label}: not reported by apollo doctor\n")),
+        }
+    }
+
+    text.push_str("\napollo has no login flow of its own. to add one:\n");
+    if tk_present {
+        text.push_str(
+            "  run `tk login` in a shell — it is interactive and prompts for a\n  \
+             provider, so it cannot run inside this UI\n",
+        );
+    } else {
+        text.push_str("  install telekinesis (`tk`) and run `tk login` in a shell\n");
+    }
+    text.push_str("  or sign in with Claude Code — apollo reads that credential too\n");
+    text.push_str("tokens live in ~/.config/rs_ai/credentials/<provider>.json");
+    text
+}
+
 struct App {
     live: Vec<Msg>,
     scrollback: Vec<String>,
@@ -322,6 +400,37 @@ impl App {
         });
     }
 
+    /// Show command output through the terminal's own scrollback.
+    ///
+    /// `apollo config list` and `apollo doctor` print far more than the 12-row
+    /// inline viewport can hold, and anything left in `live` is clipped rather
+    /// than scrolled. Retiring first puts the whole thing in the terminal's
+    /// history, where it scrolls.
+    fn note_block(&mut self, text: &str) {
+        if !self.busy {
+            self.retire_live();
+        }
+        for line in text.lines() {
+            self.scrollback.push(line.to_string());
+        }
+        self.scrollback.push(String::new());
+    }
+
+    /// Run something slow off the UI thread and print whatever it returns.
+    ///
+    /// Every one of these shells out or talks HTTP; doing that inline would
+    /// freeze input and the redraw loop for the duration.
+    fn spawn_note<F>(&mut self, label: &str, job: F)
+    where
+        F: FnOnce() -> String + Send + 'static,
+    {
+        self.status = format!("{label}…");
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(UiEvent::Note(job()));
+        });
+    }
+
     /// Refresh model, engine, mode, cost and context from the running agent.
     fn refresh_state(&self) {
         let tx = self.tx.clone();
@@ -416,6 +525,18 @@ impl App {
                     self.apply_model(argument.to_string());
                 }
             }
+            "/config" => self.run_config(argument),
+            "/login" => self.spawn_note("checking logins", || {
+                let json = agent::run_apollo(&["doctor", "--json"])
+                    .unwrap_or_else(|e| format!("apollo doctor failed: {e}"));
+                login_report(&json, agent::on_path("tk"))
+            }),
+            "/doctor" => {
+                self.spawn_note("running doctor", || match agent::run_apollo(&["doctor"]) {
+                    Ok(text) => text,
+                    Err(e) => format!("doctor: {e}"),
+                })
+            }
             "/clear" => {
                 self.live.clear();
                 self.scrollback.clear();
@@ -447,6 +568,24 @@ impl App {
             }
             other => self.note(format!("unknown command: {other} — try /help")),
         }
+    }
+
+    /// `/config` → the whole file, `/config <key>` → one value,
+    /// `/config <key> <value>` → set it.
+    ///
+    /// The `apollo config` subcommand does the work, so the masking, schema
+    /// validation and atomic 0600 write are the same ones the CLI uses and a
+    /// secret never reaches the transcript.
+    fn run_config(&mut self, argument: &str) {
+        let (label, args) = config_args(argument);
+        self.spawn_note(label, move || {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            match agent::run_apollo(&args) {
+                Ok(text) if text.is_empty() => "config: no output".into(),
+                Ok(text) => text,
+                Err(e) => format!("config: {e}"),
+            }
+        });
     }
 
     fn apply_model(&mut self, model: String) {
@@ -783,6 +922,12 @@ fn run(app: &mut App, tpl: &mut Template, terminal: &mut Term) -> anyhow::Result
             match event {
                 UiEvent::Agent(event) => app.handle_event(event),
                 UiEvent::State(state) => app.apply_state(state),
+                UiEvent::Note(text) => {
+                    app.note_block(&text);
+                    if !app.busy {
+                        app.status = "ready".into();
+                    }
+                }
             }
         }
 
@@ -937,7 +1082,8 @@ mod tests {
     fn the_palette_only_offers_matching_commands() {
         assert!(palette_matches("hello").is_empty());
         assert!(palette_matches("/model claude").is_empty());
-        assert_eq!(palette_matches("/co").len(), 2);
+        // /config, /cost and /context.
+        assert_eq!(palette_matches("/co").len(), 3);
         assert!(palette_matches("/cos")
             .iter()
             .all(|(name, _)| *name == "/cost"));
@@ -1077,6 +1223,59 @@ mod tests {
         assert_eq!(a.mode, "coding");
         assert_eq!(context_color(a.context_pct), "red-400");
         assert!(a.online);
+    }
+
+    #[test]
+    fn config_splits_only_the_key_off_the_value() {
+        assert_eq!(config_args("").1, vec!["config", "list"]);
+        assert_eq!(config_args("   ").1, vec!["config", "list"]);
+        assert_eq!(
+            config_args("agent.engine").1,
+            vec!["config", "get", "agent.engine"]
+        );
+        assert_eq!(
+            config_args("system_prompt you are a helpful agent").1,
+            vec!["config", "set", "system_prompt", "you are a helpful agent"]
+        );
+    }
+
+    #[test]
+    fn the_login_report_names_the_command_that_adds_one() {
+        let json = r#"{"checks":[
+            {"name":"Shared login (rs_ai)","ok":true,"detail":"claude, grok"},
+            {"name":"Provider credentials","ok":true,"detail":"API credentials detected"}]}"#;
+        let text = login_report(json, true);
+        assert!(text.contains("[ok] shared store (rs_ai): claude, grok"));
+        assert!(text.contains("[ok] provider credentials: API credentials detected"));
+        assert!(text.contains("tk login"));
+
+        let missing = login_report(r#"{"checks":[]}"#, false);
+        assert!(missing.contains("not reported by apollo doctor"));
+        assert!(missing.contains("install telekinesis"));
+
+        // A doctor that could not run must not be reported as a login.
+        let broken = login_report("apollo doctor failed: boom", true);
+        assert!(broken.contains("not reported by apollo doctor"));
+    }
+
+    #[test]
+    fn command_output_goes_to_the_terminals_scrollback() {
+        let mut a = app();
+        a.note("in flight");
+        a.note_block("one\ntwo");
+        assert!(a.live.is_empty(), "live must be retired before a block");
+        assert_eq!(a.scrollback.last(), Some(&String::new()));
+        assert!(a.scrollback.contains(&"two".to_string()));
+    }
+
+    #[test]
+    fn a_block_arriving_mid_turn_leaves_the_live_message_alone() {
+        let mut a = app();
+        a.busy = true;
+        a.note("streaming");
+        a.note_block("late");
+        assert_eq!(a.live.len(), 1);
+        assert!(a.scrollback.contains(&"late".to_string()));
     }
 
     #[test]

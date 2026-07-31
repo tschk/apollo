@@ -243,6 +243,50 @@ fn ask_via_cli(prompt: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Run an `apollo` subcommand and return what it printed.
+///
+/// The CLI is the single implementation of `config`, `doctor` and friends —
+/// masking included — so the UI drives it rather than reimplementing it. This
+/// blocks on a child process, so callers must run it off the UI thread.
+#[allow(dead_code)]
+pub fn run_apollo(args: &[&str]) -> Result<String, String> {
+    let apollo = find_apollo_bin().ok_or_else(|| {
+        "apollo binary not found — install it, or put it next to apollo-tui".to_string()
+    })?;
+    let output = std::process::Command::new(apollo)
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run apollo: {e}"))?;
+    let out = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string();
+    let err = String::from_utf8_lossy(&output.stderr)
+        .trim_end()
+        .to_string();
+    if output.status.success() {
+        return Ok(if out.is_empty() { err } else { out });
+    }
+    let detail = if err.is_empty() { out } else { err };
+    Err(if detail.is_empty() {
+        format!("apollo {} failed", args.join(" "))
+    } else {
+        detail
+    })
+}
+
+/// True when `name` resolves to a file on `PATH`.
+#[allow(dead_code)]
+pub fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path).any(|dir| {
+                let candidate = dir.join(name);
+                candidate.is_file()
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn find_apollo_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
