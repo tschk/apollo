@@ -99,11 +99,11 @@ futures-util = "0.3"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1.1"
 
 # HTTP client + server (no unused features)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -137,13 +137,13 @@ parking_lot = "0.12"
 libc = "0.2"
 
 # Scheduling (Phase 4: cron)
-cron = "0.12"
+cron = "0.17"
 
 # Regular expressions (skill templates, etc.)
 regex = "1"
 
 # Home directory resolution
-dirs = "5.0"
+dirs = "6.0"
 praefectus = { version = "0.8.0", optional = true }
 ed25519-dalek = { version = "2.1", features = ["rand_core"], optional = true }
 zkr = { version = "0.4.1", optional = true }

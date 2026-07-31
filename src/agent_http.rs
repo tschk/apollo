@@ -407,7 +407,7 @@ async fn handle_ws_chat(mut socket: WebSocket, runner: Arc<AgentRunner>) {
     };
     let Ok(body) = serde_json::from_str::<ChatRequestBody>(&text) else {
         let _ = socket
-            .send(Message::Text(
+            .send(Message::text(
                 serde_json::json!({"type":"error","message":"invalid JSON"}).to_string(),
             ))
             .await;
@@ -415,7 +415,7 @@ async fn handle_ws_chat(mut socket: WebSocket, runner: Arc<AgentRunner>) {
     };
     if body.message.trim().is_empty() {
         let _ = socket
-            .send(Message::Text(
+            .send(Message::text(
                 serde_json::json!({"type":"error","message":"empty message"}).to_string(),
             ))
             .await;
@@ -437,7 +437,7 @@ async fn handle_ws_chat(mut socket: WebSocket, runner: Arc<AgentRunner>) {
         tokio::select! {
             Some(ev) = stream_rx.recv() => {
                 if let Ok(json) = serde_json::to_string(&ev) {
-                    if socket.send(Message::Text(json)).await.is_err() {
+                    if socket.send(Message::text(json)).await.is_err() {
                         return;
                     }
                 }
@@ -451,7 +451,7 @@ async fn handle_ws_chat(mut socket: WebSocket, runner: Arc<AgentRunner>) {
                         .unwrap_or_else(|_| {
                             serde_json::json!({"type":"done","response": response}).to_string()
                         });
-                        let _ = socket.send(Message::Text(payload)).await;
+                        let _ = socket.send(Message::text(payload)).await;
                     }
                     Ok(Err(e)) => {
                         let payload = serde_json::to_string(&AgentStreamEvent::Error {
@@ -460,11 +460,11 @@ async fn handle_ws_chat(mut socket: WebSocket, runner: Arc<AgentRunner>) {
                         .unwrap_or_else(|_| {
                             serde_json::json!({"type":"error","message": e.to_string()}).to_string()
                         });
-                        let _ = socket.send(Message::Text(payload)).await;
+                        let _ = socket.send(Message::text(payload)).await;
                     }
                     Err(e) => {
                         let payload = serde_json::json!({"type":"error","message": e.to_string()});
-                        let _ = socket.send(Message::Text(payload.to_string())).await;
+                        let _ = socket.send(Message::text(payload.to_string())).await;
                     }
                 }
                 break;
@@ -474,7 +474,7 @@ async fn handle_ws_chat(mut socket: WebSocket, runner: Arc<AgentRunner>) {
 
     while let Ok(ev) = stream_rx.try_recv() {
         if let Ok(json) = serde_json::to_string(&ev) {
-            let _ = socket.send(Message::Text(json)).await;
+            let _ = socket.send(Message::text(json)).await;
         }
     }
 }
