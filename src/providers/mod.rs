@@ -21,5 +21,8 @@ pub mod openai_compat;
 
 #[cfg(feature = "rs-ai")]
 pub mod rs_ai;
+// Shared login store, common to apollo and telekinesis.
+#[cfg(feature = "rs-ai")]
+pub mod shared_credentials;
 
 pub use traits::{ChatMessage, ChatRequest, ChatResponse, Provider, ToolCall};

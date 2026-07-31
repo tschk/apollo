@@ -24,16 +24,25 @@ struct RefreshResponse {
     expires_in: Option<i64>,
 }
 
+/// Where a cache's tokens came from, and so where a refreshed token is
+/// written back. Without this a long-running process refreshes in memory only
+/// and every restart starts from an expired token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TokenStore {
+    /// The store shared with telekinesis, via `rs_ai_oauth::credentials`.
+    #[cfg(feature = "rs-ai")]
+    Shared,
+    /// Claude Code's own `~/.claude/.credentials.json`.
+    ClaudeCode(PathBuf),
+}
+
 /// OAuth token cache (refreshed as needed)
 #[derive(Clone)]
 pub struct OAuthTokenCache {
     token: Arc<RwLock<Option<String>>>,
     refresh_token: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<i64>>,
-    /// Credentials file to write refreshed tokens back to, when the cache was
-    /// loaded from one. Without this a long-running process refreshes in
-    /// memory only and every restart starts from an expired token.
-    credentials_path: Arc<RwLock<Option<PathBuf>>>,
+    store: Arc<RwLock<Option<TokenStore>>>,
 }
 
 impl OAuthTokenCache {
@@ -42,21 +51,33 @@ impl OAuthTokenCache {
             token: Arc::new(RwLock::new(Some(initial_token))),
             refresh_token: Arc::new(RwLock::new(refresh_token)),
             expires_at: Arc::new(RwLock::new(expires_at)),
-            credentials_path: Arc::new(RwLock::new(None)),
+            store: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Build a cache from the Claude credentials file. Refreshed tokens are
-    /// written back to that same file.
-    pub fn from_credentials_file() -> anyhow::Result<Self> {
-        let path = claude_credentials_path()?;
-        let (token, refresh_token, expires_at) = load_oauth_token_from_path(&path)?;
-        Ok(Self {
+    fn from_parts(tokens: (String, Option<String>, i64), store: TokenStore) -> Self {
+        let (token, refresh_token, expires_at) = tokens;
+        Self {
             token: Arc::new(RwLock::new(Some(token))),
             refresh_token: Arc::new(RwLock::new(refresh_token)),
             expires_at: Arc::new(RwLock::new(expires_at)),
-            credentials_path: Arc::new(RwLock::new(Some(path))),
-        })
+            store: Arc::new(RwLock::new(Some(store))),
+        }
+    }
+
+    /// Build a cache from an on-disk login: the store shared with telekinesis
+    /// first, then Claude Code's own credentials file. Refreshed tokens are
+    /// written back to whichever one supplied them, so neither tool's login is
+    /// rewritten in the other's format.
+    pub fn from_credentials_file() -> anyhow::Result<Self> {
+        #[cfg(feature = "rs-ai")]
+        if let Some(tokens) = shared_claude_tokens() {
+            return Ok(Self::from_parts(tokens, TokenStore::Shared));
+        }
+
+        let path = claude_credentials_path()?;
+        let tokens = load_oauth_token_from_path(&path)?;
+        Ok(Self::from_parts(tokens, TokenStore::ClaudeCode(path)))
     }
 
     /// Get current token, refresh if expired
@@ -97,10 +118,20 @@ impl OAuthTokenCache {
         *self.refresh_token.write().await = Some(new_refresh.clone());
         *self.expires_at.write().await = new_expires;
 
-        if let Some(path) = self.credentials_path.read().await.clone() {
-            if let Err(e) =
-                persist_oauth_token(&path, &body.access_token, &new_refresh, new_expires)
-            {
+        if let Some(store) = self.store.read().await.clone() {
+            let persisted = match &store {
+                #[cfg(feature = "rs-ai")]
+                TokenStore::Shared => crate::providers::shared_credentials::save(
+                    rs_ai_oauth::OAuthProvider::Claude,
+                    &body.access_token,
+                    &new_refresh,
+                    new_expires,
+                ),
+                TokenStore::ClaudeCode(path) => {
+                    persist_oauth_token(path, &body.access_token, &new_refresh, new_expires)
+                }
+            };
+            if let Err(e) = persisted {
                 tracing::warn!("failed to persist refreshed OAuth token: {}", e);
             }
         }
@@ -179,8 +210,24 @@ pub fn claude_credentials_path() -> anyhow::Result<PathBuf> {
         .join(".credentials.json"))
 }
 
-/// Load OAuth token from Claude.dev credentials file
+/// Claude tokens from the store shared with telekinesis, if any.
+#[cfg(feature = "rs-ai")]
+fn shared_claude_tokens() -> Option<(String, Option<String>, i64)> {
+    crate::providers::shared_credentials::load(rs_ai_oauth::OAuthProvider::Claude)
+}
+
+/// Load OAuth token: the shared `rs_ai` store first, then Claude.dev's own
+/// credentials file.
+///
+/// Preferring the shared store means logging in once with either apollo or
+/// telekinesis serves both; falling back keeps every setup that predates the
+/// shared store working untouched.
 pub fn load_oauth_token_from_file() -> anyhow::Result<(String, Option<String>, i64)> {
+    #[cfg(feature = "rs-ai")]
+    if let Some(tokens) = shared_claude_tokens() {
+        return Ok(tokens);
+    }
+
     load_oauth_token_from_path(&claude_credentials_path()?)
 }
 

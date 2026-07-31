@@ -178,6 +178,7 @@ pub async fn collect_doctor_report(
     });
 
     checks.push(local_bin_path_check());
+    checks.push(shared_login_check());
 
     let provider_key_present = cfg.provider.api_key.is_some()
         || std::env::var("ANTHROPIC_API_KEY").is_ok()
@@ -283,6 +284,54 @@ fn is_workspace_writable(path: &Path) -> bool {
             true
         }
         Err(_) => false,
+    }
+}
+
+/// Which providers have a usable credential in the store shared with
+/// telekinesis, so "am I logged in?" is answerable without guessing.
+///
+/// Reports provider names and expiry only — never a token.
+#[cfg(feature = "rs-ai")]
+fn shared_login_check() -> Check {
+    let logins = crate::providers::shared_credentials::logins();
+    if logins.is_empty() {
+        return Check {
+            name: "Shared login (rs_ai)".into(),
+            ok: false,
+            detail: "no provider logged in to the shared credential store".into(),
+            soft_warn: true,
+        };
+    }
+
+    let detail = logins
+        .iter()
+        .map(|login| match (login.expired, login.refreshable) {
+            (false, _) => login.provider.to_string(),
+            (true, true) => format!("{} (expired, refreshable)", login.provider),
+            (true, false) => format!("{} (expired)", login.provider),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Expired-but-refreshable is a working login: the provider refreshes it on
+    // first use. Only a dead, unrefreshable token means the user must log in
+    // again.
+    let usable = logins.iter().any(|l| !l.expired || l.refreshable);
+    Check {
+        name: "Shared login (rs_ai)".into(),
+        ok: usable,
+        detail,
+        soft_warn: !usable,
+    }
+}
+
+#[cfg(not(feature = "rs-ai"))]
+fn shared_login_check() -> Check {
+    Check {
+        name: "Shared login (rs_ai)".into(),
+        ok: false,
+        detail: "built without the rs-ai feature".into(),
+        soft_warn: true,
     }
 }
 

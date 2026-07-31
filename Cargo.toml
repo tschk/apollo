@@ -68,7 +68,7 @@ provider-copilot = []
 provider-ollama = []
 
 # rs_ai integration (providers, image/TTS/STT)
-rs-ai = ["dep:rs_ai", "dep:rs_ai_core", "dep:rs_ai_providers"]
+rs-ai = ["dep:rs_ai", "dep:rs_ai_core", "dep:rs_ai_providers", "dep:rs_ai_oauth"]
 
 # Swarm mode (distributed agent coordination)
 swarm = []
@@ -150,9 +150,11 @@ zkr = { version = "0.4.1", optional = true }
 rs_ai = { version = "0.2", optional = true }
 rs_ai_core = { version = "0.2", optional = true }
 rs_ai_providers = { version = "0.2", optional = true, features = ["claude", "chatgpt", "gemini", "openai-compatible", "xai", "cloudflare"] }
+rs_ai_oauth = { version = "0.2.24", optional = true, default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+temp-env = "0.3"
 tokio-test = "0.4"
 
 [profile.release]

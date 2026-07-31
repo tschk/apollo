@@ -25,8 +25,27 @@ impl CopilotProvider {
         }
     }
 
-    /// Load from OpenClaw's cached token file
+    /// Build from a token found in the store shared with telekinesis.
+    #[cfg(feature = "rs-ai")]
+    fn from_shared_store() -> Option<Self> {
+        let (token, _, _) =
+            crate::providers::shared_credentials::load(rs_ai_oauth::OAuthProvider::Copilot)?;
+        let base_url = derive_base_url(&token);
+        Some(Self {
+            github_token: String::new(),
+            api_token: tokio::sync::RwLock::new(Some(token)),
+            base_url: tokio::sync::RwLock::new(base_url),
+        })
+    }
+
+    /// Load a cached Copilot token: the shared `rs_ai` store first, then
+    /// OpenClaw's own cached token file.
     pub fn from_openclaw() -> anyhow::Result<Self> {
+        #[cfg(feature = "rs-ai")]
+        if let Some(provider) = Self::from_shared_store() {
+            return Ok(provider);
+        }
+
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home dir"))?;
         let token_path = home.join(".openclaw/credentials/github-copilot.token.json");
 
