@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
 use crate::agent::compaction::{Compactor, ContextInfo, DefaultCompactor};
-use crate::agent::hooks::{run_post_hooks, run_pre_hooks, HookDecision, ToolHook};
+use crate::agent::hooks::ToolHook;
 use crate::agent::mode::{
     is_approval, is_rejection, AgentMode, NullChannel, PendingPlan, PendingPlans,
 };
@@ -1175,15 +1175,16 @@ impl AgentRunner {
             let mut progress_lines: Vec<String> = Vec::new();
             let mut tool_errors: Vec<String> = Vec::new();
 
-            for tc in &response.tool_calls {
-                let _ = self
-                    .hook_manager
-                    .emit(&LifecycleEvent::BeforeToolCall(
-                        tc.name.clone(),
-                        tc.arguments.clone(),
-                    ))
-                    .await;
+            // One hook/event path for both engines — see
+            // `rotary_bridge::execute_tool_with_hooks`.
+            let hook_ctx = crate::agent::rotary_bridge::ToolHookContext::new(
+                hooks_snapshot.clone(),
+                Some(Arc::clone(&self.plugin_registry)),
+            )
+            .with_hook_manager(Arc::clone(&self.hook_manager))
+            .with_stream(stream.clone());
 
+            for tc in &response.tool_calls {
                 if let (true, Some(ref mid)) = (channel.supports_draft_updates(), &draft_id) {
                     let hint = extract_tool_hint(&tc.name, &tc.arguments);
                     let start_line = if hint.is_empty() {
@@ -1197,71 +1198,18 @@ impl AgentRunner {
                         .await;
                 }
 
-                emit(
-                    &stream,
-                    AgentStreamEvent::ToolStart {
-                        name: tc.name.clone(),
-                        hint: extract_tool_hint(&tc.name, &tc.arguments),
-                    },
-                );
-
                 let started = std::time::Instant::now();
 
-                // ── Plugin pre-tool check ──
-                let pre_tool_decision = {
-                    let registry = self.plugin_registry.read().await;
-                    registry.check_pre_tool(&tc.name, &tc.arguments).await
-                };
+                // ── Run tool through the shared hook/event path ──
+                let result = crate::agent::rotary_bridge::execute_tool_with_hooks(
+                    &hook_ctx,
+                    &tc.name,
+                    &tc.arguments,
+                    tools_snapshot.iter().find(|t| t.name() == tc.name),
+                )
+                .await;
 
-                // ── Run tool ──
-                let result = match pre_tool_decision {
-                    crate::plugin::HookDecision::Block(reason) => {
-                        tracing::info!("Plugin blocked '{}': {}", tc.name, reason);
-                        crate::tools::ToolResult::error(format!("Blocked by plugin: {}", reason))
-                    }
-                    crate::plugin::HookDecision::Allow => {
-                        match run_pre_hooks(&hooks_snapshot, &tc.name, &tc.arguments).await {
-                            HookDecision::Block(reason) => {
-                                tracing::info!("Hook blocked '{}': {}", tc.name, reason);
-                                crate::tools::ToolResult::error(format!(
-                                    "Blocked by policy: {}",
-                                    reason
-                                ))
-                            }
-                            HookDecision::Allow => {
-                                if let Some(tool) =
-                                    tools_snapshot.iter().find(|t| t.name() == tc.name)
-                                {
-                                    match tool.execute(&tc.arguments).await {
-                                        Ok(r) => r,
-                                        Err(e) => crate::tools::ToolResult::error(format!(
-                                            "Tool error: {}",
-                                            e
-                                        )),
-                                    }
-                                } else {
-                                    crate::tools::ToolResult::error(format!(
-                                        "Unknown tool: {}",
-                                        tc.name
-                                    ))
-                                }
-                            }
-                        }
-                    }
-                };
-
-                run_post_hooks(&hooks_snapshot, &tc.name, &tc.arguments, &result).await;
-
-                // ── Post-tool lifecycle + guardrails ──
-                let _ = self
-                    .hook_manager
-                    .emit(&LifecycleEvent::AfterToolCall(
-                        tc.name.clone(),
-                        tc.arguments.clone(),
-                        result.clone(),
-                    ))
-                    .await;
-
+                // ── Guardrails ──
                 {
                     let mut gr = self.guardrails.write().await;
                     if let Some(g) = gr.get_mut(&msg.chat_id) {
@@ -1283,23 +1231,7 @@ impl AgentRunner {
                     }
                 }
 
-                // ── Post-tool plugin notification ──
-                {
-                    let registry = self.plugin_registry.read().await;
-                    registry
-                        .notify_post_tool(&tc.name, &tc.arguments, &result)
-                        .await;
-                }
-
                 let elapsed = started.elapsed().as_secs();
-                emit(
-                    &stream,
-                    AgentStreamEvent::ToolEnd {
-                        name: tc.name.clone(),
-                        ok: !result.is_error,
-                        elapsed_secs: elapsed,
-                    },
-                );
 
                 // ── Track trajectory ──
                 {
@@ -1457,11 +1389,13 @@ impl AgentRunner {
             model: model.to_string(),
             workspace: self.workspace.clone(),
             max_tool_iterations: self.agent_config.max_rounds,
-            // Both engines must enforce the same permission checks.
+            // Both engines must run the same hooks and emit the same events.
             hook_ctx: crate::agent::rotary_bridge::ToolHookContext::new(
                 self.hooks.read().unwrap().clone(),
                 Some(Arc::clone(&self.plugin_registry)),
-            ),
+            )
+            .with_hook_manager(Arc::clone(&self.hook_manager))
+            .with_stream(self.stream_sink()),
         });
 
         bridge
@@ -1832,7 +1766,7 @@ fn trajectory_filename(chat_id: &str) -> String {
     format!("traj_{:x}.json", Sha256::digest(chat_id.as_bytes()))
 }
 
-fn extract_tool_hint(name: &str, arguments: &str) -> String {
+pub(crate) fn extract_tool_hint(name: &str, arguments: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
     let hint = match name {
         "shell" | "bash" | "exec" => v

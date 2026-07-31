@@ -24,21 +24,26 @@ use rx4::provider::{
 };
 
 use crate::agent::hooks::{run_post_hooks, run_pre_hooks, HookDecision, ToolHook};
-use crate::plugin::PluginRegistry;
+use crate::agent::stream::{emit, AgentStreamEvent, AgentStreamTx};
+use crate::plugin::{HookManager, LifecycleEvent, PluginRegistry};
 use crate::providers::{ChatMessage, ChatRequest, Provider as UnthinkclawProvider};
 use crate::tools::{Tool as UnthinkclawTool, ToolResult as UnthinkclawToolResult, ToolSpec};
 
-/// Pre/post tool hook path shared by both engines.
+/// Everything a tool call must be wrapped in, for either engine.
 ///
-/// The legacy loop runs plugin `check_pre_tool` then the registered
-/// `ToolHook`s before every tool call, and notifies both afterwards. The rx4
-/// bridge executes tools inside its own closures, so it carries this context
-/// to enforce exactly the same checks — a hook that blocks under
-/// `agent.engine = "legacy"` must block under `"rx4"`.
+/// Both engines run the same sequence around every tool: the
+/// `BeforeToolCall` lifecycle event, a `ToolStart` stream event, plugin then
+/// policy pre-checks, execution, the post hooks, the `AfterToolCall`
+/// lifecycle event, plugin notification, and a `ToolEnd` stream event. That
+/// sequence lives once, in `execute_tool_with_hooks`; this type carries the
+/// collaborators it needs so a hook that fires under `agent.engine =
+/// "legacy"` fires identically under `"rx4"`.
 #[derive(Clone, Default)]
 pub struct ToolHookContext {
     hooks: Vec<Arc<dyn ToolHook>>,
     plugins: Option<Arc<tokio::sync::RwLock<PluginRegistry>>>,
+    hook_manager: Option<Arc<HookManager>>,
+    stream: Option<AgentStreamTx>,
 }
 
 impl ToolHookContext {
@@ -46,7 +51,32 @@ impl ToolHookContext {
         hooks: Vec<Arc<dyn ToolHook>>,
         plugins: Option<Arc<tokio::sync::RwLock<PluginRegistry>>>,
     ) -> Self {
-        Self { hooks, plugins }
+        Self {
+            hooks,
+            plugins,
+            hook_manager: None,
+            stream: None,
+        }
+    }
+
+    /// Attach the lifecycle hook manager, so plugins observing tool calls see
+    /// them under either engine.
+    pub fn with_hook_manager(mut self, hook_manager: Arc<HookManager>) -> Self {
+        self.hook_manager = Some(hook_manager);
+        self
+    }
+
+    /// Attach the turn's stream sink, so a WS client sees tool progress under
+    /// either engine.
+    pub fn with_stream(mut self, stream: Option<AgentStreamTx>) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    async fn emit_lifecycle(&self, event: LifecycleEvent) {
+        if let Some(manager) = &self.hook_manager {
+            manager.emit(&event).await;
+        }
     }
 
     /// Run the pre-tool checks. `Block` means the tool must not execute.
@@ -73,11 +103,72 @@ impl ToolHookContext {
         result: &UnthinkclawToolResult,
     ) {
         run_post_hooks(&self.hooks, name, arguments, result).await;
+        self.emit_lifecycle(LifecycleEvent::AfterToolCall(
+            name.to_string(),
+            arguments.to_string(),
+            result.clone(),
+        ))
+        .await;
         if let Some(plugins) = &self.plugins {
             let registry = plugins.read().await;
             registry.notify_post_tool(name, arguments, result).await;
         }
     }
+}
+
+/// Run one tool call with every hook and event both engines owe it.
+///
+/// This is the single place the ordering exists. `tool` is `None` when the
+/// model named a tool that is not registered; the pre-checks still run, so a
+/// policy that blocks an unknown name is honoured before that is reported.
+pub async fn execute_tool_with_hooks(
+    ctx: &ToolHookContext,
+    name: &str,
+    arguments: &str,
+    tool: Option<&Arc<dyn UnthinkclawTool>>,
+) -> UnthinkclawToolResult {
+    ctx.emit_lifecycle(LifecycleEvent::BeforeToolCall(
+        name.to_string(),
+        arguments.to_string(),
+    ))
+    .await;
+    emit(
+        &ctx.stream,
+        AgentStreamEvent::ToolStart {
+            name: name.to_string(),
+            hint: crate::agent::loop_runner::extract_tool_hint(name, arguments),
+        },
+    );
+
+    let started = std::time::Instant::now();
+    let result = match ctx.check_pre_tool(name, arguments).await {
+        HookDecision::Block(reason) => {
+            tracing::info!("blocked '{}': {}", name, reason);
+            UnthinkclawToolResult::error(reason)
+        }
+        HookDecision::Allow => match tool {
+            Some(tool) => match tool.execute(arguments).await {
+                Ok(result) => result,
+                Err(e) => UnthinkclawToolResult::error(crate::redaction::redact_text(&format!(
+                    "Tool error: {e}"
+                ))),
+            },
+            None => UnthinkclawToolResult::error(format!("Unknown tool: {name}")),
+        },
+    };
+
+    ctx.notify_post_tool(name, arguments, &result).await;
+
+    emit(
+        &ctx.stream,
+        AgentStreamEvent::ToolEnd {
+            name: name.to_string(),
+            ok: !result.is_error,
+            elapsed_secs: started.elapsed().as_secs(),
+        },
+    );
+
+    result
 }
 
 // ── Message translation ──────────────────────────────────────────────────
@@ -298,20 +389,8 @@ pub fn register_apollo_tools(
             let hook_ctx = hook_ctx.clone();
             let tool_name = tool_name.clone();
             Box::pin(async move {
-                let result = match hook_ctx.check_pre_tool(&tool_name, &args).await {
-                    HookDecision::Block(reason) => {
-                        tracing::info!("rx4: blocked '{}': {}", tool_name, reason);
-                        UnthinkclawToolResult::error(reason)
-                    }
-                    HookDecision::Allow => match tool.execute(&args).await {
-                        Ok(result) => result,
-                        Err(e) => UnthinkclawToolResult::error(crate::redaction::redact_text(
-                            &format!("Tool error: {e}"),
-                        )),
-                    },
-                };
-
-                hook_ctx.notify_post_tool(&tool_name, &args, &result).await;
+                let result =
+                    execute_tool_with_hooks(&hook_ctx, &tool_name, &args, Some(&tool)).await;
 
                 rx4::ToolResult {
                     id: String::new(),
@@ -904,6 +983,140 @@ mod tests {
         async fn before_tool_call(&self, _name: &str, _arguments: &str) -> HookDecision {
             HookDecision::Block("plugin says no".to_string())
         }
+    }
+
+    /// Records the lifecycle events a plugin would see.
+    struct RecordingLifecycleHook {
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::plugin::LifecycleHook for RecordingLifecycleHook {
+        fn name(&self) -> &str {
+            "recording-lifecycle"
+        }
+
+        async fn on_event(&self, event: &LifecycleEvent) -> anyhow::Result<()> {
+            let label = match event {
+                LifecycleEvent::BeforeToolCall(name, _) => format!("before:{name}"),
+                LifecycleEvent::AfterToolCall(name, _, _) => format!("after:{name}"),
+                other => format!("other:{other:?}"),
+            };
+            self.seen.lock().unwrap().push(label);
+            Ok(())
+        }
+    }
+
+    fn stream_labels(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentStreamEvent>,
+    ) -> Vec<String> {
+        let mut labels = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            labels.push(match event {
+                AgentStreamEvent::ToolStart { name, .. } => format!("tool_start:{name}"),
+                AgentStreamEvent::ToolEnd { name, ok, .. } => format!("tool_end:{name}:{ok}"),
+                other => format!("other:{other:?}"),
+            });
+        }
+        labels
+    }
+
+    /// Build a context that records everything a plugin or WS client sees.
+    fn recording_context() -> (
+        ToolHookContext,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::sync::mpsc::UnboundedReceiver<AgentStreamEvent>,
+    ) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut manager = HookManager::new();
+        manager.register_lifecycle(Arc::new(RecordingLifecycleHook {
+            seen: Arc::clone(&seen),
+        }));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolHookContext::default()
+            .with_hook_manager(Arc::new(manager))
+            .with_stream(Some(tx));
+        (ctx, seen, rx)
+    }
+
+    /// Both engines must produce the same hooks and stream events for a tool
+    /// call. The legacy loop and the rx4 registry now reach the tool through
+    /// the same `execute_tool_with_hooks`; this fails if either side stops
+    /// doing so, which is how rx4 previously lost `BeforeToolCall` and the
+    /// `ToolStart`/`ToolEnd` progress events.
+    #[tokio::test]
+    async fn both_engines_emit_the_same_hooks_and_events() {
+        let args = r#"{"command":"ls"}"#;
+
+        // rx4: the tool runs inside the registry closure.
+        let (ctx, rx4_seen, mut rx4_stream) = recording_context();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tool: Arc<dyn UnthinkclawTool> = Arc::new(RecordingTool {
+            ran: Arc::clone(&ran),
+        });
+        let mut registry = rx4::ToolRegistry::new();
+        register_apollo_tools(&mut registry, &[Arc::clone(&tool)], &ctx);
+        let tool_ctx = Arc::new(rx4::ToolContext::new("."));
+        registry
+            .execute("exec", &tool_ctx, args)
+            .await
+            .expect("tool registered");
+        let rx4_events = rx4_seen.lock().unwrap().clone();
+        let rx4_stream_events = stream_labels(&mut rx4_stream);
+
+        // legacy: the loop calls the shared path directly.
+        let (ctx, legacy_seen, mut legacy_stream) = recording_context();
+        execute_tool_with_hooks(&ctx, "exec", args, Some(&tool)).await;
+        let legacy_events = legacy_seen.lock().unwrap().clone();
+        let legacy_stream_events = stream_labels(&mut legacy_stream);
+
+        assert_eq!(
+            rx4_events, legacy_events,
+            "the engines disagree on lifecycle hooks"
+        );
+        assert_eq!(
+            rx4_stream_events, legacy_stream_events,
+            "the engines disagree on stream events"
+        );
+        assert_eq!(legacy_events, vec!["before:exec", "after:exec"]);
+        assert_eq!(
+            legacy_stream_events,
+            vec!["tool_start:exec", "tool_end:exec:true"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocked_tool_still_reports_start_and_end() {
+        let hook: Arc<dyn ToolHook> = Arc::new(crate::agent::hooks::PermissionHook::new(
+            vec!["exec".to_string()],
+            vec![],
+        ));
+        let (ctx, seen, mut stream) = recording_context();
+        let ctx = ToolHookContext::new(vec![hook], None)
+            .with_hook_manager(Arc::new({
+                let mut manager = HookManager::new();
+                manager.register_lifecycle(Arc::new(RecordingLifecycleHook {
+                    seen: Arc::clone(&seen),
+                }));
+                manager
+            }))
+            .with_stream(ctx.stream.clone());
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tool: Arc<dyn UnthinkclawTool> = Arc::new(RecordingTool {
+            ran: Arc::clone(&ran),
+        });
+        let result = execute_tool_with_hooks(&ctx, "exec", "{}", Some(&tool)).await;
+        assert!(result.is_error);
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            stream_labels(&mut stream),
+            vec!["tool_start:exec", "tool_end:exec:false"],
+            "a blocked call must still open and close its progress line"
+        );
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec!["before:exec", "after:exec"]
+        );
     }
 
     #[test]
