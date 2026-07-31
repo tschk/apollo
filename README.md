@@ -5,10 +5,10 @@
 apollo is a **local-first Rust AI agent runtime** for people who want the bot on
 their own machine, not hidden behind a hosted control plane.
 
-Single 16MB binary, async-first (tokio), trait-driven. Ships with 10+ messaging
-channels, 20+ LLM providers, pluggable memory (SurrealDB + RocksDB), tool guardrails,
-context compaction, XML tool-call recovery, autonomous coding mode, and a plugin
-system with lifecycle hooks.
+Single ~16MB binary, ~41ms warm start, async-first (tokio), trait-driven. Ships
+with 10+ messaging channels, 20+ LLM providers, pluggable memory (SurrealDB +
+RocksDB), tool guardrails, context compaction, XML tool-call recovery,
+autonomous coding mode, and a plugin system with lifecycle hooks.
 
 ## Features
 
@@ -65,7 +65,13 @@ and apollo's `web_search` tool is left unregistered to keep the name unambiguous
 Other providers ignore the setting.
 
 ### Memory
-- SurrealDB + RocksDB backend with conversation history, FTS5, vector embeddings
+- SurrealDB + RocksDB backend with conversation history, BM25 full-text search,
+  vector embeddings
+- Each embedding records its dimension and model. Vector search filters by
+  dimension and scores with an in-process cosine scan, so switching embedding
+  models never mixes incomparable vectors. There is no ANN index — recall is
+  exact and linear in the namespace
+- RocksDB opens lazily on first use, not on the boot path
 - Sticker cache, file indexing, code chunk storage
 - Plugable via `MemoryProvider` trait
 
@@ -94,13 +100,20 @@ cargo install --path .
 ./scripts/install.sh   # build release + install to ~/.local/bin
 
 apollo init          # interactive setup wizard (`apollo setup` is an alias)
-apollo               # start chatting (same as `apollo chat`)
+apollo               # terminal UI if apollo-tui is installed, else CLI chat
+apollo tui           # terminal UI, starting a background server if none is up
+apollo chat          # line-based CLI chat
+apollo serve         # headless: run the agent, serve only the HTTP/WS API
 apollo ask "summarize this repo"
 apollo doctor        # diagnose config / deps
+apollo audit         # security/config audit
 
-cargo run -p apollo-ui
-# or after install: apollo ui
+cargo build --release -p apollo-tui   # build the terminal UI
+cargo run -p apollo-ui                # desktop UI (or `apollo ui` after install)
 ```
+
+Other subcommands: `status`, `mcp`, `message` (`msg`), `cron`, `autonomous`,
+`swarm`, `self-update`.
 
 Install from a release binary (after build):
 
@@ -109,12 +122,38 @@ cargo build --release
 ./target/release/apollo-install install
 ```
 
+## Agent HTTP API
+
+`apollo chat` and `apollo serve` expose the agent on `127.0.0.1:31338`
+(`APOLLO_HTTP_PORT` overrides the port, `APOLLO_HTTP=0` disables the server):
+
+- `POST /v1/chat` — `{"message": "...", "chat_id": "..."}`
+- `GET /v1/chat/stream` — WebSocket, same request body, streamed events
+- `GET /health` — unauthenticated liveness check
+
+**Breaking change: the API now requires a bearer token.** Both `/v1/chat` and
+the WebSocket need `Authorization: Bearer <token>` and return `401` without it.
+The server generates a token on first run and writes it to
+`~/.apollo/http-token` (mode 0600); set `APOLLO_HTTP_TOKEN` to supply your own
+to the server and its clients instead. Existing scripts must be updated:
+
+```bash
+curl -sS http://127.0.0.1:31338/v1/chat \
+  -H "Authorization: Bearer $(cat ~/.apollo/http-token)" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"hello"}'
+```
+
+Requests carrying an `Origin` header are refused with `403` on both endpoints.
+Browsers always send `Origin`, so no web page can drive the agent; native
+clients (the TUI, apollo-ui, curl) never send it.
+
 ## Current Status
 
 - ✅ `cargo clippy --all-targets --all-features` — 0 warnings
-- ✅ `cargo test` — 156 tests pass, 0 fail
-- ✅ `cargo build --release` — passes, 16MB `apollo` binary
-- ✅ v0.2.0 — install from source, release binary, or `cargo install apollo-agent` (crates.io package; binaries `apollo`, `apollo-install`)
+- ✅ `cargo test --all-features` — passing
+- ✅ `cargo build --release` — passes, ~16MB `apollo` binary
+- ✅ v0.3.1 — install from source, release binary, or `cargo install apollo-agent` (crates.io package; binaries `apollo`, `apollo-install`)
 
 ## Configuration
 
@@ -132,10 +171,13 @@ Initialize with `apollo init`, edit `apollo.json`. Key sections:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
+cargo test --all-features
 ```
+
+`--all-features` is not optional — several providers are behind non-default
+features.
 
 ## Storage
 

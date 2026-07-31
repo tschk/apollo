@@ -44,5 +44,3 @@ cargo build --release --features swarm
 ## Related Docs
 
 - [ROADMAP.md](ROADMAP.md)
-- [CLAW-ADOPTION-TODO.md](CLAW-ADOPTION-TODO.md)
-- [SWARM-UPGRADE.md](SWARM-UPGRADE.md)
