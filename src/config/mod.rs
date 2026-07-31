@@ -14,7 +14,6 @@ pub struct Config {
     pub workspace: PathBuf,
     pub storage: StorageConfig,
     pub runtime: RuntimeConfig,
-    pub hosting: HostingConfig,
     pub observability: ObservabilityConfig,
     pub channel: ChannelConfig,
     pub policy: PolicyConfig,
@@ -152,15 +151,6 @@ pub struct SelfUpdateConfig {
 pub struct StorageConfig {
     pub backend: String, // "surreal"
     pub root: PathBuf,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HostingConfig {
-    pub enabled: bool,
-    pub tenant_root: PathBuf,
-    pub session_timeout_minutes: u64,
-    pub default_channel: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,7 +336,6 @@ impl Config {
             workspace: PathBuf::from("."),
             storage: StorageConfig::default(),
             runtime: RuntimeConfig::default(),
-            hosting: HostingConfig::default(),
             observability: ObservabilityConfig::default(),
             channel: ChannelConfig::default(),
             policy: PolicyConfig::default(),
@@ -417,17 +406,6 @@ impl Default for StorageConfig {
         Self {
             backend: "surreal".to_string(),
             root: PathBuf::from(".apollo"),
-        }
-    }
-}
-
-impl Default for HostingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            tenant_root: PathBuf::from(".apollo/tenants"),
-            session_timeout_minutes: 120,
-            default_channel: "gateway".to_string(),
         }
     }
 }
