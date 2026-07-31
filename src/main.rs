@@ -1663,24 +1663,68 @@ async fn start_background_server(
 
 /// Register (or remove) a login item that runs `apollo serve` at startup.
 ///
-/// The config path is interpolated into a launchd plist and a systemd unit,
-/// neither of which has an escaping syntax we could rely on. Accept only a
-/// plain path, so nothing can close a `<string>` element or start a new unit
-/// directive and gain boot-persistent execution.
+/// The config path, the executable path and the workspace path are all
+/// interpolated into a launchd plist and a systemd unit. Each is escaped for
+/// the format it lands in (see `apollo::escape`) rather than filtered, because
+/// a workspace path containing a space is perfectly legitimate on macOS.
+#[cfg(any(target_os = "macos", test))]
+/// Render the launchd agent. Every interpolated value is XML-escaped, so a
+/// directory literally named `</string><key>…` cannot add a plist key.
+fn launchd_plist(exe: &str, config: &str, workspace: &str) -> String {
+    use apollo::escape::xml_text;
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.apollo.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exe}</string>
+    <string>serve</string>
+    <string>--config</string>
+    <string>{config}</string>
+    <string>--workspace</string>
+    <string>{workspace}</string>
+  </array>
+  <key>WorkingDirectory</key><string>{workspace}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+"#,
+        exe = xml_text(exe),
+        config = xml_text(config),
+        workspace = xml_text(workspace),
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+/// Render the systemd user unit. `ExecStart` words are quoted so a path with a
+/// space stays one argument and nothing can start a new directive.
+fn systemd_unit(exe: &str, config: &str, workspace: &str) -> anyhow::Result<String> {
+    use apollo::escape::systemd_argument;
+    Ok(format!(
+        "[Unit]\n\
+         Description=apollo agent\n\
+         After=network-online.target\n\n\
+         [Service]\n\
+         ExecStart={exe} serve --config {config} --workspace {workspace}\n\
+         WorkingDirectory={workdir}\n\
+         Restart=on-failure\n\n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        exe = systemd_argument(exe)?,
+        config = systemd_argument(config)?,
+        workspace = systemd_argument(workspace)?,
+        workdir = systemd_argument(workspace)?,
+    ))
+}
+
 fn validate_autostart_config_path(config: &str) -> anyhow::Result<String> {
     let path = config.trim();
     if path.is_empty() {
         anyhow::bail!("--config is required for autostart");
-    }
-    if let Some(bad) = path
-        .chars()
-        .find(|c| c.is_whitespace() || c.is_control() || "<>&\"'`$%\\;|".contains(*c))
-    {
-        anyhow::bail!(
-            "refusing to install autostart: the config path contains {:?}. \
-             Use a plain path with no whitespace or shell/markup characters.",
-            bad
-        );
     }
     Ok(path.to_string())
 }
@@ -1715,30 +1759,10 @@ fn configure_autostart(disable: bool, config: &str, workspace: &Path) -> anyhow:
             return Ok(());
         }
 
-        let plist = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>dev.apollo.agent</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>{exe}</string>
-    <string>serve</string>
-    <string>--config</string>
-    <string>{config}</string>
-    <string>--workspace</string>
-    <string>{workspace}</string>
-  </array>
-  <key>WorkingDirectory</key><string>{workspace}</string>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-</dict>
-</plist>
-"#,
-            exe = exe.display(),
-            config = config,
-            workspace = workspace.display(),
+        let plist = launchd_plist(
+            &exe.display().to_string(),
+            config,
+            &workspace.display().to_string(),
         );
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1774,20 +1798,11 @@ fn configure_autostart(disable: bool, config: &str, workspace: &Path) -> anyhow:
             return Ok(());
         }
 
-        let unit = format!(
-            "[Unit]\n\
-             Description=apollo agent\n\
-             After=network-online.target\n\n\
-             [Service]\n\
-             ExecStart={exe} serve --config {config} --workspace {workspace}\n\
-             WorkingDirectory={workspace}\n\
-             Restart=on-failure\n\n\
-             [Install]\n\
-             WantedBy=default.target\n",
-            exe = exe.display(),
-            config = config,
-            workspace = workspace.display(),
-        );
+        let unit = systemd_unit(
+            &exe.display().to_string(),
+            config,
+            &workspace.display().to_string(),
+        )?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2013,34 +2028,80 @@ fn init_tracing(cfg: &apollo::config::ObservabilityConfig) -> anyhow::Result<()>
 
 #[cfg(test)]
 mod autostart_tests {
-    use super::validate_autostart_config_path;
+    use super::{launchd_plist, systemd_unit, validate_autostart_config_path};
 
+    /// A path with a space is ordinary on macOS, so it must be accepted and
+    /// escaped rather than refused.
     #[test]
-    fn accepts_plain_paths() {
+    fn accepts_plain_and_spaced_paths() {
         assert_eq!(
             validate_autostart_config_path(" apollo.json ").unwrap(),
             "apollo.json"
         );
         assert_eq!(
-            validate_autostart_config_path("/home/u/.config/apollo.json").unwrap(),
-            "/home/u/.config/apollo.json"
+            validate_autostart_config_path("/Users/u/My Files/apollo.json").unwrap(),
+            "/Users/u/My Files/apollo.json"
+        );
+        assert!(validate_autostart_config_path("   ").is_err());
+    }
+
+    /// exe, config and workspace are all attacker-influenceable; a directory
+    /// named to close a <string> element is legal on Unix.
+    #[test]
+    fn plist_neutralises_hostile_values_in_every_slot() {
+        let hostile = "</string><key>RunAtLoad</key><true/><string>/bin/sh";
+        for (exe, config, workspace) in [
+            (hostile, "apollo.json", "/tmp/ws"),
+            ("/usr/bin/apollo", hostile, "/tmp/ws"),
+            ("/usr/bin/apollo", "apollo.json", hostile),
+        ] {
+            let plist = launchd_plist(exe, config, workspace);
+            assert!(
+                !plist.contains("<key>RunAtLoad</key><true/><string>/bin/sh"),
+                "injection survived: {plist}"
+            );
+            assert!(plist.contains("&lt;/string&gt;"), "not escaped: {plist}");
+        }
+    }
+
+    #[test]
+    fn plist_keeps_an_ordinary_spaced_path_usable() {
+        let plist = launchd_plist("/usr/bin/apollo", "apollo.json", "/Users/u/My Files");
+        assert!(
+            plist.contains("<string>/Users/u/My Files</string>"),
+            "{plist}"
         );
     }
 
     #[test]
-    fn rejects_injection_attempts() {
-        for bad in [
-            "a.json</string><key>Program</key><string>/bin/sh",
-            "a.json\nExecStartPre=/bin/sh -c evil",
-            "a.json --extra",
-            "a.json;rm -rf /",
-            "%h/evil.json",
-            "",
+    fn systemd_unit_neutralises_hostile_values_in_every_slot() {
+        // Extra words must stay inside one quoted argument rather than
+        // becoming further options to `apollo serve`.
+        let hostile = r#"/tmp/ws" --evil-flag "x"#;
+        for (exe, config, workspace) in [
+            (hostile, "apollo.json", "/tmp/ws"),
+            ("/usr/bin/apollo", hostile, "/tmp/ws"),
+            ("/usr/bin/apollo", "apollo.json", hostile),
         ] {
-            assert!(
-                validate_autostart_config_path(bad).is_err(),
-                "accepted {bad:?}"
-            );
+            let unit = systemd_unit(exe, config, workspace).unwrap();
+            assert!(!unit.contains(r#"" --evil-flag ""#), "unquoted: {unit}");
+            assert!(unit.contains(r#"\" --evil-flag \""#), "not escaped: {unit}");
         }
+
+        // A real line break is the only way to open a new directive, and no
+        // unit value can represent one.
+        assert!(systemd_unit("/usr/bin/apollo", "a.json\nExecStartPre=/bin/sh", "/tmp").is_err());
+        assert!(systemd_unit("/usr/bin/apollo", "a.json", "/tmp\nExecStartPre=/bin/sh").is_err());
+        assert!(systemd_unit("/tmp/apollo\nExecStartPre=/bin/sh", "a.json", "/tmp").is_err());
+    }
+
+    #[test]
+    fn systemd_unit_keeps_specifiers_and_spaces_literal() {
+        let unit = systemd_unit("/usr/bin/apollo", "%h/evil.json", "/home/u/my ws").unwrap();
+        assert!(unit.contains(r#""%%h/evil.json""#), "{unit}");
+        assert!(
+            unit.contains(r#"WorkingDirectory="/home/u/my ws""#),
+            "{unit}"
+        );
     }
 }

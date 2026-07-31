@@ -658,21 +658,28 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
         .join(".config/systemd/user");
     std::fs::create_dir_all(&service_dir)?;
 
-    let mut exec_args = format!("{} chat --channel {}", bin_path.display(), channel);
+    // Every value here reaches a shell, and a workspace path with a space in
+    // it is legitimate — so quote rather than filter.
+    use apollo::escape::shell_argument as sh;
+    let mut exec_args = format!(
+        "{} chat --channel {}",
+        sh(&bin_path.display().to_string()),
+        sh(&channel)
+    );
     if tg_token.is_some() {
         // The token stays in APOLLO_TELEGRAM_TOKEN, sourced from .env above:
         // an argv value is visible in `ps` to every local user.
         exec_args.push_str(&format!(
             " --telegram-chat-id {}",
-            tg_chat_id.as_deref().unwrap_or("0")
+            sh(tg_chat_id.as_deref().unwrap_or("0"))
         ));
     }
-    exec_args.push_str(&format!(" --model {}", model));
+    exec_args.push_str(&format!(" --model {}", sh(&model)));
 
     let run_script = format!(
         "#!/bin/bash\nset -a\nsource {}\nset +a\nexport RUST_LOG=info\ncd {}\nexec {}\n",
-        env_path.display(),
-        workspace.display(),
+        sh(&env_path.display().to_string()),
+        sh(&workspace.display().to_string()),
         exec_args,
     );
     let run_path = workspace.join("run.sh");
@@ -689,8 +696,8 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
                 WorkingDirectory={}\nStandardOutput=append:/tmp/apollo.log\n\
                 StandardError=append:/tmp/apollo.log\n\n\
                 [Install]\nWantedBy=default.target\n",
-        run_path.display(),
-        workspace.display()
+        apollo::escape::systemd_argument(&run_path.display().to_string())?,
+        apollo::escape::systemd_argument(&workspace.display().to_string())?
     );
     std::fs::write(service_dir.join("apollo.service"), &service)?;
 
