@@ -34,16 +34,23 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake pkg-config libssl-dev clang
+          sudo apt-get install -y cmake pkg-config libssl-dev clang libclang-dev
 
+      # Name both binaries. The repository root is a package as well as the
+      # workspace root, so a bare `cargo build --release` builds apollo-agent
+      # alone and silently omits apollo-tui — which shipped tarballs where
+      # `apollo` fell back to the line-based chat.
       - name: Cargo build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p apollo-agent -p apollo-tui
 
       - name: Package tarball
         run: |
-          BIN="target/${{ matrix.target }}/release/apollo"
-          strip "$BIN" 2>/dev/null || true
-          tar czvf "apollo-${{ matrix.suffix }}.tar.gz" -C "target/${{ matrix.target }}/release" apollo
+          DIR="target/${{ matrix.target }}/release"
+          for bin in apollo apollo-tui; do
+            test -x "$DIR/$bin" || { echo "missing $DIR/$bin"; exit 1; }
+            strip "$DIR/$bin" 2>/dev/null || true
+          done
+          tar czvf "apollo-${{ matrix.suffix }}.tar.gz" -C "$DIR" apollo apollo-tui
 
       - uses: actions/upload-artifact@v4
         with:

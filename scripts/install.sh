@@ -99,12 +99,16 @@ RELEASE_DIR="$ROOT/target/release"
 
 ensure_cargo
 
-if [[ ! -f "$RELEASE_DIR/apollo" ]]; then
+if [[ ! -f "$RELEASE_DIR/apollo" || ! -f "$RELEASE_DIR/apollo-tui" ]]; then
   echo "Building apollo (release)..."
-  (cd "$ROOT" && cargo build --release)
+  # Both binaries by name: the repo root is a package as well as the
+  # workspace root, so a bare `cargo build --release` skips apollo-tui, and
+  # `apollo` then falls back to the line-based chat.
+  (cd "$ROOT" && cargo build --release -p apollo-agent -p apollo-tui)
 fi
 
 install_binary apollo "$RELEASE_DIR/apollo"
 install_binary apollo-install "$RELEASE_DIR/apollo-install"
+install_binary apollo-tui "$RELEASE_DIR/apollo-tui"
 
 path_hint

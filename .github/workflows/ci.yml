@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # librocksdb-sys runs bindgen, which needs libclang and the clang
+      # builtin headers. Installing clang alone is what produced
+      # "unknown type name 'uint32_t'" in the v0.3.0 and v0.3.1 releases.
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libssl-dev clang libclang-dev
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # apollo-ui is excluded throughout: its GPUI dependency tree needs a
+      # desktop toolchain and produces >20GB of release artifacts. Build it
+      # deliberately when working on it, not in a validation sweep.
+      - name: Clippy
+        run: cargo clippy --workspace --exclude apollo-ui --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --exclude apollo-ui --all-features
+
+      # Both binaries, by name. The repository root is a package as well as
+      # the workspace root, so a bare `cargo build --release` silently builds
+      # apollo-agent alone and skips apollo-tui — which is how the TUI first
+      # shipped unbuilt.
+      - name: Release build
+        run: cargo build --release --locked -p apollo-agent -p apollo-tui
+
+      - name: Verify both binaries exist
+        shell: bash
+        run: |
+          for bin in apollo apollo-tui; do
+            test -x "target/release/$bin" || { echo "missing target/release/$bin"; exit 1; }
+          done
