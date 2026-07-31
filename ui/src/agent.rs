@@ -224,6 +224,8 @@ pub struct AgentState {
     pub context_tokens: u64,
     pub context_window: u64,
     pub context_pct: u8,
+    pub provider: String,
+    pub message_count: u64,
 }
 
 #[allow(dead_code)]
@@ -248,6 +250,8 @@ fn parse_state(value: &serde_json::Value) -> AgentState {
         call_count: number("call_count"),
         context_tokens: number("context_tokens"),
         context_window: number("context_window"),
+        provider: text("provider"),
+        message_count: number("message_count"),
         context_pct: number("context_pct").min(100) as u8,
     }
 }
@@ -295,12 +299,14 @@ pub fn set_model(model: &str) -> Result<AgentState, String> {
     Ok(parse_state(&value))
 }
 
-/// Ask the agent to compact or clear a chat's history.
+/// Ask the agent to clear a chat's stored history.
 ///
-/// `path` is `/v1/compact` or `/v1/clear`. The server answers 501 with an
-/// explanation while those paths are unavailable, and that explanation is
-/// what the caller should show — the UI must not claim work that did not
-/// happen.
+/// `path` is `/v1/clear`. `/v1/compact` was removed rather than left as a
+/// permanent 501: compaction in apollo is turn-local, so there is no stored
+/// state for a server-side compaction to act on.
+///
+/// On failure the server's own explanation is returned and shown as-is — the
+/// UI must not claim work that did not happen.
 #[allow(dead_code)]
 pub fn post_chat_action(path: &str, chat_id: &str) -> Result<String, String> {
     let url = format!("http://127.0.0.1:{}{}", http_port(), path);

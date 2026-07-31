@@ -1069,6 +1069,8 @@ mod tests {
             context_tokens: 900,
             context_window: 1000,
             context_pct: 90,
+            provider: "anthropic".into(),
+            message_count: 4,
         });
         assert_eq!(a.model, "claude-opus-4");
         assert_eq!(a.engine, "rx4");
