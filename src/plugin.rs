@@ -254,6 +254,11 @@ impl PluginRegistry {
         self.hooks.register_lifecycle(hook);
     }
 
+    /// Register a pre-tool hook directly (not from a plugin)
+    pub fn register_pre_tool_hook(&mut self, hook: Arc<dyn PreToolHook>) {
+        self.hooks.register_pre_tool(hook);
+    }
+
     /// Access the hook manager
     pub fn hooks(&self) -> &HookManager {
         &self.hooks

@@ -23,8 +23,62 @@ use rx4::provider::{
     Message, Provider as Rx4Provider, ProviderError as Rx4ProviderError, Role, StreamEvent,
 };
 
+use crate::agent::hooks::{run_post_hooks, run_pre_hooks, HookDecision, ToolHook};
+use crate::plugin::PluginRegistry;
 use crate::providers::{ChatMessage, ChatRequest, Provider as UnthinkclawProvider};
-use crate::tools::{Tool as UnthinkclawTool, ToolSpec};
+use crate::tools::{Tool as UnthinkclawTool, ToolResult as UnthinkclawToolResult, ToolSpec};
+
+/// Pre/post tool hook path shared by both engines.
+///
+/// The legacy loop runs plugin `check_pre_tool` then the registered
+/// `ToolHook`s before every tool call, and notifies both afterwards. The rx4
+/// bridge executes tools inside its own closures, so it carries this context
+/// to enforce exactly the same checks — a hook that blocks under
+/// `agent.engine = "legacy"` must block under `"rx4"`.
+#[derive(Clone, Default)]
+pub struct ToolHookContext {
+    hooks: Vec<Arc<dyn ToolHook>>,
+    plugins: Option<Arc<tokio::sync::RwLock<PluginRegistry>>>,
+}
+
+impl ToolHookContext {
+    pub fn new(
+        hooks: Vec<Arc<dyn ToolHook>>,
+        plugins: Option<Arc<tokio::sync::RwLock<PluginRegistry>>>,
+    ) -> Self {
+        Self { hooks, plugins }
+    }
+
+    /// Run the pre-tool checks. `Block` means the tool must not execute.
+    pub async fn check_pre_tool(&self, name: &str, arguments: &str) -> HookDecision {
+        if let Some(plugins) = &self.plugins {
+            let registry = plugins.read().await;
+            if let HookDecision::Block(reason) = registry.check_pre_tool(name, arguments).await {
+                return HookDecision::Block(format!("Blocked by plugin: {reason}"));
+            }
+        }
+        match run_pre_hooks(&self.hooks, name, arguments).await {
+            HookDecision::Block(reason) => {
+                HookDecision::Block(format!("Blocked by policy: {reason}"))
+            }
+            HookDecision::Allow => HookDecision::Allow,
+        }
+    }
+
+    /// Notify the post-tool hooks and plugins.
+    pub async fn notify_post_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+        result: &UnthinkclawToolResult,
+    ) {
+        run_post_hooks(&self.hooks, name, arguments, result).await;
+        if let Some(plugins) = &self.plugins {
+            let registry = plugins.read().await;
+            registry.notify_post_tool(name, arguments, result).await;
+        }
+    }
+}
 
 // ── Message translation ──────────────────────────────────────────────────
 
@@ -222,7 +276,11 @@ impl Rx4Provider for RotaryProviderAdapter {
 /// Tool effects are classified based on the tool name using rx4's
 /// `classify_tool()` guardrail function — idempotent tools get `ToolEffect::Read`,
 /// mutating tools get `ToolEffect::Write`.
-pub fn register_apollo_tools(registry: &mut rx4::ToolRegistry, tools: &[Arc<dyn UnthinkclawTool>]) {
+pub fn register_apollo_tools(
+    registry: &mut rx4::ToolRegistry,
+    tools: &[Arc<dyn UnthinkclawTool>],
+    hook_ctx: &ToolHookContext,
+) {
     use rx4::guardrails::classify_tool;
     use rx4::{ToolDefinition, ToolEffect, ToolExecuteBox};
 
@@ -233,20 +291,32 @@ pub fn register_apollo_tools(registry: &mut rx4::ToolRegistry, tools: &[Arc<dyn 
         let parameters_json = serde_json::to_string(&spec.parameters).unwrap_or_default();
 
         let tool_clone = Arc::clone(tool);
+        let hook_ctx = hook_ctx.clone();
+        let tool_name = name.clone();
         let execute: ToolExecuteBox = Box::new(move |_ctx, args| {
             let tool = Arc::clone(&tool_clone);
+            let hook_ctx = hook_ctx.clone();
+            let tool_name = tool_name.clone();
             Box::pin(async move {
-                match tool.execute(&args).await {
-                    Ok(result) => rx4::ToolResult {
-                        id: String::new(),
-                        content: result.output,
-                        is_error: result.is_error,
+                let result = match hook_ctx.check_pre_tool(&tool_name, &args).await {
+                    HookDecision::Block(reason) => {
+                        tracing::info!("rx4: blocked '{}': {}", tool_name, reason);
+                        UnthinkclawToolResult::error(reason)
+                    }
+                    HookDecision::Allow => match tool.execute(&args).await {
+                        Ok(result) => result,
+                        Err(e) => UnthinkclawToolResult::error(crate::redaction::redact_text(
+                            &format!("Tool error: {e}"),
+                        )),
                     },
-                    Err(e) => rx4::ToolResult {
-                        id: String::new(),
-                        content: crate::redaction::redact_text(&format!("Tool error: {e}")),
-                        is_error: true,
-                    },
+                };
+
+                hook_ctx.notify_post_tool(&tool_name, &args, &result).await;
+
+                rx4::ToolResult {
+                    id: String::new(),
+                    content: result.output,
+                    is_error: result.is_error,
                 }
             })
         });
@@ -273,6 +343,9 @@ pub struct RotaryBridgeConfig {
     pub model: String,
     pub workspace: std::path::PathBuf,
     pub max_tool_iterations: usize,
+    /// Pre/post tool hooks, so rx4 enforces the same permissions as the
+    /// legacy loop.
+    pub hook_ctx: ToolHookContext,
 }
 
 /// Bridge that wraps an `rx4::Agent` and provides a simplified interface for
@@ -288,6 +361,7 @@ pub struct RotaryBridgeConfig {
 /// bridge to execute agent turns.
 pub struct RotaryAgentBridge {
     agent: rx4::Agent,
+    hook_ctx: ToolHookContext,
     /// Conversation messages maintained in rx4 format (per-session)
     messages: Vec<Message>,
 }
@@ -306,7 +380,7 @@ impl RotaryAgentBridge {
 
         // Register apollo's tools into rx4's tool registry
         let mut tool_registry = rx4::ToolRegistry::new();
-        register_apollo_tools(&mut tool_registry, &config.tools);
+        register_apollo_tools(&mut tool_registry, &config.tools, &config.hook_ctx);
         agent.tools = Arc::new(tool_registry);
 
         // Use rx4's guardrails for loop detection (replaces apollo's
@@ -315,6 +389,7 @@ impl RotaryAgentBridge {
 
         Self {
             agent,
+            hook_ctx: config.hook_ctx,
             messages: Vec::new(),
         }
     }
@@ -421,7 +496,7 @@ impl RotaryAgentBridge {
     /// Register additional tools at runtime.
     pub fn register_tools(&mut self, tools: &[Arc<dyn UnthinkclawTool>]) {
         if let Some(registry) = Arc::get_mut(&mut self.agent.tools) {
-            register_apollo_tools(registry, tools);
+            register_apollo_tools(registry, tools, &self.hook_ctx);
         } else {
             tracing::warn!("cannot register rx4 tools while the registry is shared");
         }
@@ -734,6 +809,101 @@ mod tests {
         // No skills in empty dir, should return None
         let result = match_skill_via_rx4(&engine, "test query");
         assert!(result.is_none());
+    }
+
+    struct RecordingTool {
+        ran: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl UnthinkclawTool for RecordingTool {
+        fn name(&self) -> &str {
+            "exec"
+        }
+
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "exec".to_string(),
+                description: "test tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        async fn execute(&self, _arguments: &str) -> anyhow::Result<UnthinkclawToolResult> {
+            self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(UnthinkclawToolResult::success("ran"))
+        }
+    }
+
+    async fn run_exec_through_rx4(hook_ctx: ToolHookContext) -> (rx4::ToolResult, bool) {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tool: Arc<dyn UnthinkclawTool> = Arc::new(RecordingTool {
+            ran: Arc::clone(&ran),
+        });
+        let mut registry = rx4::ToolRegistry::new();
+        register_apollo_tools(&mut registry, &[tool], &hook_ctx);
+
+        let ctx = Arc::new(rx4::ToolContext::new("."));
+        let result = registry
+            .execute("exec", &ctx, r#"{"command":"rm -rf /"}"#)
+            .await
+            .expect("tool registered");
+        (result, ran.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn rx4_bridge_enforces_blocking_hooks() {
+        let hook: Arc<dyn ToolHook> = Arc::new(crate::agent::hooks::PermissionHook::new(
+            vec!["exec".to_string()],
+            vec![],
+        ));
+        let (result, ran) = run_exec_through_rx4(ToolHookContext::new(vec![hook], None)).await;
+        assert!(result.is_error, "blocked tool must report an error");
+        assert!(
+            result.content.contains("Blocked by policy"),
+            "unexpected content: {}",
+            result.content
+        );
+        assert!(!ran, "a blocked tool must not execute under rx4");
+    }
+
+    #[tokio::test]
+    async fn rx4_bridge_allows_unblocked_tools() {
+        let (result, ran) = run_exec_through_rx4(ToolHookContext::default()).await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, "ran");
+        assert!(ran);
+    }
+
+    #[tokio::test]
+    async fn rx4_bridge_enforces_plugin_pre_tool_block() {
+        let mut registry = PluginRegistry::new();
+        registry.register_pre_tool_hook(Arc::new(BlockingPluginHook));
+        let ctx = ToolHookContext::new(
+            Vec::new(),
+            Some(Arc::new(tokio::sync::RwLock::new(registry))),
+        );
+        let (result, ran) = run_exec_through_rx4(ctx).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Blocked by plugin"),
+            "unexpected content: {}",
+            result.content
+        );
+        assert!(!ran);
+    }
+
+    struct BlockingPluginHook;
+
+    #[async_trait::async_trait]
+    impl crate::plugin::PreToolHook for BlockingPluginHook {
+        fn name(&self) -> &str {
+            "blocking-test-hook"
+        }
+
+        async fn before_tool_call(&self, _name: &str, _arguments: &str) -> HookDecision {
+            HookDecision::Block("plugin says no".to_string())
+        }
     }
 
     #[test]

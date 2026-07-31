@@ -1458,6 +1458,11 @@ impl AgentRunner {
             model: model.to_string(),
             workspace: self.workspace.clone(),
             max_tool_iterations: self.agent_config.max_rounds,
+            // Both engines must enforce the same permission checks.
+            hook_ctx: crate::agent::rotary_bridge::ToolHookContext::new(
+                self.hooks.read().unwrap().clone(),
+                Some(Arc::clone(&self.plugin_registry)),
+            ),
         });
 
         bridge
