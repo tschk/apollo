@@ -11,6 +11,7 @@
 pub mod brief;
 #[cfg(feature = "plugin-browser")]
 pub mod browser;
+pub mod child_proc;
 pub mod claude_usage;
 #[cfg(feature = "swarm")]
 pub mod coding_swarm;

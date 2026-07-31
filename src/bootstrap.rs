@@ -250,7 +250,10 @@ pub fn build_base_tools(
         Arc::new(ConfigTool::new(workspace.join("apollo.json"))),
         Arc::new(SleepTool),
         Arc::new(TodoWriteTool::new(workspace.to_path_buf())),
-        Arc::new(crate::tools::TelekinesisTool::new(workspace.to_path_buf())),
+        Arc::new(crate::tools::TelekinesisTool::new(
+            workspace.to_path_buf(),
+            Arc::clone(&policy),
+        )),
     ];
     #[cfg(feature = "plugin-web")]
     {

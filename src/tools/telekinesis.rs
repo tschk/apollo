@@ -12,9 +12,12 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use super::child_proc;
 use super::traits::*;
+use crate::policy::ExecutionPolicy;
 use crate::text::truncate_chars_counted;
 
 /// Worker turns run a whole task, not a single command, so the default is far
@@ -22,22 +25,30 @@ use crate::text::truncate_chars_counted;
 /// not wedge the agent loop.
 const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
+/// Upper bound on a model-supplied timeout.
+const MAX_TIMEOUT_SECS: u64 = 3600;
+
 /// Cap on the text handed back to the model.
 const MAX_OUTPUT_CHARS: usize = 20_000;
 
 pub struct TelekinesisTool {
     workspace: PathBuf,
     timeout_secs: u64,
+    /// The worker runs arbitrary commands on this machine, so it is gated on
+    /// the same policy as `exec`. Without this, `allow_shell = false` is
+    /// bypassed by delegating the command to `tk`.
+    policy: Arc<ExecutionPolicy>,
     /// Binary to invoke. Overridable so tests can exercise the missing-binary
     /// path without depending on whether `tk` is installed.
     binary: String,
 }
 
 impl TelekinesisTool {
-    pub fn new(workspace: PathBuf) -> Self {
+    pub fn new(workspace: PathBuf, policy: Arc<ExecutionPolicy>) -> Self {
         Self {
             workspace,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
+            policy,
             binary: "tk".to_string(),
         }
     }
@@ -214,6 +225,12 @@ impl Tool for TelekinesisTool {
     }
 
     async fn execute(&self, arguments: &str) -> anyhow::Result<ToolResult> {
+        if !self.policy.allow_shell {
+            return ExecutionPolicy::deny(
+                "Shell execution is disabled by policy, and telekinesis runs commands",
+            );
+        }
+
         let args: TelekinesisArgs = serde_json::from_str(arguments)?;
 
         if args.prompt.trim().is_empty() {
@@ -235,11 +252,17 @@ impl Tool for TelekinesisTool {
             )));
         };
 
-        let timeout = args.timeout.unwrap_or(self.timeout_secs);
+        // Model-supplied, so bounded: a worker that never returns must not park
+        // the agent loop indefinitely.
+        let timeout = args
+            .timeout
+            .unwrap_or(self.timeout_secs)
+            .clamp(1, MAX_TIMEOUT_SECS);
 
         // The prompt is deliberately never logged — AGENTS.md 3.4 forbids
         // logging message content.
-        let child = tokio::process::Command::new(&binary)
+        let mut command = tokio::process::Command::new(&binary);
+        command
             .arg("exec")
             .arg(&args.prompt)
             .arg("--json")
@@ -249,9 +272,12 @@ impl Tool for TelekinesisTool {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn();
+            // Without this a timed-out worker keeps editing the workspace
+            // while the model retries, and two workers race on the same files.
+            .kill_on_drop(true);
+        child_proc::scrub(&mut command);
 
-        let child = match child {
+        let child = match command.spawn() {
             Ok(child) => child,
             Err(e) => {
                 return Ok(ToolResult::error(format!(
@@ -259,21 +285,18 @@ impl Tool for TelekinesisTool {
                 )))
             }
         };
+        let mut child = child;
 
-        let output = match tokio::time::timeout(
-            Duration::from_secs(timeout),
-            child.wait_with_output(),
-        )
-        .await
-        {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => return Ok(ToolResult::error(format!("telekinesis failed to run: {e}"))),
-            Err(_) => {
-                return Ok(ToolResult::error(format!(
-                    "Delegated task timed out after {timeout}s"
-                )))
-            }
-        };
+        let output =
+            match child_proc::wait_with_timeout(&mut child, Duration::from_secs(timeout)).await {
+                Ok(Some(output)) => output,
+                Ok(None) => {
+                    return Ok(ToolResult::error(format!(
+                        "Delegated task timed out after {timeout}s"
+                    )))
+                }
+                Err(e) => return Ok(ToolResult::error(format!("telekinesis failed to run: {e}"))),
+            };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -286,7 +309,56 @@ mod tests {
     use super::*;
 
     fn tool(workspace: PathBuf) -> TelekinesisTool {
-        TelekinesisTool::new(workspace)
+        TelekinesisTool::new(workspace, Arc::new(ExecutionPolicy::default()))
+    }
+
+    #[tokio::test]
+    async fn is_refused_when_shell_is_disabled_by_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = Arc::new(ExecutionPolicy {
+            allow_shell: false,
+            ..ExecutionPolicy::default()
+        });
+        let tool = TelekinesisTool::new(dir.path().to_path_buf(), policy);
+        let args = serde_json::json!({ "prompt": "run something" }).to_string();
+        let result = Tool::execute(&tool, &args).await.unwrap();
+        assert!(result.is_error);
+        assert!(
+            result.output.to_lowercase().contains("policy"),
+            "got: {}",
+            result.output
+        );
+    }
+
+    /// A worker that ignores its deadline must be killed, not left editing the
+    /// workspace while the model retries.
+    #[tokio::test]
+    async fn a_timed_out_worker_is_killed_not_leaked() {
+        let mut command = tokio::process::Command::new("bash");
+        command
+            .arg("-c")
+            .arg("sleep 60")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().expect("child has a pid");
+
+        let output = child_proc::wait_with_timeout(&mut child, Duration::from_millis(200))
+            .await
+            .unwrap();
+        assert!(output.is_none(), "must report a timeout");
+
+        // The kill has been issued and awaited; reaping is what remains.
+        let status = child.wait().await.unwrap();
+        assert!(!status.success(), "killed child must not report success");
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "pid {pid} must not still be running");
     }
 
     #[tokio::test]
@@ -416,7 +488,8 @@ mod tests {
     #[ignore = "requires telekinesis (tk) on PATH and a working provider login"]
     async fn delegates_to_a_real_worker() {
         let workspace = std::env::current_dir().unwrap();
-        let tool = TelekinesisTool::new(workspace).with_timeout(180);
+        let tool =
+            TelekinesisTool::new(workspace, Arc::new(ExecutionPolicy::default())).with_timeout(180);
         let args = serde_json::json!({ "prompt": "Reply with exactly the word PONG." }).to_string();
 
         let result = Tool::execute(&tool, &args).await.unwrap();

@@ -6,9 +6,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::child_proc;
 use super::traits::*;
 use crate::policy::ExecutionPolicy;
 use crate::text::truncate_chars_counted;
+
+/// Upper bound on a model-supplied timeout — an hour is already far past any
+/// legitimate single command, and beyond it the agent loop is simply stuck.
+const MAX_TIMEOUT_SECS: u64 = 3600;
 
 pub struct ShellTool {
     workspace: PathBuf,
@@ -105,7 +110,12 @@ impl Tool for ShellTool {
             ));
         }
 
-        let timeout = args.timeout.unwrap_or(self.timeout_secs);
+        // The model supplies this, so clamp it: an unbounded value parks the
+        // agent loop on a hung command with no way back.
+        let timeout = args
+            .timeout
+            .unwrap_or(self.timeout_secs)
+            .clamp(1, MAX_TIMEOUT_SECS);
 
         let cwd = if let Some(dir) = &args.cwd {
             let requested = if dir.starts_with('/') {
@@ -132,28 +142,29 @@ impl Tool for ShellTool {
             self.workspace.clone()
         };
 
-        let child = tokio::process::Command::new("bash")
+        let mut command = tokio::process::Command::new("bash");
+        command
             .arg("-c")
             .arg(&args.command)
             .current_dir(&cwd)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn()?;
+            // A timed-out command must die with the tool call, not keep
+            // running against the workspace while the model retries.
+            .kill_on_drop(true);
+        child_proc::scrub(&mut command);
+        let mut child = command.spawn()?;
 
-        let output = match tokio::time::timeout(
-            Duration::from_secs(timeout),
-            child.wait_with_output(),
-        )
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                return Ok(ToolResult::error(format!(
-                    "Command timed out after {}s",
-                    timeout
-                )));
-            }
-        };
+        let output =
+            match child_proc::wait_with_timeout(&mut child, Duration::from_secs(timeout)).await? {
+                Some(output) => output,
+                None => {
+                    return Ok(ToolResult::error(format!(
+                        "Command timed out after {}s",
+                        timeout
+                    )));
+                }
+            };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -329,6 +340,66 @@ mod tests {
                 "should have allowed: {cmd}"
             );
         }
+    }
+
+    /// The file sandbox refuses to read `.env`; that is worth nothing if
+    /// `exec` can print the same values back out of its own environment.
+    #[tokio::test]
+    async fn secrets_do_not_reach_the_child_but_path_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = super::ShellTool::new(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
+        );
+        let args = serde_json::json!({ "command": "env" }).to_string();
+        let result = crate::tools::Tool::execute(&tool, &args).await.unwrap();
+        for line in result.output.lines() {
+            let name = line.split('=').next().unwrap_or_default();
+            assert!(
+                !crate::tools::child_proc::is_secret_env_name(name),
+                "secret-bearing variable {name} reached the child"
+            );
+        }
+        assert!(result.output.contains("PATH="), "PATH must survive");
+    }
+
+    #[tokio::test]
+    async fn an_over_long_timeout_is_clamped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = super::ShellTool::new(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
+        );
+        let args = serde_json::json!({ "command": "true", "timeout": u64::MAX }).to_string();
+        // Would panic inside Duration/timeout arithmetic without the clamp.
+        let result = crate::tools::Tool::execute(&tool, &args).await.unwrap();
+        assert!(!result.is_error, "got: {}", result.output);
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_command_is_killed_not_left_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("still-alive");
+        let tool = super::ShellTool::new(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
+        );
+        let args = serde_json::json!({
+            "command": format!("sleep 3; touch {}", marker.display()),
+            "timeout": 1,
+        })
+        .to_string();
+        let result = crate::tools::Tool::execute(&tool, &args).await.unwrap();
+        assert!(
+            result.output.contains("timed out"),
+            "got: {}",
+            result.output
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(
+            !marker.exists(),
+            "the killed command must not have kept running to completion"
+        );
     }
 
     #[tokio::test]
