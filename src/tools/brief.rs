@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 use super::traits::*;
 use crate::providers::{ChatMessage, ChatRequest, Provider};
+use crate::text::truncate_chars;
 
 pub struct BriefTool {
     provider: Arc<dyn Provider>,
@@ -100,7 +101,7 @@ impl Tool for BriefTool {
             args.max_words,
             // Truncate input if very long
             if args.text.len() > 40_000 {
-                format!("{}...[truncated]", &args.text[..40_000])
+                format!("{}...[truncated]", truncate_chars(&args.text, 40_000))
             } else {
                 args.text.clone()
             }

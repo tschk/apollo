@@ -210,11 +210,11 @@ impl StreamingToolCallParser {
         } else {
             debug!(
                 "unparseable tool_call: {:?}",
-                &content[..content.len().min(100)]
+                crate::text::truncate_chars(&content, 100)
             );
             events.push(ParserEvent::Error(format!(
                 "Malformed tool_call content: {}",
-                &content[..content.len().min(100)]
+                crate::text::truncate_chars(&content, 100)
             )));
         }
 

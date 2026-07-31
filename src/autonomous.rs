@@ -296,7 +296,7 @@ async fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::warn!(
             "[autonomous] tests failed:\n{}",
-            &stderr[..stderr.len().min(1000)]
+            crate::text::truncate_chars(&stderr, 1000)
         );
         Ok(false)
     }
@@ -352,7 +352,7 @@ async fn git_commit_and_push(message: &str, remote: &str, branch: &str, cwd: &Pa
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::warn!(
                 "[autonomous] push failed: {}",
-                &stderr[..stderr.len().min(500)]
+                crate::text::truncate_chars(&stderr, 500)
             );
         }
     }

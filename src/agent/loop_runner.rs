@@ -23,6 +23,7 @@ use crate::memory::MemoryBackend;
 use crate::plugin::{HookManager, LifecycleEvent, PluginRegistry};
 use crate::providers::{ChatMessage, ChatRequest, Provider};
 use crate::skills;
+use crate::text::truncate_chars;
 use crate::tools::guardrails::{GuardrailDecision, ToolGuardrails};
 use crate::tools::Tool;
 use crate::trajectory::Trajectory;
@@ -826,7 +827,7 @@ impl AgentRunner {
             match self.provider.chat(&plan_request).await {
                 Ok(resp) => {
                     let p = resp.text.unwrap_or_default();
-                    tracing::info!("Plan: {}", &p[..p.len().min(300)]);
+                    tracing::info!("Plan: {}", truncate_chars(&p, 300));
 
                     if let Some(usage) = &resp.usage {
                         let _ = self
@@ -932,7 +933,7 @@ impl AgentRunner {
                 let mut queue = self.steering_queue.lock().unwrap();
                 if !queue.is_empty() {
                     for steer_msg in queue.drain(..) {
-                        tracing::info!("Steering: {}", &steer_msg[..steer_msg.len().min(80)]);
+                        tracing::info!("Steering: {}", truncate_chars(&steer_msg, 80));
                         messages.push(ChatMessage::user(format!(
                             "⚡ STEERING — new instruction from user (prioritize this): {}",
                             steer_msg
@@ -1080,11 +1081,7 @@ impl AgentRunner {
 
             // Legacy loop detection (backup for guardrails)
             for tc in &response.tool_calls {
-                let hash = format!(
-                    "{}:{}",
-                    tc.name,
-                    &tc.arguments[..tc.arguments.len().min(200)]
-                );
+                let hash = format!("{}:{}", tc.name, truncate_chars(&tc.arguments, 200));
                 tool_call_history.push(hash);
             }
             if tool_call_history.len() >= LOOP_BREAK_THRESHOLD {
@@ -1807,17 +1804,6 @@ impl AgentRunner {
 
 // ── Helper ──
 
-/// Take at most `limit` characters, never splitting a UTF-8 sequence.
-///
-/// Tool output is arbitrary bytes from the outside world, so slicing it by
-/// byte offset panics the moment a tool emits anything non-ASCII.
-fn truncate_chars(text: &str, limit: usize) -> &str {
-    match text.char_indices().nth(limit) {
-        Some((offset, _)) => &text[..offset],
-        None => text,
-    }
-}
-
 fn trajectory_filename(chat_id: &str) -> String {
     format!("traj_{:x}.json", Sha256::digest(chat_id.as_bytes()))
 }
@@ -1847,7 +1833,7 @@ fn extract_tool_hint(name: &str, arguments: &str) -> String {
     hint.map(|s| {
         let s = s.trim();
         if s.len() > 60 {
-            format!("{}…", &s[..57])
+            format!("{}…", truncate_chars(s, 57))
         } else {
             s.to_string()
         }

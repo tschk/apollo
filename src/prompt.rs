@@ -49,7 +49,10 @@ async fn read_file(workspace: &Path, filename: &str, limit: usize) -> Option<Str
         return None;
     }
     if trimmed.len() > limit {
-        Some(format!("{}...\n(truncated)", &trimmed[..limit]))
+        Some(format!(
+            "{}...\n(truncated)",
+            crate::text::truncate_chars(trimmed, limit)
+        ))
     } else {
         Some(trimmed.to_string())
     }
