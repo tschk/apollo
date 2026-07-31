@@ -1313,21 +1313,21 @@ impl AgentRunner {
                     tool_errors.push(format!(
                         "'{}' failed: {}",
                         tc.name,
-                        &result.output[..result.output.len().min(200)]
+                        truncate_chars(&result.output, 200)
                     ));
                 }
 
-                let truncated_output =
-                    if result.output.len() > self.agent_config.max_tool_result_chars {
-                        format!(
-                            "{}...\n⚠️ [Truncated {} → {} chars]",
-                            &result.output[..self.agent_config.max_tool_result_chars],
-                            result.output.len(),
-                            self.agent_config.max_tool_result_chars
-                        )
-                    } else {
-                        result.output.clone()
-                    };
+                let limit = self.agent_config.max_tool_result_chars;
+                let truncated_output = if result.output.len() > limit {
+                    format!(
+                        "{}...\n⚠️ [Truncated {} → {} chars]",
+                        truncate_chars(&result.output, limit),
+                        result.output.len(),
+                        limit
+                    )
+                } else {
+                    result.output.clone()
+                };
 
                 messages.push(ChatMessage::tool_result(&tc.id, &truncated_output));
             }
@@ -1700,7 +1700,15 @@ impl AgentRunner {
         if non_system.len() <= keep_recent {
             return Ok(messages);
         }
-        let (old_msgs, recent_msgs) = non_system.split_at(non_system.len() - keep_recent);
+        // A blind cut can land between an assistant's tool_call and its
+        // tool_result, leaving the kept tail opening with an orphan
+        // tool_result that providers reject. Walk the boundary forward until
+        // it no longer splits a pair.
+        let mut split = non_system.len() - keep_recent;
+        while split < non_system.len() && non_system[split].is_tool_result() {
+            split += 1;
+        }
+        let (old_msgs, recent_msgs) = non_system.split_at(split);
         let mut summary_input = String::new();
         for m in old_msgs {
             let role_label = match m.role.as_str() {
@@ -1799,6 +1807,17 @@ impl AgentRunner {
 
 // ── Helper ──
 
+/// Take at most `limit` characters, never splitting a UTF-8 sequence.
+///
+/// Tool output is arbitrary bytes from the outside world, so slicing it by
+/// byte offset panics the moment a tool emits anything non-ASCII.
+fn truncate_chars(text: &str, limit: usize) -> &str {
+    match text.char_indices().nth(limit) {
+        Some((offset, _)) => &text[..offset],
+        None => text,
+    }
+}
+
 fn trajectory_filename(chat_id: &str) -> String {
     format!("traj_{:x}.json", Sha256::digest(chat_id.as_bytes()))
 }
@@ -1848,7 +1867,35 @@ fn automatic_retry_allowed(tool: &str, output: &str) -> bool {
 mod retry_tests {
     use std::path::Path;
 
-    use super::{automatic_retry_allowed, trajectory_filename};
+    use super::{automatic_retry_allowed, trajectory_filename, truncate_chars, ChatMessage};
+
+    #[test]
+    fn truncating_multibyte_tool_output_does_not_panic() {
+        // Byte-slicing this at 200 would land mid-sequence and panic.
+        let output = "日本語".repeat(200);
+        assert_eq!(truncate_chars(&output, 200).chars().count(), 200);
+        assert_eq!(truncate_chars("hi", 200), "hi");
+        assert_eq!(truncate_chars("héllo", 2), "hé");
+    }
+
+    #[test]
+    fn compaction_boundary_never_orphans_a_tool_result() {
+        // The kept tail must not begin with a tool_result whose tool_call
+        // was summarized away.
+        let non_system = [
+            ChatMessage::user("a"),
+            ChatMessage::assistant("calls tool"),
+            ChatMessage::tool_result("id-1", "out"),
+            ChatMessage::assistant("done"),
+        ];
+        let keep_recent = 2;
+        let mut split = non_system.len() - keep_recent;
+        while split < non_system.len() && non_system[split].is_tool_result() {
+            split += 1;
+        }
+        assert_eq!(split, 3);
+        assert!(!non_system[split].is_tool_result());
+    }
 
     #[test]
     fn trajectory_filename_confines_external_chat_ids() {
