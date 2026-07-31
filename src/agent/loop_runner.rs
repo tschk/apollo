@@ -943,7 +943,10 @@ impl AgentRunner {
                 let mut queue = self.steering_queue.lock().unwrap();
                 if !queue.is_empty() {
                     for steer_msg in queue.drain(..) {
-                        tracing::info!("Steering: {}", truncate_chars(&steer_msg, 80));
+                        tracing::info!(
+                            chars = steer_msg.chars().count(),
+                            "Steering message queued"
+                        );
                         messages.push(ChatMessage::user(format!(
                             "⚡ STEERING — new instruction from user (prioritize this): {}",
                             steer_msg

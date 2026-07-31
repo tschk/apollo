@@ -83,8 +83,7 @@ pub struct LoggingHook;
 #[async_trait]
 impl ToolHook for LoggingHook {
     async fn before_tool_use(&self, tool_name: &str, arguments: &str) -> HookDecision {
-        let preview: String = arguments.chars().take(120).collect();
-        tracing::debug!("→ tool:{} args:{}", tool_name, preview);
+        tracing::debug!("→ tool:{} args_len:{}", tool_name, arguments.len());
         HookDecision::Allow
     }
 

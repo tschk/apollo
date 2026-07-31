@@ -129,7 +129,7 @@ impl Channel for IrcChannel {
     async fn send(&self, _message: OutgoingMessage) -> anyhow::Result<Option<String>> {
         // IRC send would need a shared writer handle
         // For now, log the message
-        tracing::info!("IRC send: {}", _message.text);
+        tracing::info!(chars = _message.text.chars().count(), "IRC send");
         Ok(None)
     }
 
