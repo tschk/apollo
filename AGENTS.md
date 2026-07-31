@@ -219,14 +219,19 @@ and before this filter existed they were scored `0.0` and still returned as
 |---------|--------|-------|
 | Telegram | ✅ Default | Full support (default feature) |
 | CLI | ✅ Default | Dev/testing (default feature) |
-| Discord | ⚠️ Opt-in | `channel-discord` feature |
-| Slack | ⚠️ Opt-in | `channel-slack` feature |
+| Discord | ❌ Incomplete | `channel-discord` — `start()` drops the sender, so nothing is ever received |
+| Slack | ❌ Incomplete | `channel-slack` — polls `conversations.history` with no `channel` param, so every poll errors |
 | WhatsApp | ⚠️ Opt-in | `channel-whatsapp` feature |
 | Matrix | ⚠️ Opt-in | `channel-matrix` feature |
 | Signal | ⚠️ Opt-in | `channel-signal` feature |
-| IRC | ⚠️ Opt-in | `channel-irc` feature |
-| Google Chat | ⚠️ Opt-in | `channel-googlechat` feature |
+| IRC | ❌ Incomplete | `channel-irc` — `send()` only logs; the bot cannot reply |
+| Google Chat | ❌ Incomplete | `channel-googlechat` — sends the service-account key as a bearer token instead of exchanging it for one |
 | MS Teams | ⚠️ Opt-in | `channel-msteams` feature |
+
+Channels marked ❌ compile and can be enabled, but do not work. They were
+found non-functional by an audit after 0.4.0 shipped advertising them. No
+channel except Telegram and CLI has an end-to-end test, which is why this went
+unnoticed — see the conformance-test gap in section 12.
 
 ## 6) Providers
 
