@@ -35,55 +35,6 @@ const FILTERED_SEARCH_MODELS: &[&str] = &[
 /// How many times a paused turn is resumed before returning what there is.
 const MAX_PAUSE_RESUMES: u32 = 5;
 
-/// Prefix every custom tool name carries on the OAuth wire.
-///
-/// Anthropic's subscription billing classifier inspects the declared tool set.
-/// A set of bare names is fingerprinted as a third-party app, and the request
-/// is billed against API extra usage instead of the plan — which fails with
-/// HTTP 400 "You're out of extra usage" on an account that has none. Verified
-/// against the live API: apollo's own tool set returns 400 as-is and 200 with
-/// this prefix applied, every other field held identical.
-const OAUTH_TOOL_PREFIX: &str = "mcp__";
-
-/// Claude Code release apollo identifies as on the OAuth wire. Anthropic
-/// validates the user-agent version, so this needs bumping occasionally.
-const CLAUDE_CODE_VERSION: &str = "2.1.220";
-
-/// Name a tool goes on the OAuth wire under.
-fn oauth_wire_tool_name(name: &str) -> String {
-    if name.starts_with(OAUTH_TOOL_PREFIX) {
-        return name.to_string();
-    }
-    if let Some(rest) = name.strip_prefix("mcp_") {
-        return format!("{OAUTH_TOOL_PREFIX}{rest}");
-    }
-    format!("{OAUTH_TOOL_PREFIX}{name}")
-}
-
-/// Reverse of [`oauth_wire_tool_name`], so the dispatcher sees apollo's own name.
-fn oauth_local_tool_name(name: &str) -> &str {
-    name.strip_prefix(OAUTH_TOOL_PREFIX).unwrap_or(name)
-}
-
-/// Rewrite `tool_use` block names in replayed history to their wire form.
-fn rename_history_tool_uses(messages: &mut [Value]) {
-    for msg in messages {
-        let Some(blocks) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
-            continue;
-        };
-        for block in blocks {
-            if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
-                continue;
-            }
-            let Some(name) = block.get("name").and_then(|n| n.as_str()) else {
-                continue;
-            };
-            let wire = oauth_wire_tool_name(name);
-            block["name"] = Value::String(wire);
-        }
-    }
-}
-
 /// Fold one response's token counts into the running total for the turn.
 fn add_usage(total: &mut Option<Usage>, data: &Value) {
     let Some(u) = data["usage"].as_object() else {
@@ -336,15 +287,8 @@ impl Provider for AnthropicProvider {
             }
         };
 
-        // Detect OAuth tokens (sk-ant-oat) vs API keys (sk-ant-api)
-        let api_key = self.resolve_key().await;
-        let is_oauth = api_key.contains("sk-ant-oat");
-
         // Build Anthropic-format messages
-        let mut messages: Vec<Value> = self.build_anthropic_messages(request.messages);
-        if is_oauth {
-            rename_history_tool_uses(&mut messages);
-        }
+        let messages: Vec<Value> = self.build_anthropic_messages(request.messages);
 
         let mut body = serde_json::json!({
             "model": request.model,
@@ -363,21 +307,6 @@ impl Provider for AnthropicProvider {
             .map(|t| self.build_tools_payload(t))
             .unwrap_or_default();
 
-        // Custom tools go on the OAuth wire under their prefixed names; the
-        // server tool below is Anthropic's own and keeps its real name.
-        let mut wire_to_local: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        if is_oauth {
-            for tool in &mut tool_payload {
-                if let Some(name) = tool.get("name").and_then(|n| n.as_str()) {
-                    let local = name.to_string();
-                    let wire = oauth_wire_tool_name(&local);
-                    wire_to_local.insert(wire.clone(), local);
-                    tool["name"] = Value::String(wire);
-                }
-            }
-        }
-
         // Anthropic runs this one itself; the results come back in the same
         // response rather than as a tool call apollo has to execute.
         if self.native_web_search {
@@ -391,6 +320,10 @@ impl Provider for AnthropicProvider {
         if !tool_payload.is_empty() {
             body["tools"] = Value::Array(tool_payload);
         }
+
+        // Detect OAuth tokens (sk-ant-oat) vs API keys (sk-ant-api)
+        let api_key = self.resolve_key().await;
+        let is_oauth = api_key.contains("sk-ant-oat");
 
         // OAuth tokens require the system prompt to start with the Claude Code identity prefix
         if is_oauth {
@@ -439,12 +372,7 @@ impl Provider for AnthropicProvider {
                         "anthropic-beta",
                         "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
                     )
-                    .header("anthropic-dangerous-direct-browser-access", "true")
-                    .header(
-                        "user-agent",
-                        format!("claude-code/{CLAUDE_CODE_VERSION} (external, cli)"),
-                    )
-                    .header("x-app", "cli");
+                    .header("anthropic-dangerous-direct-browser-access", "true");
             } else {
                 req_builder = req_builder
                     .header("x-api-key", &api_key)
@@ -485,20 +413,9 @@ impl Provider for AnthropicProvider {
                             }
                         }
                         Some("tool_use") => {
-                            let wire_name = block["name"].as_str().unwrap_or("");
-                            let name = wire_to_local
-                                .get(wire_name)
-                                .map(String::as_str)
-                                .unwrap_or_else(|| {
-                                    if is_oauth {
-                                        oauth_local_tool_name(wire_name)
-                                    } else {
-                                        wire_name
-                                    }
-                                });
                             tool_calls.push(ToolCall {
                                 id: block["id"].as_str().unwrap_or("").to_string(),
-                                name: name.to_string(),
+                                name: block["name"].as_str().unwrap_or("").to_string(),
                                 arguments: block["input"].to_string(),
                             });
                         }
@@ -574,39 +491,6 @@ impl Provider for AnthropicProvider {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[test]
-    fn wire_tool_names_land_on_the_double_underscore_form() {
-        assert_eq!(oauth_wire_tool_name("exec"), "mcp__exec");
-        assert_eq!(
-            oauth_wire_tool_name("mcp_linear_issue"),
-            "mcp__linear_issue"
-        );
-        assert_eq!(oauth_wire_tool_name("mcp__already"), "mcp__already");
-        assert_eq!(oauth_local_tool_name("mcp__exec"), "exec");
-        assert_eq!(oauth_local_tool_name("exec"), "exec");
-    }
-
-    #[test]
-    fn replayed_tool_uses_get_wire_names() {
-        let mut messages = vec![serde_json::json!({
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "working"},
-                {"type": "tool_use", "id": "t1", "name": "exec", "input": {}},
-            ],
-        })];
-        rename_history_tool_uses(&mut messages);
-        assert_eq!(messages[0]["content"][1]["name"], "mcp__exec");
-        assert_eq!(messages[0]["content"][0]["type"], "text");
-    }
-
-    #[test]
-    fn plain_string_content_survives_the_rename_pass() {
-        let mut messages = vec![serde_json::json!({"role": "user", "content": "hi"})];
-        rename_history_tool_uses(&mut messages);
-        assert_eq!(messages[0]["content"], "hi");
-    }
 
     #[test]
     fn filtered_search_only_for_models_that_accept_it() {
