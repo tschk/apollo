@@ -133,7 +133,9 @@ impl CostTracker {
     pub async fn summary(&self) -> CostSummary {
         let costs = self.costs.read().await;
 
-        let total_cost: f64 = costs.iter().map(|c| c.cost_usd).sum();
+        // Folded from a positive zero rather than summed: `<f64 as Sum>` starts
+        // at -0.0, so an empty tracker would otherwise report "-0.0" spent.
+        let total_cost: f64 = costs.iter().map(|c| c.cost_usd).fold(0.0, |acc, c| acc + c);
         let total_tokens: usize = costs.iter().map(|c| c.input_tokens + c.output_tokens).sum();
 
         let mut by_model: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
@@ -251,6 +253,15 @@ mod tests {
         let summary = tracker.summary().await;
         assert_eq!(summary.call_count, 1);
         assert!(summary.total_cost > 0.0);
+    }
+
+    #[tokio::test]
+    async fn an_empty_tracker_reports_a_positive_zero_cost() {
+        let summary = CostTracker::new().summary().await;
+        assert_eq!(summary.call_count, 0);
+        assert_eq!(summary.total_cost, 0.0);
+        assert!(!summary.total_cost.is_sign_negative());
+        assert_eq!(format!("{:.1}", summary.total_cost), "0.0");
     }
 
     #[tokio::test]
