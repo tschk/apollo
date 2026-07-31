@@ -40,6 +40,7 @@ pub mod skill_manager;
 #[cfg(feature = "plugin-skills")]
 pub use skill_manager::SkillManagerTool;
 pub mod sleep_tool;
+pub mod telekinesis;
 pub mod todo_write;
 pub mod tool_search;
 pub mod toolsets;
@@ -61,6 +62,7 @@ pub use coding_swarm::CodingSwarmTool;
 pub use config_tool::ConfigTool;
 pub use cron_tool::CronTool;
 pub use sleep_tool::SleepTool;
+pub use telekinesis::TelekinesisTool;
 pub use todo_write::TodoWriteTool;
 pub use tool_search::ToolSearchTool;
 pub use traits::{Tool, ToolResult, ToolSpec};
