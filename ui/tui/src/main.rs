@@ -478,7 +478,7 @@ impl App {
         if let Some(index) = self
             .catalogue
             .iter()
-            .position(|(_, models)| models.iter().any(|m| *m == self.model))
+            .position(|(_, models)| models.contains(&self.model))
         {
             self.provider_choice = index;
         }
