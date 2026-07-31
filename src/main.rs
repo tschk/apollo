@@ -57,11 +57,11 @@ enum Commands {
         channel: String,
 
         /// Telegram bot token (required for --channel telegram)
-        #[arg(long)]
+        #[arg(long, env = "APOLLO_TELEGRAM_TOKEN", hide_env_values = true)]
         telegram_token: Option<String>,
 
         /// Telegram chat ID (required for --channel telegram)
-        #[arg(long)]
+        #[arg(long, env = "APOLLO_CHAT_ID")]
         telegram_chat_id: Option<i64>,
 
         /// Discord bot token (required for --channel discord)

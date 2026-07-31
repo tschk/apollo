@@ -658,15 +658,17 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
 
     let mut exec_args = format!("{} chat --channel {}", bin_path.display(), channel);
     if tg_token.is_some() {
+        // The token stays in APOLLO_TELEGRAM_TOKEN, sourced from .env above:
+        // an argv value is visible in `ps` to every local user.
         exec_args.push_str(&format!(
-            " --telegram-token $APOLLO_TELEGRAM_TOKEN --telegram-chat-id {}",
+            " --telegram-chat-id {}",
             tg_chat_id.as_deref().unwrap_or("0")
         ));
     }
     exec_args.push_str(&format!(" --model {}", model));
 
     let run_script = format!(
-        "#!/bin/bash\nsource {}\nexport RUST_LOG=info\ncd {}\nexec {}\n",
+        "#!/bin/bash\nset -a\nsource {}\nset +a\nexport RUST_LOG=info\ncd {}\nexec {}\n",
         env_path.display(),
         workspace.display(),
         exec_args,

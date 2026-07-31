@@ -39,9 +39,8 @@ kill_bot() {
 start_bot() {
   log "Starting apollo…"
   cd "$REPO"
-  nohup "$BIN" chat \
+  nohup env APOLLO_TELEGRAM_TOKEN="$TELEGRAM_TOKEN" "$BIN" chat \
     --channel telegram \
-    --telegram-token "$TELEGRAM_TOKEN" \
     --telegram-chat-id "$TELEGRAM_CHAT_ID" \
     --model "$MODEL" \
     >> "$LOG" 2>&1 &
