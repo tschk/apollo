@@ -265,7 +265,14 @@ fn authorize(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
     check_auth(headers)
 }
 
-pub fn spawn_http_server(runner: Arc<AgentRunner>) {
+/// Start the HTTP server.
+///
+/// The `JoinHandle` is returned rather than dropped: `with_graceful_shutdown`
+/// only drains in-flight requests if something awaits the task. Without this
+/// the runtime is dropped as soon as `main` returns and connections are cut
+/// mid-response.
+#[must_use = "await this handle on shutdown, or in-flight requests are cut off"]
+pub fn spawn_http_server(runner: Arc<AgentRunner>) -> tokio::task::JoinHandle<()> {
     let addr = http_listen_addr();
     match load_or_create_token() {
         Ok(token) => {
@@ -302,7 +309,23 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) {
         {
             tracing::error!("apollo http server: {}", e);
         }
-    });
+    })
+}
+
+/// How long shutdown waits for in-flight HTTP requests to finish. Bounded, so
+/// one genuinely stuck request cannot hold the process open forever.
+pub const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wait for the server task to finish draining, up to `DRAIN_TIMEOUT`.
+pub async fn drain_http_server(handle: tokio::task::JoinHandle<()>) {
+    match tokio::time::timeout(DRAIN_TIMEOUT, handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("apollo http server task ended abnormally: {e}"),
+        Err(_) => tracing::warn!(
+            "apollo http server did not finish draining within {}s; exiting anyway",
+            DRAIN_TIMEOUT.as_secs()
+        ),
+    }
 }
 
 /// Signalled by `/shutdown`. The process unwinds from `main` so destructors

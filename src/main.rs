@@ -692,12 +692,16 @@ async fn main() -> anyhow::Result<()> {
 
             let runner_arc = Arc::new(runner);
 
-            if std::env::var("APOLLO_HTTP")
+            let http_server = if std::env::var("APOLLO_HTTP")
                 .map(|v| v != "0")
                 .unwrap_or(true)
             {
-                apollo::agent_http::spawn_http_server(Arc::clone(&runner_arc));
-            }
+                Some(apollo::agent_http::spawn_http_server(Arc::clone(
+                    &runner_arc,
+                )))
+            } else {
+                None
+            };
 
             runner_arc.add_hook(Arc::new(PermissionHook::new(
                 cfg.agent.permissions.deny.clone(),
@@ -870,6 +874,12 @@ async fn main() -> anyhow::Result<()> {
                 result = serve_channels => result?,
                 _ = apollo::agent_http::wait_for_shutdown() => {
                     println!("shutting down");
+                    // The server task owns the graceful-shutdown future;
+                    // nothing drains unless it is awaited here, and dropping
+                    // the runtime instead cuts in-flight responses.
+                    if let Some(handle) = http_server {
+                        apollo::agent_http::drain_http_server(handle).await;
+                    }
                 }
             }
         }

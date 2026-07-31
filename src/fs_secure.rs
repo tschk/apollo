@@ -130,7 +130,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("secret");
-        let stale_temp = tmp.path().join(format!(".secret.{}.tmp", std::process::id()));
+        let stale_temp = tmp
+            .path()
+            .join(format!(".secret.{}.tmp", std::process::id()));
         std::fs::write(&stale_temp, "junk").unwrap();
         std::fs::set_permissions(&stale_temp, std::fs::Permissions::from_mode(0o666)).unwrap();
 
