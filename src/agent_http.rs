@@ -31,6 +31,83 @@ pub struct ChatResponseBody {
     pub response: String,
 }
 
+/// Everything a client needs to render a status bar.
+///
+/// Fields the running agent cannot report are absent rather than zeroed:
+/// `AgentRunner` keeps its memory backend private, so per-chat message counts
+/// and the provider name are not observable from here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StateBody {
+    pub model: String,
+    pub engine: String,
+    pub mode: String,
+    pub cost_usd: f64,
+    pub total_tokens: usize,
+    pub call_count: usize,
+    /// Input tokens of the most recent model call — what the agent actually
+    /// sent as context on its last turn.
+    pub context_tokens: usize,
+    /// apollo's own compaction budget (`agent.max_context_chars`) expressed in
+    /// tokens at four characters per token. It is the threshold the status bar
+    /// should measure against, not the provider's hard window.
+    pub context_window: usize,
+    pub context_pct: u8,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModelRequestBody {
+    pub model: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChatIdRequestBody {
+    #[serde(default = "default_chat_id")]
+    pub chat_id: String,
+}
+
+fn mode_name(mode: &crate::agent::mode::AgentMode) -> &'static str {
+    use crate::agent::mode::AgentMode;
+    match mode {
+        AgentMode::Auto => "auto",
+        AgentMode::BypassPermissions => "bypass",
+        AgentMode::Coding { .. } => "coding",
+        AgentMode::Swarm { .. } => "swarm",
+    }
+}
+
+fn context_percent(used: usize, window: usize) -> u8 {
+    if window == 0 {
+        return 0;
+    }
+    ((used * 100) / window).min(100) as u8
+}
+
+pub async fn build_state(runner: &AgentRunner) -> StateBody {
+    let summary = runner.get_cost_summary().await;
+    let context_tokens = runner
+        .cost_tracker()
+        .history(1)
+        .await
+        .last()
+        .map(|record| record.input_tokens)
+        .unwrap_or(0);
+    let context_window = runner.agent_config.max_context_chars / 4;
+    StateBody {
+        model: runner.get_model(),
+        engine: match runner.agent_config.engine() {
+            crate::config::AgentEngine::Rx4 => "rx4".into(),
+            crate::config::AgentEngine::Legacy => "legacy".into(),
+        },
+        mode: mode_name(&runner.get_mode()).into(),
+        cost_usd: summary.total_cost,
+        total_tokens: summary.total_tokens,
+        call_count: summary.call_count,
+        context_tokens,
+        context_window,
+        context_pct: context_percent(context_tokens, context_window),
+    }
+}
+
 pub async fn chat_once(
     runner: &AgentRunner,
     message: &str,
@@ -188,6 +265,10 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) {
             .route("/health", get(|| async { "ok" }))
             .route("/v1/chat", post(chat_handler))
             .route("/v1/chat/stream", get(ws_chat_upgrade))
+            .route("/v1/state", get(state_handler))
+            .route("/v1/model", post(model_handler))
+            .route("/v1/compact", post(compact_handler))
+            .route("/v1/clear", post(clear_handler))
             .route("/shutdown", post(shutdown_handler))
             .with_state(runner);
         let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -238,6 +319,75 @@ async fn chat_handler(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+async fn state_handler(
+    State(runner): State<Arc<AgentRunner>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<StateBody>, StatusCode> {
+    authorize(&headers)?;
+    Ok(Json(build_state(&runner).await))
+}
+
+async fn model_handler(
+    State(runner): State<Arc<AgentRunner>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ModelRequestBody>,
+) -> Result<Json<StateBody>, StatusCode> {
+    authorize(&headers)?;
+    let model = body.model.trim();
+    if model.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if model == "default" || model == "reset" {
+        runner.reset_model();
+    } else {
+        runner.set_model(model);
+    }
+    tracing::info!("model switched over HTTP to {}", runner.get_model());
+    Ok(Json(build_state(&runner).await))
+}
+
+/// Why compaction and history clearing are not served yet.
+///
+/// Both need the conversation store, and `AgentRunner` owns its
+/// `Arc<dyn MemoryBackend>` privately — there is no accessor to reach it from
+/// this module. Answering 501 with the reason keeps the contract explicit
+/// instead of pretending the work happened.
+const NO_MEMORY_ACCESS: &str =
+    "unavailable: AgentRunner exposes no accessor for its memory backend, so the \
+     server cannot reach this chat's conversation store";
+
+#[derive(Debug, Serialize)]
+pub struct UnavailableBody {
+    pub error: &'static str,
+}
+
+fn unavailable() -> (StatusCode, Json<UnavailableBody>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(UnavailableBody {
+            error: NO_MEMORY_ACCESS,
+        }),
+    )
+}
+
+async fn compact_handler(
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ChatIdRequestBody>,
+) -> Result<(StatusCode, Json<UnavailableBody>), StatusCode> {
+    authorize(&headers)?;
+    let _ = body.chat_id;
+    Ok(unavailable())
+}
+
+async fn clear_handler(
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ChatIdRequestBody>,
+) -> Result<(StatusCode, Json<UnavailableBody>), StatusCode> {
+    authorize(&headers)?;
+    let _ = body.chat_id;
+    Ok(unavailable())
 }
 
 async fn ws_chat_upgrade(
@@ -381,5 +531,81 @@ mod tests {
     #[test]
     fn requests_without_an_origin_pass_the_browser_check() {
         assert!(reject_browser_origin(&headers(&[])).is_ok());
+    }
+
+    #[test]
+    fn a_model_request_needs_only_the_model_field() {
+        let body: ModelRequestBody = serde_json::from_str(r#"{"model":"claude-opus-4"}"#).unwrap();
+        assert_eq!(body.model, "claude-opus-4");
+        assert!(serde_json::from_str::<ModelRequestBody>("{}").is_err());
+    }
+
+    #[test]
+    fn a_chat_id_request_defaults_to_the_embed_chat() {
+        let body: ChatIdRequestBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(body.chat_id, "embed");
+        let body: ChatIdRequestBody = serde_json::from_str(r#"{"chat_id":"tui"}"#).unwrap();
+        assert_eq!(body.chat_id, "tui");
+    }
+
+    #[test]
+    fn state_round_trips_through_json_with_every_field() {
+        let state = StateBody {
+            model: "claude-sonnet-4-5".into(),
+            engine: "legacy".into(),
+            mode: "auto".into(),
+            cost_usd: 0.25,
+            total_tokens: 1234,
+            call_count: 3,
+            context_tokens: 8000,
+            context_window: 32_000,
+            context_pct: 25,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        for key in [
+            "model",
+            "engine",
+            "mode",
+            "cost_usd",
+            "total_tokens",
+            "call_count",
+            "context_tokens",
+            "context_window",
+            "context_pct",
+        ] {
+            assert!(value.get(key).is_some(), "missing field: {key}");
+        }
+        assert_eq!(serde_json::from_str::<StateBody>(&json).unwrap(), state);
+    }
+
+    #[test]
+    fn context_percent_saturates_and_survives_a_zero_window() {
+        assert_eq!(context_percent(0, 1000), 0);
+        assert_eq!(context_percent(700, 1000), 70);
+        assert_eq!(context_percent(5000, 1000), 100);
+        assert_eq!(context_percent(500, 0), 0);
+    }
+
+    #[test]
+    fn every_agent_mode_has_a_stable_name() {
+        use crate::agent::mode::AgentMode;
+        assert_eq!(mode_name(&AgentMode::Auto), "auto");
+        assert_eq!(mode_name(&AgentMode::BypassPermissions), "bypass");
+        assert_eq!(
+            mode_name(&AgentMode::Coding {
+                plan_approval: false,
+                project_path: None,
+            }),
+            "coding"
+        );
+        assert_eq!(mode_name(&AgentMode::Swarm { parallelism: 2 }), "swarm");
+    }
+
+    #[test]
+    fn the_unavailable_body_explains_itself() {
+        let (status, Json(body)) = unavailable();
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(body.error.contains("memory backend"));
     }
 }
