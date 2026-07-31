@@ -24,13 +24,18 @@ Goals:
 > optimizations (`opt-level = "z"`, LTO, strip, `panic = abort`) remain enabled
 > but the release binary exceeds 10MB. Treat <10MB as aspirational, not a gate.
 
-> **Startup:** measured warm boot is ~90ms, not <10ms. Opening the embedded
-> RocksDB that backs SurrealDB accounts for ~51ms of that and running
-> `SCHEMA_SQL` for ~10ms; everything else on the boot path together is under
-> 1.5ms. Skill discovery, prompt assembly, config parsing and workspace setup
-> are each well under a millisecond and are *not* worth optimizing — measure
-> before believing otherwise. <10ms is unreachable while the store opens
-> eagerly, so treat it as aspirational too.
+> **Startup:** measured warm boot is ~41ms, not <10ms. It was ~90ms until
+> `SurrealMemory` moved to a lazy `OnceCell` open — the embedded RocksDB open
+> cost ~51ms and `SCHEMA_SQL` ~10ms, and both now happen off the boot path,
+> with a warm-up task in `build_memory_backend` so a broken database still
+> errors promptly rather than waiting for the first message.
+>
+> Everything else on the boot path totals under 1.5ms. Skill discovery, prompt
+> assembly, config parsing and workspace setup are each well under a
+> millisecond and are *not* worth optimizing — measure before believing
+> otherwise. A schema-version gate to skip the 69 `DEFINE` statements was
+> tried and measured at no gain; don't re-add it. <10ms remains out of reach,
+> so treat it as aspirational.
 
 > **rx4 migration:** apollo is migrating its built-in agent loop to the
 > `rx4` (rotary) harness engine. `rx4` is a crates.io dependency providing
