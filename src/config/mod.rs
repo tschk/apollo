@@ -319,7 +319,161 @@ pub fn apply_permission_profile(cfg: &mut Config, profile: &str) {
     }
 }
 
+/// Leaf field names whose values must never be printed.
+const SECRET_LEAF_KEYS: &[&str] = &["api_key", "token", "secret", "password"];
+
+/// Whether a leaf field name holds a credential.
+pub fn is_secret_key(leaf: &str) -> bool {
+    let leaf = leaf.to_ascii_lowercase();
+    SECRET_LEAF_KEYS
+        .iter()
+        .any(|s| leaf == *s || leaf.ends_with(&format!("_{s}")))
+}
+
+/// Replace every credential-bearing leaf with a fixed mask, in place.
+///
+/// Empty strings and nulls stay as they are: "unset" is not a secret, and
+/// showing a mask for one would be a lie.
+pub fn mask_secrets(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if is_secret_key(key) {
+                    if let serde_json::Value::String(s) = child {
+                        if !s.is_empty() {
+                            *child = serde_json::Value::String("********".to_string());
+                            continue;
+                        }
+                    }
+                }
+                mask_secrets(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                mask_secrets(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn lookup<'a>(root: &'a serde_json::Value, key: &str) -> anyhow::Result<&'a serde_json::Value> {
+    let mut current = root;
+    let mut walked: Vec<&str> = Vec::new();
+    for segment in key.split('.') {
+        let object = current.as_object().ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown config key `{key}`: `{}` is not a section",
+                walked.join(".")
+            )
+        })?;
+        current = object.get(segment).ok_or_else(|| {
+            let mut names: Vec<&str> = object.keys().map(|k| k.as_str()).collect();
+            names.sort_unstable();
+            anyhow::anyhow!(
+                "unknown config key `{key}`. Available under `{}`: {}",
+                if walked.is_empty() {
+                    "<root>".to_string()
+                } else {
+                    walked.join(".")
+                },
+                names.join(", ")
+            )
+        })?;
+        walked.push(segment);
+    }
+    Ok(current)
+}
+
+fn coerce(existing: &serde_json::Value, input: &str) -> anyhow::Result<serde_json::Value> {
+    use serde_json::Value;
+    match existing {
+        Value::String(_) => Ok(Value::String(input.to_string())),
+        Value::Bool(_) => input
+            .parse::<bool>()
+            .map(Value::Bool)
+            .map_err(|_| anyhow::anyhow!("expected `true` or `false`, got `{input}`")),
+        Value::Number(n) => {
+            if n.is_f64() {
+                input
+                    .parse::<f64>()
+                    .ok()
+                    .and_then(serde_json::Number::from_f64)
+                    .map(Value::Number)
+                    .ok_or_else(|| anyhow::anyhow!("expected a number, got `{input}`"))
+            } else {
+                input
+                    .parse::<i64>()
+                    .map(|v| Value::Number(v.into()))
+                    .map_err(|_| anyhow::anyhow!("expected an integer, got `{input}`"))
+            }
+        }
+        Value::Array(_) | Value::Object(_) => serde_json::from_str(input)
+            .map_err(|e| anyhow::anyhow!("expected JSON matching the existing value: {e}")),
+        Value::Null => Ok(serde_json::from_str(input).unwrap_or(Value::String(input.to_string()))),
+    }
+}
+
+fn assign(root: &mut serde_json::Value, key: &str, value: serde_json::Value) {
+    let segments: Vec<&str> = key.split('.').collect();
+    let mut current = root;
+    for segment in &segments[..segments.len() - 1] {
+        if !current.is_object() {
+            *current = serde_json::Value::Object(serde_json::Map::new());
+        }
+        current = current
+            .as_object_mut()
+            .expect("object")
+            .entry((*segment).to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    }
+    if !current.is_object() {
+        *current = serde_json::Value::Object(serde_json::Map::new());
+    }
+    current
+        .as_object_mut()
+        .expect("object")
+        .insert(segments[segments.len() - 1].to_string(), value);
+}
+
 impl Config {
+    /// Read a dotted path (`agent.engine`, `provider.name`, `model`) out of the
+    /// effective configuration.
+    pub fn get_path(&self, key: &str) -> anyhow::Result<serde_json::Value> {
+        if key.trim().is_empty() {
+            anyhow::bail!("empty config key");
+        }
+        let root = serde_json::to_value(self)?;
+        lookup(&root, key).cloned()
+    }
+
+    /// Coerce `value` to the type the schema already uses at `key`, apply it,
+    /// and round-trip the result through `Config` so an invalid write is
+    /// rejected before it can reach disk.
+    ///
+    /// Returns the updated config and the JSON value that was written, so a
+    /// caller can splice just that path into the on-disk file.
+    pub fn set_path(&self, key: &str, value: &str) -> anyhow::Result<(Config, serde_json::Value)> {
+        if key.trim().is_empty() {
+            anyhow::bail!("empty config key");
+        }
+        let mut root = serde_json::to_value(self)?;
+        let existing = lookup(&root, key)?;
+        let coerced = coerce(existing, value)
+            .map_err(|e| anyhow::anyhow!("invalid value for `{key}`: {e}"))?;
+        assign(&mut root, key, coerced.clone());
+        let updated: Config = serde_json::from_value(root)
+            .map_err(|e| anyhow::anyhow!("invalid value for `{key}`: {e}"))?;
+        Ok((updated, coerced))
+    }
+
+    /// Splice a validated value into a raw config document, leaving every other
+    /// key in the file untouched.
+    pub fn splice_into_raw(raw: &mut serde_json::Value, key: &str, value: serde_json::Value) {
+        assign(raw, key, value);
+    }
+
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = serde_json::from_str(&content)?;
@@ -475,6 +629,96 @@ impl Default for GroupChatConfig {
             rolling_memory_recent_turns: 16,
             ambient_question_window: 24,
         }
+    }
+}
+
+#[cfg(test)]
+mod config_path_tests {
+    use super::*;
+
+    #[test]
+    fn get_reads_nested_and_top_level_keys() {
+        let cfg = Config::default_config();
+        assert_eq!(cfg.get_path("model").unwrap(), cfg.model.as_str());
+        assert_eq!(cfg.get_path("agent.engine").unwrap(), "legacy");
+        assert_eq!(cfg.get_path("provider.name").unwrap(), "anthropic");
+        assert_eq!(cfg.get_path("agent.max_rounds").unwrap(), 50);
+    }
+
+    #[test]
+    fn set_updates_strings_bools_and_numbers() {
+        let cfg = Config::default_config();
+        let (cfg, _) = cfg.set_path("agent.engine", "rx4").unwrap();
+        assert_eq!(cfg.agent.engine, "rx4");
+        let (cfg, _) = cfg.set_path("policy.allow_shell", "false").unwrap();
+        assert!(!cfg.policy.allow_shell);
+        let (cfg, written) = cfg.set_path("agent.max_rounds", "12").unwrap();
+        assert_eq!(cfg.agent.max_rounds, 12);
+        assert_eq!(written, 12);
+    }
+
+    #[test]
+    fn set_fills_an_optional_field_that_was_null() {
+        let cfg = Config::default_config();
+        let (cfg, _) = cfg
+            .set_path("provider.base_url", "http://localhost:11434")
+            .unwrap();
+        assert_eq!(
+            cfg.provider.base_url.as_deref(),
+            Some("http://localhost:11434")
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected_with_the_available_names() {
+        let cfg = Config::default_config();
+        let err = cfg.set_path("agent.nope", "1").unwrap_err().to_string();
+        assert!(err.contains("unknown config key `agent.nope`"), "{err}");
+        assert!(err.contains("engine"), "{err}");
+
+        let err = cfg.get_path("not_a_section.x").unwrap_err().to_string();
+        assert!(err.contains("unknown config key"), "{err}");
+    }
+
+    #[test]
+    fn wrong_typed_values_are_rejected_before_they_reach_disk() {
+        let cfg = Config::default_config();
+        let err = cfg
+            .set_path("agent.max_rounds", "abc")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected an integer"), "{err}");
+
+        let err = cfg
+            .set_path("policy.allow_shell", "yes-please")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected `true` or `false`"), "{err}");
+    }
+
+    #[test]
+    fn secrets_are_masked_and_other_values_are_not() {
+        let mut cfg = Config::default_config();
+        cfg.provider.api_key = Some("sk-ant-secret-value".to_string());
+        cfg.channel.token = Some("123:telegram-secret".to_string());
+        let mut value = serde_json::to_value(&cfg).unwrap();
+        mask_secrets(&mut value);
+        let rendered = serde_json::to_string(&value).unwrap();
+        assert!(!rendered.contains("sk-ant-secret-value"), "{rendered}");
+        assert!(!rendered.contains("telegram-secret"), "{rendered}");
+        assert_eq!(value["provider"]["api_key"], "********");
+        assert_eq!(value["channel"]["token"], "********");
+        assert_eq!(value["provider"]["name"], "anthropic");
+    }
+
+    #[test]
+    fn splicing_preserves_unrelated_keys_in_the_file() {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(r#"{"model":"m","custom":{"kept":true}}"#).unwrap();
+        Config::splice_into_raw(&mut raw, "agent.engine", serde_json::json!("rx4"));
+        assert_eq!(raw["custom"]["kept"], true);
+        assert_eq!(raw["model"], "m");
+        assert_eq!(raw["agent"]["engine"], "rx4");
     }
 }
 

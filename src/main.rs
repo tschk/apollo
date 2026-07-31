@@ -198,6 +198,16 @@ enum Commands {
         force: bool,
     },
 
+    /// Read or change configuration values
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+
+        /// Configuration file path
+        #[arg(short, long, default_value = "apollo.json")]
+        config: String,
+    },
+
     /// Send a message to the running apollo bot via Telegram
     #[command(alias = "msg")]
     Message {
@@ -310,6 +320,29 @@ enum Commands {
         #[arg(short, long)]
         workspace: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Print the effective configuration with secrets masked
+    List,
+
+    /// Print one value by dotted path (e.g. `agent.engine`)
+    Get {
+        /// Dotted config key
+        key: String,
+    },
+
+    /// Set one value by dotted path, validated against the schema
+    Set {
+        /// Dotted config key
+        key: String,
+        /// New value
+        value: String,
+    },
+
+    /// Print the config file in use
+    Path,
 }
 
 #[derive(Subcommand)]
@@ -1010,6 +1043,10 @@ async fn main() -> anyhow::Result<()> {
                 force,
             })
             .await?;
+        }
+
+        Commands::Config { action, config } => {
+            run_config_command(action, &config)?;
         }
 
         Commands::Message {
@@ -1815,6 +1852,56 @@ async fn find_apollo_ui_binary() -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+fn run_config_command(action: ConfigAction, path: &str) -> anyhow::Result<()> {
+    match action {
+        ConfigAction::Path => {
+            let full = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+            println!("{}", full.display());
+            if !Path::new(path).exists() {
+                eprintln!("(does not exist yet — run `apollo init`)");
+            }
+        }
+        ConfigAction::List => {
+            require_config_file(path)?;
+            let cfg = load_config(path);
+            let mut value = serde_json::to_value(&cfg)?;
+            apollo::config::mask_secrets(&mut value);
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        ConfigAction::Get { key } => {
+            require_config_file(path)?;
+            let cfg = load_config(path);
+            let mut value = cfg.get_path(&key)?;
+            let leaf = key.rsplit('.').next().unwrap_or(&key).to_string();
+            let mut wrapper = serde_json::json!({ leaf.clone(): value });
+            apollo::config::mask_secrets(&mut wrapper);
+            value = wrapper[&leaf].take();
+            match value {
+                serde_json::Value::String(s) => println!("{s}"),
+                other => println!("{}", serde_json::to_string_pretty(&other)?),
+            }
+        }
+        ConfigAction::Set { key, value } => {
+            require_config_file(path)?;
+            // Validate against the file itself, not the env-merged view, so a
+            // credential picked up from the environment is never written out.
+            let cfg = Config::load(path)?;
+            let (_validated, written) = cfg.set_path(&key, &value)?;
+            let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+            Config::splice_into_raw(&mut raw, &key, written.clone());
+            let rendered = serde_json::to_string_pretty(&raw)?;
+            std::fs::write(path, format!("{rendered}\n"))?;
+            let shown = if apollo::config::is_secret_key(key.rsplit('.').next().unwrap_or(&key)) {
+                serde_json::Value::String("********".to_string())
+            } else {
+                written
+            };
+            println!("{key} = {shown}");
+        }
+    }
+    Ok(())
 }
 
 fn config_path_for_cli(cli: &Cli) -> Option<String> {
