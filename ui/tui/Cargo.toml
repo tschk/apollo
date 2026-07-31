@@ -12,7 +12,7 @@ name = "apollo-tui"
 path = "src/main.rs"
 
 [dependencies]
-crepuscularity-tui = "0.4.22"
+crepuscularity-tui = "0.4.23"
 crossterm = "0.28"
 anyhow = "1"
 serde_json = "1"
