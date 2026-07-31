@@ -16,13 +16,21 @@ Goals:
 - Fast startup (<10ms), low RAM (<10MB)
 - Async-first (tokio), no blocking on the runtime thread
 - Swappable providers, channels, tools via traits
-- Persistent memory with FTS5 + vector hybrid search
+- Persistent memory with BM25 full-text + vector hybrid search
 - Agent swarm support (parallel sub-agents)
 
 > **Binary size:** The original <10MB target is no longer achievable with the
 > current dependency tree (SurrealDB + RocksDB + rx4 + reqwest + axum). Size
 > optimizations (`opt-level = "z"`, LTO, strip, `panic = abort`) remain enabled
 > but the release binary exceeds 10MB. Treat <10MB as aspirational, not a gate.
+
+> **Startup:** measured warm boot is ~90ms, not <10ms. Opening the embedded
+> RocksDB that backs SurrealDB accounts for ~51ms of that and running
+> `SCHEMA_SQL` for ~10ms; everything else on the boot path together is under
+> 1.5ms. Skill discovery, prompt assembly, config parsing and workspace setup
+> are each well under a millisecond and are *not* worth optimizing — measure
+> before believing otherwise. <10ms is unreachable while the store opens
+> eagerly, so treat it as aspirational too.
 
 > **rx4 migration:** apollo is migrating its built-in agent loop to the
 > `rx4` (rotary) harness engine. `rx4` is a crates.io dependency providing
@@ -105,6 +113,30 @@ src/
 - SurrealDB + RocksDB is the intended primary backend direction
 - Sticker cache: `sticker_id → description` (avoids re-analysis)
 - Conversation history: last 20 messages per chat_id, loaded on each request
+
+#### Storage layers — what is actually where
+
+"SurrealDB + RocksDB" is **one** database, not two. RocksDB is SurrealDB's
+embedded storage engine, selected by the `kv-rocksdb` feature on the
+`surrealdb` dependency. The `DEFINE TABLE`/`DEFINE INDEX` statements in
+`SCHEMA_SQL` are SurrealQL, SurrealDB's own schema language — not SQLite.
+
+- **SurrealDB** (`src/memory/surreal.rs`) — primary store. Memories,
+  conversations, embeddings, sticker cache, cron jobs, graph memory nodes.
+  Full-text search is SurrealDB's own BM25 with a snowball analyzer.
+- **zkr** (`src/memory/zkr.rs`, `zkr-memory` feature, on by default) — a
+  genuinely separate SQLite-backed store for evidence-backed temporal memory.
+  This is the only other embedded database in the default build.
+- **rocksdb** (direct dependency) — used *only* by `src/swarm/storage.rs`,
+  behind the non-default `swarm` feature. It resolves to the same
+  `librocksdb-sys` that SurrealDB already pulls in, so it costs no extra
+  compilation and should not be "consolidated away".
+
+Vector search uses SurrealDB's native KNN `<| |>` operator with an in-process
+cosine scan as fallback. There is deliberately **no MTREE index**: MTREE
+requires a fixed `DIMENSION`, and the `embeddings` table holds vectors from
+providers with different dimensions. Vector search is therefore a brute-force
+scan — fine at current scale, and the constraint to solve before it is not.
 
 ### Telegram (telegram.rs)
 - Markdown sanitizer: single-pass state machine (not asterisk counting)
