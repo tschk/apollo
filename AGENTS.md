@@ -317,6 +317,33 @@ indexmap 1.x detects `std` from a build script, and a truncated probe leaves
 - Do not silently weaken security/allowlist defaults
 - Do not mix unrelated changes in one commit
 
+### Sweeping for a bug class
+
+When a bug turns out to be one instance of a class, search for **the
+condition that makes code wrong**, not for the construct the fix introduces.
+Three sweeps in one day failed the same way by ignoring this:
+
+- Fixing byte-slice panics, the sweep grepped `truncate_chars` — the helper
+  the fix *added* — and missed the byte-length **gate** in front of it. Six
+  sites survived two separate "exhaustive" passes.
+- Fixing `&s[..n]` panics, the sweep matched literal indices and missed one in
+  the very file it was editing.
+- The `.apollo` deny-list blocked **reads** of credentials and left the
+  **write** path open, which turned prompt injection into persistent code
+  execution via `.apollo/skills`.
+
+So: grep for the predicate (`.len() >`, a raw `[..`, a write path), not for
+the helper. Then prove the sweep — write the failing case first and watch it
+fail before the fix lands.
+
+### Gates that cannot fail
+
+`cargo build --release 2>&1 | grep -E '^error'; echo OK` prints OK whatever
+happens: the `echo` is a separate command with its own exit status. Every
+"release build passes" claim for a whole day rested on that line. Capture the
+real status (`cmd; echo "EXIT=$?"`) and check it. The same applies to a test
+that asserts on a constant, or on its own mock rather than the code.
+
 ## 11) Adding Things
 
 ### New Provider
