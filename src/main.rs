@@ -17,7 +17,7 @@ use apollo::bootstrap::{
 use apollo::channels::cli::CliChannel;
 #[cfg(feature = "channel-discord")]
 use apollo::channels::discord::DiscordChannel;
-use apollo::config::{apply_permission_profile, Config};
+use apollo::config::Config;
 use apollo::cron_scheduler::CronScheduler;
 use apollo::diagnostics::{collect_doctor_report, render_doctor_report, render_findings};
 use apollo::heartbeat::{self, HeartbeatConfig};
@@ -26,6 +26,8 @@ use apollo::prompt;
 use apollo::self_update::{SelfUpdater, UpdateOutcome};
 use apollo::skills;
 use apollo::telegram_runtime::{run_telegram_chat, TelegramChatRun};
+
+mod setup;
 
 #[derive(Parser)]
 #[command(name = "apollo", about = "Local-first AI agent runtime", version)]
@@ -190,6 +192,10 @@ enum Commands {
         /// Permission profile: full | auto | prompt | tools_only
         #[arg(long)]
         permission_profile: Option<String>,
+
+        /// Overwrite an existing apollo.json without asking
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
 
     /// Send a message to the running apollo bot via Telegram
@@ -505,6 +511,12 @@ async fn main() -> anyhow::Result<()> {
         }),
         other => other,
     };
+
+    // A bare `apollo` on a machine with no config should set itself up rather
+    // than fail on the missing file.
+    if command.is_none() {
+        setup::ensure_config("apollo.json").await?;
+    }
 
     // Hermes-style: bare `apollo` opens the TUI against a background server,
     // falling back to the line-based CLI chat where apollo-tui isn't installed.
@@ -981,302 +993,23 @@ async fn main() -> anyhow::Result<()> {
             start,
             workspace,
             permission_profile,
+            force,
         } => {
-            let workspace = workspace.unwrap_or_else(|| PathBuf::from("."));
-            println!("🐾 apollo setup\n");
-
-            // === Resolve values (flags or interactive prompts) ===
-            let provider = match provider {
-                Some(p) if !p.trim().is_empty() => p.trim().to_string(),
-                Some(_) | None => prompt_provider_interactive()?,
-            };
-
-            let api_key = match api_key {
-                Some(k) => k,
-                None => {
-                    if provider == "ollama" {
-                        String::new()
-                    } else {
-                        eprint!("  API key ({}): ", provider);
-                        let mut buf = String::new();
-                        std::io::stdin().read_line(&mut buf)?;
-                        let k = buf.trim().to_string();
-                        if k.is_empty() {
-                            anyhow::bail!("API key required (omit only for ollama)");
-                        }
-                        k
-                    }
-                }
-            };
-
-            let channel = match channel {
-                Some(c) => c,
-                None => {
-                    eprint!("  Channel (telegram/discord/cli) [telegram]: ");
-                    let mut buf = String::new();
-                    std::io::stdin().read_line(&mut buf)?;
-                    let c = buf.trim().to_string();
-                    if c.is_empty() {
-                        "telegram".to_string()
-                    } else {
-                        c
-                    }
-                }
-            };
-
-            let model = model.unwrap_or_else(|| "claude-sonnet-4-5".to_string());
-
-            // Channel-specific tokens
-            let tg_token = if channel == "telegram" {
-                match telegram_token {
-                    Some(t) => Some(t),
-                    None => {
-                        eprint!("  Telegram bot token: ");
-                        let mut buf = String::new();
-                        std::io::stdin().read_line(&mut buf)?;
-                        let t = buf.trim().to_string();
-                        if t.is_empty() {
-                            None
-                        } else {
-                            Some(t)
-                        }
-                    }
-                }
-            } else {
-                telegram_token
-            };
-
-            let tg_chat_id = if channel == "telegram" {
-                match telegram_chat_id {
-                    Some(c) => Some(c),
-                    None => {
-                        eprint!("  Telegram chat ID: ");
-                        let mut buf = String::new();
-                        std::io::stdin().read_line(&mut buf)?;
-                        let c = buf.trim().to_string();
-                        if c.is_empty() {
-                            None
-                        } else {
-                            Some(c)
-                        }
-                    }
-                }
-            } else {
-                telegram_chat_id
-            };
-
-            let dc_token = if channel == "discord" {
-                discord_token
-            } else {
-                None
-            };
-            let dc_channel = if channel == "discord" {
-                discord_channel_id
-            } else {
-                None
-            };
-
-            if channel == "telegram" && tg_token.is_none() {
-                anyhow::bail!("Telegram channel requires a bot token (use --telegram-token or enter it when prompted)");
-            }
-
-            let permission_profile = match permission_profile {
-                Some(p) if !p.trim().is_empty() => p.trim().to_string(),
-                Some(_) | None => prompt_permission_profile_interactive()?,
-            };
-
-            // === Validate ===
-            let client = reqwest::Client::new();
-            match provider.as_str() {
-                "ollama" => {
-                    print!("\n  Validating Ollama... ");
-                    let base_url = "http://localhost:11434";
-                    let resp = client.get(format!("{}/api/tags", base_url)).send().await;
-                    match resp {
-                        Ok(r) if r.status().is_success() => println!("✅"),
-                        Ok(r) => println!("⚠️  HTTP {} from local Ollama", r.status()),
-                        Err(e) => println!("❌ {}", e),
-                    }
-                }
-                "anthropic" | "claude" => {
-                    print!("\n  Validating API key... ");
-                    let is_oauth = api_key.contains("sk-ant-oat");
-                    let auth_resp = if is_oauth {
-                        client
-                            .get("https://api.anthropic.com/v1/models")
-                            .header("Authorization", format!("Bearer {}", api_key))
-                            .header("anthropic-version", "2023-06-01")
-                            .send()
-                            .await
-                    } else {
-                        client
-                            .get("https://api.anthropic.com/v1/models")
-                            .header("x-api-key", &api_key)
-                            .header("anthropic-version", "2023-06-01")
-                            .send()
-                            .await
-                    };
-                    match auth_resp {
-                        Ok(r) if r.status().is_success() => println!("✅"),
-                        Ok(r) => println!("⚠️  HTTP {} (may still work)", r.status()),
-                        Err(e) => println!("❌ {}", e),
-                    }
-                }
-                "openai" => {
-                    print!("\n  Validating API key... ");
-                    let auth_resp = client
-                        .get("https://api.openai.com/v1/models")
-                        .bearer_auth(&api_key)
-                        .send()
-                        .await;
-                    match auth_resp {
-                        Ok(r) if r.status().is_success() => println!("✅"),
-                        Ok(r) => println!("⚠️  HTTP {} (may still work)", r.status()),
-                        Err(e) => println!("❌ {}", e),
-                    }
-                }
-                _ if !api_key.is_empty() => {
-                    println!(
-                        "\n  Skipping remote key validation for provider '{}'.",
-                        provider
-                    );
-                }
-                _ => {}
-            }
-
-            if let Some(ref token) = tg_token {
-                print!("  Validating Telegram token... ");
-                let tg_resp = client
-                    .get(format!("https://api.telegram.org/bot{}/getMe", token))
-                    .send()
-                    .await;
-                match tg_resp {
-                    Ok(r) => {
-                        let body: serde_json::Value = r.json().await.unwrap_or_default();
-                        if body["ok"].as_bool() == Some(true) {
-                            let name = body["result"]["username"].as_str().unwrap_or("?");
-                            println!("✅ @{}", name);
-                        } else {
-                            println!("❌ Invalid token");
-                        }
-                    }
-                    Err(e) => println!("❌ {}", e),
-                }
-            }
-
-            // === Write .env ===
-            let env_path = workspace.join(".env");
-            let mut env_content = String::new();
-            if provider == "ollama" {
-                env_content.push_str("OLLAMA_BASE_URL=\"http://localhost:11434\"\n");
-            } else if provider == "anthropic" || provider == "claude" {
-                env_content.push_str(&format!("ANTHROPIC_API_KEY=\"{}\"\n", api_key));
-            } else {
-                env_content.push_str(&format!("OPENAI_API_KEY=\"{}\"\n", api_key));
-            }
-            if let Some(ref t) = tg_token {
-                env_content.push_str(&format!("APOLLO_TELEGRAM_TOKEN=\"{}\"\n", t));
-            }
-            if let Some(ref c) = tg_chat_id {
-                env_content.push_str(&format!("APOLLO_CHAT_ID=\"{}\"\n", c));
-            }
-            if let Some(ref t) = dc_token {
-                env_content.push_str(&format!("APOLLO_DISCORD_TOKEN=\"{}\"\n", t));
-            }
-            if let Some(ref c) = dc_channel {
-                env_content.push_str(&format!("APOLLO_DISCORD_CHANNEL=\"{}\"\n", c));
-            }
-            std::fs::write(&env_path, &env_content)?;
-
-            // === Write config ===
-            let mut cfg = Config::default_config();
-            cfg.provider.name = provider.clone();
-            cfg.provider.api_key = None; // Secrets stay in .env
-            if provider == "ollama" {
-                cfg.provider.base_url = Some("http://localhost:11434".to_string());
-                if cfg.embeddings.provider == "noop" {
-                    cfg.embeddings.enabled = true;
-                    cfg.embeddings.provider = "ollama".to_string();
-                    cfg.embeddings.model = Some("nomic-embed-text".to_string());
-                    cfg.embeddings.base_url = Some("http://localhost:11434".to_string());
-                }
-            }
-            cfg.model = model.clone();
-            apply_permission_profile(&mut cfg, &permission_profile);
-            let json = serde_json::to_string_pretty(&cfg)?;
-            let config_path = workspace.join("apollo.json");
-            std::fs::write(&config_path, &json)?;
-
-            // === Write systemd service ===
-            let bin_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("apollo"));
-            let service_dir = dirs::home_dir()
-                .unwrap_or_default()
-                .join(".config/systemd/user");
-            std::fs::create_dir_all(&service_dir)?;
-
-            let mut exec_args = format!("{} chat --channel {}", bin_path.display(), channel);
-            if tg_token.is_some() {
-                exec_args.push_str(&format!(
-                    " --telegram-token $APOLLO_TELEGRAM_TOKEN --telegram-chat-id {}",
-                    tg_chat_id.as_deref().unwrap_or("0")
-                ));
-            }
-            exec_args.push_str(&format!(" --model {}", model));
-
-            let run_script = format!(
-                "#!/bin/bash\nsource {}\nexport RUST_LOG=info\ncd {}\nexec {}\n",
-                env_path.display(),
-                workspace.display(),
-                exec_args,
-            );
-            let run_path = workspace.join("run.sh");
-            std::fs::write(&run_path, &run_script)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&run_path, std::fs::Permissions::from_mode(0o755))?;
-            }
-
-            let service = format!(
-                "[Unit]\nDescription=apollo AI agent\nAfter=network-online.target\n\n\
-                [Service]\nType=simple\nExecStart={}\nRestart=always\nRestartSec=5\n\
-                WorkingDirectory={}\nStandardOutput=append:/tmp/apollo.log\n\
-                StandardError=append:/tmp/apollo.log\n\n\
-                [Install]\nWantedBy=default.target\n",
-                run_path.display(),
-                workspace.display()
-            );
-            std::fs::write(service_dir.join("apollo.service"), &service)?;
-
-            // === Summary ===
-            println!("\n✅ Setup complete!\n");
-            println!("  Provider:  {}", cfg.provider.name);
-            println!("  Model:     {}", model);
-            println!("  Channel:   {}", channel);
-            println!(
-                "  Safety:    {} (see agent.permission_profile in {})",
-                cfg.agent.permission_profile,
-                config_path.display()
-            );
-            println!("  Config:    {}", config_path.display());
-            println!("  Secrets:   {}", env_path.display());
-            println!("  Service:   ~/.config/systemd/user/apollo.service");
-            println!("\n  Commands:");
-            println!("    systemctl --user daemon-reload");
-            println!("    systemctl --user enable --now apollo");
-            println!("    journalctl --user -u apollo -f");
-
-            // === Auto-start ===
-            if start {
-                println!("\n  Starting...");
-                let _ = std::process::Command::new("systemctl")
-                    .args(["--user", "daemon-reload"])
-                    .status();
-                let _ = std::process::Command::new("systemctl")
-                    .args(["--user", "enable", "--now", "apollo"])
-                    .status();
-                println!("  🐾 apollo is running!");
-            }
+            setup::run_init(setup::InitOptions {
+                provider,
+                api_key,
+                channel,
+                telegram_token,
+                telegram_chat_id,
+                discord_token,
+                discord_channel_id,
+                model,
+                start,
+                workspace,
+                permission_profile,
+                force,
+            })
+            .await?;
         }
 
         Commands::Message {
@@ -2082,120 +1815,6 @@ async fn find_apollo_ui_binary() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-fn compiled_in_providers() -> Vec<&'static str> {
-    let mut names = vec![
-        "cerebras",
-        "cloudflare",
-        "deepseek",
-        "fireworks",
-        "groq",
-        "huggingface",
-        "minimax",
-        "mistral",
-        "moonshot",
-        "openai",
-        "openrouter",
-        "perplexity",
-        "siliconflow",
-        "together",
-        "venice",
-        "vercel",
-        "xai",
-    ];
-    #[cfg(feature = "provider-anthropic")]
-    names.push("anthropic");
-    #[cfg(feature = "provider-copilot")]
-    names.push("copilot");
-    #[cfg(feature = "provider-ollama")]
-    names.push("ollama");
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn get_provider_matches<'a>(all: &[&'a str], filter: &str) -> Vec<&'a str> {
-    let needle = filter.trim().to_lowercase();
-    if needle.is_empty() {
-        all.to_vec()
-    } else {
-        all.iter()
-            .copied()
-            .filter(|n| n.to_lowercase().contains(&needle))
-            .collect()
-    }
-}
-
-fn print_provider_matches(matches: &[&str]) {
-    if matches.is_empty() {
-        println!("  (no matches — try another filter)");
-    } else {
-        println!("\n  Matching providers:");
-        for (i, n) in matches.iter().enumerate() {
-            println!("    [{}] {}", i + 1, n);
-        }
-    }
-}
-
-fn parse_provider_selection(input: &str, matches: &[&str], all: &[&str]) -> Option<String> {
-    if input.is_empty() {
-        if matches.len() == 1 {
-            return Some(matches[0].to_string());
-        }
-        return None;
-    }
-    if let Ok(idx) = input.parse::<usize>() {
-        if (1..=matches.len()).contains(&idx) {
-            return Some(matches[idx - 1].to_string());
-        }
-    }
-    if let Some(found) = matches.iter().find(|n| n.eq_ignore_ascii_case(input)) {
-        return Some((*found).to_string());
-    }
-    if let Some(found) = all.iter().find(|n| n.eq_ignore_ascii_case(input)) {
-        return Some((*found).to_string());
-    }
-    None
-}
-
-fn prompt_provider_interactive() -> anyhow::Result<String> {
-    let all = compiled_in_providers();
-    println!("  Choose a provider (type to filter the list, then pick a number or exact name):");
-    let mut filter = String::new();
-    loop {
-        let matches = get_provider_matches(&all, &filter);
-        print_provider_matches(&matches);
-
-        eprint!("  Filter, #, or exact name (empty = pick if exactly one match): ");
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        let t = line.trim();
-
-        if let Some(selection) = parse_provider_selection(t, &matches, &all) {
-            return Ok(selection);
-        }
-
-        if !t.is_empty() {
-            filter = t.to_string();
-        }
-    }
-}
-
-fn prompt_permission_profile_interactive() -> anyhow::Result<String> {
-    println!("\n  Permission profile:");
-    println!("    full        — autonomous mode (no plan approval; shell and dynamic tools on)");
-    println!("    auto        — default heuristics with shell enabled");
-    println!("    prompt      — approve plans before executing tools (not per-tool prompts)");
-    println!("    tools_only  — web + memory + session tools only (no shell or file writes)");
-    eprint!("  Choose [full / auto / prompt / tools_only] [auto]: ");
-    let mut buf = String::new();
-    std::io::stdin().read_line(&mut buf)?;
-    let s = buf.trim();
-    if s.is_empty() {
-        return Ok("auto".to_string());
-    }
-    Ok(s.to_string())
 }
 
 fn config_path_for_cli(cli: &Cli) -> Option<String> {
