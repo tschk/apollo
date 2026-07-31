@@ -4,26 +4,6 @@ use crate::config::Config;
 use serde::Serialize;
 use std::path::Path;
 
-pub const DEFAULT_GATEWAY_HTTP_TOOL_DENY: &[&str] = &[
-    "exec",
-    "create_tool",
-    "browser",
-    "mcp",
-    "vibemania",
-    "message",
-    "Write",
-    "Edit",
-];
-
-pub const APPROVAL_REQUIRED_TOOLS: &[&str] = &[
-    "exec",
-    "create_tool",
-    "Write",
-    "Edit",
-    "browser",
-    "vibemania",
-];
-
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
@@ -42,13 +22,6 @@ pub struct Finding {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ToolClassification {
-    pub name: String,
-    pub risk: Severity,
-    pub approval_required: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct Check {
     pub name: String,
     pub ok: bool,
@@ -61,28 +34,6 @@ pub struct Check {
 pub struct DoctorReport {
     pub findings: Vec<Finding>,
     pub checks: Vec<Check>,
-}
-
-pub fn classify_tool(name: &str) -> ToolClassification {
-    let denied = DEFAULT_GATEWAY_HTTP_TOOL_DENY
-        .iter()
-        .any(|tool| tool.eq_ignore_ascii_case(name));
-    let approval = APPROVAL_REQUIRED_TOOLS
-        .iter()
-        .any(|tool| tool.eq_ignore_ascii_case(name));
-    let risk = if denied {
-        Severity::Critical
-    } else if approval {
-        Severity::Warn
-    } else {
-        Severity::Info
-    };
-
-    ToolClassification {
-        name: name.to_string(),
-        risk,
-        approval_required: approval,
-    }
 }
 
 pub fn audit_config(cfg: &Config) -> Vec<Finding> {
@@ -374,13 +325,6 @@ async fn check_cmd(cmd: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn classify_exec_as_high_risk() {
-        let tool = classify_tool("exec");
-        assert_eq!(tool.risk, Severity::Critical);
-        assert!(tool.approval_required);
-    }
 
     #[test]
     fn render_doctor_report_marks_soft_warn_and_fail() {

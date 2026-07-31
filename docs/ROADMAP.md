@@ -35,7 +35,7 @@ Last updated: 2026-07-27
 - add tests for audio/sticker handling in Telegram
 - add trajectory collection toggle in config.yaml
 - make swarm state more visible and easier to operate
-- improve gateway hardening and operator diagnostics
+- improve operator diagnostics
 - move scheduler/session/control metadata onto unified Surreal contract
 
 ## Later
