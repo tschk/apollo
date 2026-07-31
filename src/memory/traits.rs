@@ -109,6 +109,15 @@ pub trait MemoryBackend: Send + Sync {
         limit: usize,
     ) -> anyhow::Result<Vec<(String, String)>>;
 
+    /// Delete every stored message for one chat.
+    ///
+    /// Backends opt in: the default errors rather than returning `Ok`, so a
+    /// caller is never told a conversation was cleared when nothing was.
+    async fn clear_conversation(&self, chat_id: &str) -> anyhow::Result<()> {
+        let _ = chat_id;
+        anyhow::bail!("clearing a conversation is unsupported by this memory backend")
+    }
+
     async fn search_conversations(
         &self,
         query: &str,

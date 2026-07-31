@@ -420,6 +420,16 @@ impl MemoryBackend for SurrealMemory {
             .collect())
     }
 
+    async fn clear_conversation(&self, chat_id: &str) -> Result<()> {
+        self.db()
+            .await?
+            .query("DELETE FROM conversations WHERE chat_id = $chat_id")
+            .bind(("chat_id", chat_id.to_string()))
+            .await?
+            .check()?;
+        Ok(())
+    }
+
     async fn search_conversations(
         &self,
         query: &str,
@@ -776,6 +786,33 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].1, "Hello");
         assert_eq!(history[1].1, "Hi there");
+    }
+
+    #[tokio::test]
+    async fn test_surreal_clear_conversation_is_scoped_to_one_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+
+        mem.store_conversation("chat-1", "user-1", "user", "keep me out")
+            .await
+            .unwrap();
+        mem.store_conversation("chat-2", "user-1", "user", "keep me")
+            .await
+            .unwrap();
+
+        mem.clear_conversation("chat-1").await.unwrap();
+
+        assert!(mem
+            .get_conversation_history("chat-1", 10)
+            .await
+            .unwrap()
+            .is_empty());
+        let survivors = mem.get_conversation_history("chat-2", 10).await.unwrap();
+        assert_eq!(survivors.len(), 1);
+        assert_eq!(survivors[0].1, "keep me");
+
+        // Clearing an empty chat is not an error.
+        mem.clear_conversation("chat-1").await.unwrap();
     }
 
     #[tokio::test]

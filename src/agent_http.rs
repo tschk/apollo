@@ -287,7 +287,6 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) {
             .route("/v1/chat/stream", get(ws_chat_upgrade))
             .route("/v1/state", get(state_handler))
             .route("/v1/model", post(model_handler))
-            .route("/v1/compact", post(compact_handler))
             .route("/v1/clear", post(clear_handler))
             .route("/shutdown", post(shutdown_handler))
             .with_state(runner);
@@ -370,46 +369,40 @@ async fn model_handler(
     Ok(Json(build_state(&runner, &query.chat_id).await))
 }
 
-/// Why compaction and history clearing are not served yet.
+/// There is no `/v1/compact`: compaction in apollo is turn-local.
 ///
-/// Both need the conversation store, and `AgentRunner` owns its
-/// `Arc<dyn MemoryBackend>` privately — there is no accessor to reach it from
-/// this module. Answering 501 with the reason keeps the contract explicit
-/// instead of pretending the work happened.
-const NO_MEMORY_ACCESS: &str =
-    "unavailable: AgentRunner exposes no accessor for its memory backend, so the \
-     server cannot reach this chat's conversation store";
-
+/// `AgentRunner::compact_messages` rewrites the in-flight `Vec<ChatMessage>`
+/// of a single turn when it outgrows `agent.max_context_chars`; it never
+/// touches the conversation store, and stored history is re-read as the last
+/// `max_history_messages` rows on every turn. Compacting a chat server-side
+/// would therefore change nothing the next turn observes.
 #[derive(Debug, Serialize)]
-pub struct UnavailableBody {
-    pub error: &'static str,
-}
-
-fn unavailable() -> (StatusCode, Json<UnavailableBody>) {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(UnavailableBody {
-            error: NO_MEMORY_ACCESS,
-        }),
-    )
-}
-
-async fn compact_handler(
-    headers: axum::http::HeaderMap,
-    Json(body): Json<ChatIdRequestBody>,
-) -> Result<(StatusCode, Json<UnavailableBody>), StatusCode> {
-    authorize(&headers)?;
-    let _ = body.chat_id;
-    Ok(unavailable())
+pub struct ClearedBody {
+    pub cleared: usize,
+    pub chat_id: String,
 }
 
 async fn clear_handler(
+    State(runner): State<Arc<AgentRunner>>,
     headers: axum::http::HeaderMap,
     Json(body): Json<ChatIdRequestBody>,
-) -> Result<(StatusCode, Json<UnavailableBody>), StatusCode> {
+) -> Result<Json<ClearedBody>, StatusCode> {
     authorize(&headers)?;
-    let _ = body.chat_id;
-    Ok(unavailable())
+    let memory = runner.memory();
+    let cleared = memory
+        .get_conversation_history(&body.chat_id, MESSAGE_COUNT_CAP)
+        .await
+        .map(|history| history.len())
+        .unwrap_or(0);
+    if let Err(e) = memory.clear_conversation(&body.chat_id).await {
+        tracing::error!("http clear {}: {}", body.chat_id, e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    tracing::info!("cleared {} messages from {}", cleared, body.chat_id);
+    Ok(Json(ClearedBody {
+        cleared,
+        chat_id: body.chat_id,
+    }))
 }
 
 async fn ws_chat_upgrade(
@@ -628,10 +621,4 @@ mod tests {
         assert_eq!(mode_name(&AgentMode::Swarm { parallelism: 2 }), "swarm");
     }
 
-    #[test]
-    fn the_unavailable_body_explains_itself() {
-        let (status, Json(body)) = unavailable();
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert!(body.error.contains("memory backend"));
-    }
 }
