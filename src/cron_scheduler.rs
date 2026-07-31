@@ -83,8 +83,18 @@ impl CronScheduler {
         let parsed = cron::Schedule::from_str(schedule)
             .map_err(|e| anyhow::anyhow!("Invalid cron expression: {}", e))?;
 
-        // Compute next run
-        let next_run = parsed.upcoming(chrono::Utc).next().map(|t| t.to_rfc3339());
+        // A parseable expression can still have no future occurrence (a
+        // year-pinned one in the past). Storing that as an 'active' job with
+        // next_run = NONE reports success for a job the due query can never
+        // match, so refuse it at creation instead.
+        let next_run = parsed
+            .upcoming(chrono::Utc)
+            .next()
+            .map(|t| t.to_rfc3339())
+            .ok_or_else(|| {
+                anyhow::anyhow!("cron expression {schedule:?} has no future occurrences")
+            })?;
+        let next_run = Some(next_run);
 
         let job = CronJob {
             id: Some(name.to_string()),
@@ -571,6 +581,28 @@ mod tests {
         assert_eq!(job.status, "invalid_schedule");
         assert!(job.next_run.is_none());
         assert!(job.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn add_refuses_a_schedule_with_no_future_occurrence() {
+        let scheduler = CronScheduler::new_noop();
+        // Year-pinned in the past: parses, but never runs again.
+        let error = scheduler
+            .add(
+                "yearly",
+                "0 0 12 1 1 * 2020",
+                "task",
+                "cli",
+                "chat",
+                "model",
+            )
+            .await
+            .expect_err("a job that can never run must not be reported as scheduled");
+        assert!(
+            error.to_string().contains("no future occurrences"),
+            "unexpected error: {error}"
+        );
+        assert!(scheduler.list().await.unwrap().is_empty());
     }
 
     #[tokio::test]
