@@ -143,15 +143,32 @@ const SCHEMA_SQL: &str = r#"
     DEFINE INDEX IF NOT EXISTS embedding_lookup_idx ON embeddings FIELDS namespace, key UNIQUE;
     DEFINE INDEX IF NOT EXISTS embedding_namespace_idx ON embeddings FIELDS namespace;
     DEFINE INDEX IF NOT EXISTS embedding_namespace_dim_idx ON embeddings FIELDS namespace, dim;
-    -- TODO: define an MTREE index on `vector` for ANN-accelerated KNN when
-    -- the embedding dimension is fixed at deploy time. MTREE requires a
-    -- fixed DIMENSION, so it cannot be used while the table stores vectors
-    -- from multiple providers (e.g. OpenAI 1536-dim, Gemini 768-dim).
-    -- Example: DEFINE INDEX embedding_vector_mtree ON embeddings FIELDS vector MTREE DIMENSION 1536 DISTANCE COSINE;
-    -- Note: rows now carry `dim` and `model`, so a future MTREE index would
-    -- have to be per-dimension (one index per distinct DIMENSION, over a
-    -- separate or dimension-partitioned table). Recording `dim` does not by
-    -- itself make a single MTREE index possible.
+    -- No MTREE index on `vector`, and this is now settled by measurement, not
+    -- by assumption. See `bench_mtree_feasibility` and
+    -- `bench_search_embeddings_scaling` in this file; numbers from a release
+    -- build on macOS arm64 at dim 1536.
+    --
+    -- `DEFINE INDEX ... MTREE DIMENSION 1536 DIST COSINE` is accepted, but:
+    --   1. It locks the whole table to that one dimension. Storing a 3-dim
+    --      vector afterwards fails with "Incorrect vector dimension (3).
+    --      Expected a vector of 1536 dimension." So "one index per distinct
+    --      dimension" is not possible on a shared table at all — it would
+    --      need dimension-partitioned tables, not just extra indexes.
+    --   2. It is ~25x more expensive to write: 29.76ms/row indexed versus
+    --      ~1.2ms/row unindexed.
+    --   3. It does not even pay off on reads. At 2000 rows,
+    --      `vector <|10,COSINE|> $q` had a 2558ms median against 961ms for
+    --      the brute-force scan — 2.7x slower.
+    --
+    -- The scan itself is not cheap (~0.27ms per candidate row, so ~30ms at
+    -- 100 rows and ~2.5s at 10k), but the cost is materializing a
+    -- 1536-element array as SurrealDB `Value`s per row, not the cosine
+    -- arithmetic. Scoring in-engine with
+    -- `vector::similarity::cosine(...) ORDER BY score LIMIT k` was measured
+    -- too and is ~1.6x slower still, because it walks the same arrays.
+    -- Anything that actually fixes this has to make a row cheaper to read
+    -- (a compact encoding rather than an array of `Value`s), which MTREE
+    -- does not do.
 
     DEFINE TABLE IF NOT EXISTS files SCHEMALESS;
     DEFINE FIELD IF NOT EXISTS path ON files TYPE string;
@@ -898,5 +915,196 @@ mod tests {
 
         let missing: Option<String> = mem.get_sticker_cache("stk-999").await.unwrap();
         assert!(missing.is_none());
+    }
+
+    // Reproducible xorshift PRNG so the corpus is realistic (non-zero, spread
+    // over the unit sphere) without pulling in a `rand` dev-dependency.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next_f32(&mut self) -> f32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            ((x >> 40) as f32 / 16_777_216.0) * 2.0 - 1.0
+        }
+
+        fn unit_vector(&mut self, dim: usize) -> Vec<f32> {
+            let mut v: Vec<f32> = (0..dim).map(|_| self.next_f32()).collect();
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for x in v.iter_mut() {
+                    *x /= norm;
+                }
+            }
+            v
+        }
+    }
+
+    /// Latency of `search_embeddings` against the brute-force cosine scan at
+    /// growing corpus sizes. Ignored by default: it writes hundreds of MB and
+    /// takes minutes.
+    ///
+    /// Run with `cargo test --release -p apollo-agent bench_search_embeddings
+    /// -- --ignored --nocapture`. Debug numbers are not meaningful.
+    #[tokio::test]
+    #[ignore = "benchmark: slow, writes a large corpus"]
+    async fn bench_search_embeddings_scaling() {
+        const DIM: usize = 1536;
+        const QUERIES: usize = 100;
+        // A 10k-row corpus at 1536 dims costs ~900MB on disk, so 50k needs
+        // ~4.5GB free. Override with APOLLO_BENCH_SIZES=100,1000 on a small
+        // disk.
+        let sizes: Vec<usize> = match std::env::var("APOLLO_BENCH_SIZES") {
+            Ok(s) => s.split(',').filter_map(|p| p.trim().parse().ok()).collect(),
+            Err(_) => vec![100, 1_000, 10_000, 50_000],
+        };
+
+        for size in sizes {
+            let dir = tempfile::tempdir().unwrap();
+            let mem = SurrealMemory::new(dir.path()).await.unwrap();
+            let mut rng = Xorshift(0x2545_F491_4F6C_DD1D);
+
+            let write_start = std::time::Instant::now();
+            for i in 0..size {
+                let v = rng.unit_vector(DIM);
+                mem.store_embedding("bench", &format!("k{i}"), &v, "text", "bench-model")
+                    .await
+                    .unwrap();
+            }
+            let write_elapsed = write_start.elapsed();
+
+            let queries: Vec<Vec<f32>> = (0..QUERIES).map(|_| rng.unit_vector(DIM)).collect();
+            let mut samples: Vec<u128> = Vec::with_capacity(QUERIES);
+            for q in &queries {
+                let start = std::time::Instant::now();
+                let hits = mem.search_embeddings("bench", q, 10).await.unwrap();
+                samples.push(start.elapsed().as_micros());
+                assert_eq!(hits.len(), 10.min(size));
+            }
+            let (median, p95, max) = percentiles(&mut samples);
+
+            println!(
+                "size={size:>6} dim={DIM} search_median={median:>8.2}ms search_p95={p95:>8.2}ms \
+                 search_max={max:>8.2}ms insert_total={:>8.2}s insert_per_row={:>6.2}ms",
+                write_elapsed.as_secs_f64(),
+                write_elapsed.as_secs_f64() * 1000.0 / size as f64,
+            );
+
+            // Same ranking, but scored inside SurrealDB so only the top `k`
+            // rows cross the boundary instead of every candidate vector.
+            let db = mem.db().await.unwrap();
+            let mut samples: Vec<u128> = Vec::with_capacity(QUERIES);
+            for q in &queries {
+                let start = std::time::Instant::now();
+                let mut result = db
+                    .query(
+                        "SELECT namespace, key, text, created_at, \
+                         vector::similarity::cosine(vector, $q) AS score \
+                         FROM embeddings WHERE namespace = $namespace AND dim = $dim \
+                         ORDER BY score DESC LIMIT 10",
+                    )
+                    .bind(("namespace", "bench".to_string()))
+                    .bind(("dim", DIM as i64))
+                    .bind(("q", q.clone()))
+                    .await
+                    .unwrap();
+                let rows: Vec<serde_json::Value> = result.take(0).unwrap();
+                samples.push(start.elapsed().as_micros());
+                assert_eq!(rows.len(), 10.min(size));
+            }
+            let (median, p95, max) = percentiles(&mut samples);
+            println!(
+                "size={size:>6} dim={DIM}  indb_median={median:>8.2}ms  indb_p95={p95:>8.2}ms  \
+                 indb_max={max:>8.2}ms"
+            );
+        }
+    }
+
+    /// Feasibility spike for a per-dimension MTREE index: does SurrealDB
+    /// accept a mixed-dimension table once an MTREE of a fixed DIMENSION
+    /// exists on `vector`, and does KNN beat the scan?
+    #[tokio::test]
+    #[ignore = "benchmark: slow, writes a large corpus"]
+    async fn bench_mtree_feasibility() {
+        const DIM: usize = 1536;
+        const SIZE: usize = 2_000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let mut rng = Xorshift(0x2545_F491_4F6C_DD1D);
+        let db = mem.db().await.unwrap();
+
+        let define = db
+            .query(format!(
+                "DEFINE INDEX IF NOT EXISTS embedding_vector_mtree_{DIM} ON embeddings \
+                 FIELDS vector MTREE DIMENSION {DIM} DIST COSINE"
+            ))
+            .await;
+        println!("define_mtree_ok={}", define.is_ok());
+        if let Err(e) = &define {
+            println!("define_mtree_err={e}");
+            return;
+        }
+
+        let start = std::time::Instant::now();
+        for i in 0..SIZE {
+            let v = rng.unit_vector(DIM);
+            mem.store_embedding("bench", &format!("k{i}"), &v, "text", "bench-model")
+                .await
+                .unwrap();
+        }
+        println!(
+            "mtree_insert_total={:.2}s per_row={:.2}ms",
+            start.elapsed().as_secs_f64(),
+            start.elapsed().as_secs_f64() * 1000.0 / SIZE as f64
+        );
+
+        // Does a vector of another dimension survive in the same table?
+        let mismatched = mem
+            .store_embedding("bench", "other-dim", &[1.0, 0.0, 0.0], "t", "small-model")
+            .await;
+        println!("mixed_dim_insert_ok={}", mismatched.is_ok());
+        if let Err(e) = &mismatched {
+            println!("mixed_dim_insert_err={e}");
+        }
+
+        let mut knn: Vec<u128> = Vec::new();
+        let mut scan: Vec<u128> = Vec::new();
+        for _ in 0..20 {
+            let q = rng.unit_vector(DIM);
+
+            let start = std::time::Instant::now();
+            let mut result = db
+                .query(
+                    "SELECT namespace, key, text, created_at FROM embeddings \
+                     WHERE vector <|10,COSINE|> $q",
+                )
+                .bind(("q", q.clone()))
+                .await
+                .unwrap();
+            let rows: Vec<serde_json::Value> = result.take(0).unwrap();
+            knn.push(start.elapsed().as_micros());
+            assert!(!rows.is_empty(), "KNN returned nothing — index not used");
+
+            let start = std::time::Instant::now();
+            mem.search_embeddings("bench", &q, 10).await.unwrap();
+            scan.push(start.elapsed().as_micros());
+        }
+        let (km, kp, kx) = percentiles(&mut knn);
+        let (sm, sp, sx) = percentiles(&mut scan);
+        println!("size={SIZE} knn_median={km:.2}ms knn_p95={kp:.2}ms knn_max={kx:.2}ms");
+        println!("size={SIZE} scan_median={sm:.2}ms scan_p95={sp:.2}ms scan_max={sx:.2}ms");
+    }
+
+    fn percentiles(samples: &mut [u128]) -> (f64, f64, f64) {
+        samples.sort_unstable();
+        (
+            samples[samples.len() / 2] as f64 / 1000.0,
+            samples[(samples.len() * 95) / 100] as f64 / 1000.0,
+            *samples.last().unwrap() as f64 / 1000.0,
+        )
     }
 }
