@@ -42,6 +42,17 @@ enum AgentState {
     Direct,
 }
 
+/// Excerpt a message for the compaction summary prompt.
+///
+/// Truncation is char-based: a byte slice would panic on multibyte content.
+fn compaction_excerpt(content: &str) -> String {
+    if content.chars().count() > 500 {
+        format!("{}...", truncate_chars(content, 500))
+    } else {
+        content.to_string()
+    }
+}
+
 pub struct AgentRunner {
     provider: Arc<dyn Provider>,
     pub tools: Arc<RwLock<Vec<Arc<dyn Tool>>>>,
@@ -1727,11 +1738,7 @@ impl AgentRunner {
                 "tool_result" => "Tool Result",
                 _ => &m.role,
             };
-            let content = if m.content.len() > 500 {
-                format!("{}...", &m.content[..500])
-            } else {
-                m.content.clone()
-            };
+            let content = compaction_excerpt(&m.content);
             summary_input.push_str(&format!("[{}]: {}\n", role_label, content));
         }
         let compaction_prompt = format!(
@@ -1866,7 +1873,10 @@ fn automatic_retry_allowed(tool: &str, output: &str) -> bool {
 mod retry_tests {
     use std::path::Path;
 
-    use super::{automatic_retry_allowed, trajectory_filename, truncate_chars, ChatMessage};
+    use super::{
+        automatic_retry_allowed, compaction_excerpt, trajectory_filename, truncate_chars,
+        ChatMessage,
+    };
 
     #[test]
     fn truncating_multibyte_tool_output_does_not_panic() {
@@ -1924,5 +1934,22 @@ mod retry_tests {
             r#"{"retry_safe":true}"#
         ));
         assert!(automatic_retry_allowed("shell", "failed"));
+    }
+
+    #[test]
+    fn compaction_excerpt_handles_multibyte_content() {
+        let cjk = "日".repeat(400);
+        let excerpt = compaction_excerpt(&cjk);
+        assert_eq!(excerpt, cjk);
+
+        let long = "日".repeat(600);
+        let excerpt = compaction_excerpt(&long);
+        assert_eq!(excerpt.chars().count(), 503);
+        assert!(excerpt.ends_with("..."));
+
+        let emoji = "👋".repeat(501);
+        assert_eq!(compaction_excerpt(&emoji).chars().count(), 503);
+
+        assert_eq!(compaction_excerpt("short"), "short");
     }
 }
