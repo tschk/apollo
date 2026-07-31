@@ -1,4 +1,9 @@
 div w-full h-fit flex-col
+  if {show_header}
+    div h-fit flex-col px-1
+      span text-xs text-zinc-600
+        "apollo v{version} · press f1 for help"
+
   div h-fit flex-col px-1
     for message in {live}
       if {is_tool}
@@ -20,8 +25,31 @@ div w-full h-fit flex-col
               "{text}"
 
   div h-fit flex-col px-1
-    span text-sm text-{input_color}
-      "› {input}{cursor}"
+    if {selecting_model}
+      div h-fit flex-col
+        span text-sm text-indigo-400
+          "model · ‹ {selected_provider} › · search: {input}{cursor}"
+        for model in {model_rows}
+          if {selected}
+            span text-sm text-indigo-300
+              "  › {model_id}"
+          else
+            span text-xs text-zinc-500
+              "    {model_id}"
+        span text-xs text-zinc-600
+          "←/→ provider · ↑/↓ model · enter apply · esc cancel"
+    else
+      div h-fit flex-col
+        span text-sm text-{input_color}
+          "› {input}{cursor}"
+        if {show_palette}
+          for command in {palette}
+            if {selected}
+              span text-sm text-indigo-300
+                "  › {name} — {hint}"
+            else
+              span text-xs text-zinc-500
+                "    {name} — {hint}"
 
   div h-fit flex-col px-1
     div flex-row gap-2
@@ -33,8 +61,13 @@ div w-full h-fit flex-col
           "{status}"
     div flex-row gap-2
       span w-fit text-xs text-indigo-400
-        "{model} · {engine}"
-      span w-fit text-xs text-{conn_color}
-        "· {conn}"
+        "{model} · {engine} · {mode}"
       span w-fit text-xs text-zinc-600
-        "· {project}"
+        "· ${cost}"
+      span w-fit text-xs text-{context_color}
+        "· {context_pct}%/{context_window}"
+    div flex-row gap-2
+      span w-fit text-xs text-{conn_color}
+        "{conn}"
+      span w-fit text-xs text-zinc-600
+        "· {project} ({branch})"

@@ -12,7 +12,7 @@ use std::io::{stdout, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use agent::AgentEvent;
+use agent::{AgentEvent, AgentState};
 use crepuscularity_tui::ratatui::backend::CrosstermBackend;
 use crepuscularity_tui::ratatui::text::Line;
 use crepuscularity_tui::{Template, TemplateContext, TemplateValue};
@@ -27,6 +27,28 @@ const SPINNER_FRAMES: [&str; 10] = [
 const MAX_HISTORY: usize = 100;
 const VIEWPORT_ROWS: u16 = 12;
 const CHAT_ID: &str = "tui";
+/// How many model rows the selector shows at once.
+const MODEL_ROWS: usize = 5;
+
+/// Slash commands, in palette order.
+///
+/// apollo's server-side surface decides what can be here: telekinesis'
+/// /scope, /subagent, /todo, /budget, /review, /mcp and /plan have no apollo
+/// endpoint to drive, so they are absent rather than inert.
+const COMMANDS: [(&str, &str); 9] = [
+    ("/help", "keys and commands"),
+    ("/model", "switch model — no argument opens the selector"),
+    ("/clear", "clear the transcript"),
+    ("/cost", "spend and tokens so far"),
+    ("/context", "context use against the compaction budget"),
+    ("/compact", "ask the agent to compact this chat"),
+    ("/project", "project, branch and agent connection"),
+    ("/quit", "leave"),
+    ("/exit", "leave"),
+];
+
+/// Models apollo's own `/models` command advertises.
+const ANTHROPIC_MODELS: [&str; 3] = ["claude-sonnet-4-5", "claude-opus-4", "claude-haiku-3-5"];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -41,9 +63,28 @@ struct Msg {
     text: String,
 }
 
+/// One update the UI thread consumes.
+///
+/// `AgentEvent` is shared with apollo-ui, so state refreshes ride alongside it
+/// here rather than being added to that enum.
+enum UiEvent {
+    Agent(AgentEvent),
+    State(AgentState),
+}
+
 fn spinner_frame(start: Instant) -> &'static str {
     let index = (start.elapsed().as_millis() / 80) as usize % SPINNER_FRAMES.len();
     SPINNER_FRAMES[index]
+}
+
+/// Idle spinner frames would rotate every 80ms and defeat the changed_keys()
+/// redraw gate, repainting a still screen at 12Hz — so idle is empty.
+fn spinner_text(busy: bool, start: Instant) -> &'static str {
+    if busy {
+        spinner_frame(start)
+    } else {
+        ""
+    }
 }
 
 fn blink_cursor(start: Instant) -> &'static str {
@@ -62,6 +103,126 @@ fn project_name() -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn git_branch() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn context_color(pct: u8) -> &'static str {
+    if pct >= 90 {
+        "red-400"
+    } else if pct >= 70 {
+        "amber-400"
+    } else {
+        "green-400"
+    }
+}
+
+fn format_tokens(count: u64) -> String {
+    if count < 1000 {
+        count.to_string()
+    } else if count < 1_000_000 {
+        format!("{}k", count / 1000)
+    } else {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    }
+}
+
+/// Commands whose name starts with what has been typed.
+fn palette_matches(input: &str) -> Vec<(&'static str, &'static str)> {
+    if !input.starts_with('/') || input.contains(' ') {
+        return Vec::new();
+    }
+    COMMANDS
+        .iter()
+        .filter(|(name, _)| name.starts_with(input))
+        .copied()
+        .collect()
+}
+
+/// Models the selector can offer, grouped by provider.
+///
+/// Everything here comes from the machine rather than a guess: the configured
+/// provider and models in `apollo.json`, the set apollo's own `/models`
+/// command advertises, and an optional `~/.apollo/models.json` map of
+/// `{"provider": ["model", …]}` for anyone running something else.
+fn model_catalogue() -> Vec<(String, Vec<String>)> {
+    let mut catalogue: Vec<(String, Vec<String>)> = Vec::new();
+    let mut push = |provider: &str, model: &str| {
+        if model.is_empty() {
+            return;
+        }
+        match catalogue.iter_mut().find(|(name, _)| name == provider) {
+            Some((_, models)) => {
+                if !models.iter().any(|m| m == model) {
+                    models.push(model.to_string());
+                }
+            }
+            None => catalogue.push((provider.to_string(), vec![model.to_string()])),
+        }
+    };
+
+    let config = std::fs::read_to_string("apollo.json")
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let provider = config
+        .as_ref()
+        .and_then(|v| v.get("provider"))
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("anthropic")
+        .to_string();
+    if let Some(config) = &config {
+        for key in ["model"] {
+            if let Some(model) = config.get(key).and_then(|m| m.as_str()) {
+                push(&provider, model);
+            }
+        }
+        for key in ["fast_model", "heavy_model"] {
+            if let Some(model) = config
+                .get("agent")
+                .and_then(|a| a.get(key))
+                .and_then(|m| m.as_str())
+            {
+                push(&provider, model);
+            }
+        }
+    }
+    if provider == "anthropic" {
+        for model in ANTHROPIC_MODELS {
+            push(&provider, model);
+        }
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        let path = std::path::PathBuf::from(home).join(".apollo/models.json");
+        if let Some(map) = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|value| value.as_object().cloned())
+        {
+            for (name, models) in map {
+                for model in models.as_array().into_iter().flatten() {
+                    if let Some(model) = model.as_str() {
+                        push(&name, model);
+                    }
+                }
+            }
+        }
+    }
+
+    for (_, models) in catalogue.iter_mut() {
+        models.sort();
+    }
+    catalogue
+}
+
 struct App {
     live: Vec<Msg>,
     scrollback: Vec<String>,
@@ -72,12 +233,23 @@ struct App {
     status: String,
     model: String,
     engine: String,
+    mode: String,
+    cost_usd: f64,
+    context_pct: u8,
+    context_window: u64,
     project: String,
+    branch: String,
     online: bool,
+    show_header: bool,
+    palette_choice: usize,
+    selecting_model: bool,
+    catalogue: Vec<(String, Vec<String>)>,
+    provider_choice: usize,
+    model_choice: Option<usize>,
     spinner_start: Instant,
     cursor_start: Instant,
-    tx: Sender<AgentEvent>,
-    rx: Receiver<AgentEvent>,
+    tx: Sender<UiEvent>,
+    rx: Receiver<UiEvent>,
     quit: bool,
 }
 
@@ -95,8 +267,19 @@ impl App {
             status: "ready".into(),
             model,
             engine,
+            mode: "—".into(),
+            cost_usd: 0.0,
+            context_pct: 0,
+            context_window: 0,
             project: project_name(),
+            branch: git_branch(),
             online: agent::agent_online(),
+            show_header: false,
+            palette_choice: 0,
+            selecting_model: false,
+            catalogue: model_catalogue(),
+            provider_choice: 0,
+            model_choice: None,
             spinner_start: Instant::now(),
             cursor_start: Instant::now(),
             tx,
@@ -130,12 +313,41 @@ impl App {
         self.scrollback.drain(..).map(Line::from).collect()
     }
 
+    fn note(&mut self, text: impl Into<String>) {
+        self.live.push(Msg {
+            kind: Kind::Agent,
+            tool_name: String::new(),
+            text: text.into(),
+        });
+    }
+
+    /// Refresh model, engine, mode, cost and context from the running agent.
+    fn refresh_state(&self) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            if let Some(state) = agent::fetch_state() {
+                let _ = tx.send(UiEvent::State(state));
+            }
+        });
+    }
+
+    fn apply_state(&mut self, state: AgentState) {
+        self.model = state.model;
+        self.engine = state.engine;
+        self.mode = state.mode;
+        self.cost_usd = state.cost_usd;
+        self.context_pct = state.context_pct;
+        self.context_window = state.context_window;
+        self.online = true;
+    }
+
     fn submit(&mut self) {
         let prompt = self.input.trim().to_string();
         if prompt.is_empty() || self.busy {
             return;
         }
         self.input.clear();
+        self.palette_choice = 0;
         self.history_pos = None;
         if self.history.last().map(String::as_str) != Some(prompt.as_str()) {
             self.history.push(prompt.clone());
@@ -144,8 +356,8 @@ impl App {
             }
         }
 
-        if prompt == "/quit" || prompt == "/exit" {
-            self.quit = true;
+        if prompt.starts_with('/') {
+            self.run_command(&prompt);
             return;
         }
 
@@ -162,7 +374,208 @@ impl App {
         // ponytail: one thread per turn. Turns are serialized by `busy`, so a
         // pool buys nothing here.
         let tx = self.tx.clone();
-        std::thread::spawn(move || agent::run_turn(&prompt, CHAT_ID, &tx));
+        std::thread::spawn(move || {
+            let (relay, events) = channel();
+            let forward = std::thread::spawn(move || {
+                for event in events {
+                    if tx.send(UiEvent::Agent(event)).is_err() {
+                        return;
+                    }
+                }
+            });
+            agent::run_turn(&prompt, CHAT_ID, &relay);
+            drop(relay);
+            let _ = forward.join();
+        });
+    }
+
+    fn run_command(&mut self, prompt: &str) {
+        let (command, argument) = match prompt.split_once(' ') {
+            Some((command, argument)) => (command, argument.trim()),
+            None => (prompt, ""),
+        };
+        match command {
+            "/quit" | "/exit" => self.quit = true,
+            "/help" => {
+                let mut text = String::from("commands:\n");
+                for (name, hint) in COMMANDS {
+                    text.push_str(&format!("  {name} — {hint}\n"));
+                }
+                text.push_str(
+                    "keys: f1 header · tab complete · up/down history · \
+                     model selector: type to filter, ←/→ provider, ↑/↓ model, \
+                     enter apply, esc cancel · ctrl+c quit",
+                );
+                self.note(text);
+            }
+            "/model" => {
+                if argument.is_empty() {
+                    self.open_model_selector();
+                } else {
+                    self.apply_model(argument.to_string());
+                }
+            }
+            "/clear" => {
+                self.live.clear();
+                self.scrollback.clear();
+                self.status = "transcript cleared".into();
+            }
+            "/cost" => {
+                let text = format!("${:.4} spent this session", self.cost_usd);
+                self.note(text);
+                self.refresh_state();
+            }
+            "/context" => {
+                let text = format!(
+                    "{}% of a {} token compaction budget",
+                    self.context_pct,
+                    format_tokens(self.context_window)
+                );
+                self.note(text);
+                self.refresh_state();
+            }
+            "/compact" => {
+                let result = agent::post_chat_action("/v1/compact", CHAT_ID);
+                match result {
+                    Ok(message) => self.note(message),
+                    Err(message) => self.note(format!("compact: {message}")),
+                }
+            }
+            "/project" => {
+                let text = format!(
+                    "{} ({}) · agent {} on port {}",
+                    self.project,
+                    self.branch,
+                    if self.online { "connected" } else { "offline" },
+                    agent::http_port()
+                );
+                self.note(text);
+            }
+            other => self.note(format!("unknown command: {other} — try /help")),
+        }
+    }
+
+    fn apply_model(&mut self, model: String) {
+        match agent::set_model(&model) {
+            Ok(state) => {
+                self.apply_state(state);
+                self.status = format!("model → {model}");
+            }
+            Err(e) => {
+                self.note(format!("model: {e}"));
+                self.status = "model unchanged".into();
+            }
+        }
+    }
+
+    // ── Model selector ────────────────────────────────────────────────────
+
+    fn open_model_selector(&mut self) {
+        if self.catalogue.is_empty() {
+            self.note("no models configured — add ~/.apollo/models.json");
+            return;
+        }
+        if let Some(index) = self
+            .catalogue
+            .iter()
+            .position(|(_, models)| models.iter().any(|m| *m == self.model))
+        {
+            self.provider_choice = index;
+        }
+        self.input.clear();
+        self.selecting_model = true;
+        self.reset_model_choice();
+    }
+
+    fn close_model_selector(&mut self) {
+        self.selecting_model = false;
+        self.model_choice = None;
+        self.input.clear();
+    }
+
+    fn filtered_models(&self) -> Vec<&String> {
+        let Some((_, models)) = self.catalogue.get(self.provider_choice) else {
+            return Vec::new();
+        };
+        let query = self.input.to_ascii_lowercase();
+        models
+            .iter()
+            .filter(|model| model.to_ascii_lowercase().contains(&query))
+            .collect()
+    }
+
+    fn reset_model_choice(&mut self) {
+        let models = self.filtered_models();
+        self.model_choice = models
+            .iter()
+            .position(|model| **model == self.model)
+            .or((!models.is_empty()).then_some(0));
+    }
+
+    fn move_provider_choice(&mut self, offset: isize) {
+        if !self.selecting_model || self.catalogue.is_empty() {
+            return;
+        }
+        let start = self.provider_choice;
+        loop {
+            self.provider_choice = (self.provider_choice as isize + offset)
+                .rem_euclid(self.catalogue.len() as isize)
+                as usize;
+            self.reset_model_choice();
+            if self.model_choice.is_some() || self.provider_choice == start {
+                break;
+            }
+        }
+    }
+
+    fn move_model_choice(&mut self, offset: isize) {
+        let Some(index) = self.model_choice else {
+            return;
+        };
+        let len = self.filtered_models().len();
+        if len != 0 {
+            self.model_choice = Some((index as isize + offset).rem_euclid(len as isize) as usize);
+        }
+    }
+
+    fn choose_model(&mut self) {
+        let Some(index) = self.model_choice else {
+            return;
+        };
+        let Some(model) = self.filtered_models().get(index).map(|m| (*m).clone()) else {
+            return;
+        };
+        self.close_model_selector();
+        self.apply_model(model);
+    }
+
+    // ── Palette ───────────────────────────────────────────────────────────
+
+    fn palette(&self) -> Vec<(&'static str, &'static str)> {
+        if self.selecting_model {
+            return Vec::new();
+        }
+        palette_matches(&self.input)
+    }
+
+    fn move_palette_choice(&mut self, offset: isize) -> bool {
+        let len = self.palette().len();
+        if len == 0 {
+            return false;
+        }
+        self.palette_choice =
+            (self.palette_choice as isize + offset).rem_euclid(len as isize) as usize;
+        true
+    }
+
+    fn complete_palette(&mut self) {
+        let palette = self.palette();
+        if palette.is_empty() {
+            return;
+        }
+        let index = self.palette_choice.min(palette.len() - 1);
+        self.input = palette[index].0.to_string();
+        self.palette_choice = 0;
     }
 
     fn append_delta(&mut self, text: &str) {
@@ -206,6 +619,7 @@ impl App {
                 self.busy = false;
                 self.status = "ready".into();
                 self.online = true;
+                self.refresh_state();
             }
             AgentEvent::Error(message) => {
                 self.append_delta(&format!("\nerror: {message}"));
@@ -268,30 +682,71 @@ impl App {
         );
         tpl.set("cursor", blink_cursor(self.cursor_start));
         tpl.set("busy", self.busy);
-        // Idle spinner frames would rotate every 80ms and defeat the
-        // changed_keys() redraw gate, repainting a still screen at 12Hz.
-        tpl.set(
-            "spinner",
-            if self.busy {
-                spinner_frame(self.spinner_start)
-            } else {
-                ""
-            },
-        );
+        tpl.set("show_header", self.show_header);
+        tpl.set("version", env!("CARGO_PKG_VERSION"));
+        tpl.set("spinner", spinner_text(self.busy, self.spinner_start));
         tpl.set("status", self.status.clone());
         tpl.set("model", self.model.clone());
         tpl.set("engine", self.engine.clone());
+        tpl.set("mode", self.mode.clone());
+        tpl.set("cost", format!("{:.3}", self.cost_usd));
+        tpl.set("context_pct", self.context_pct.to_string());
+        tpl.set("context_window", format_tokens(self.context_window));
+        tpl.set("context_color", context_color(self.context_pct));
         tpl.set("conn", if self.online { "connected" } else { "offline" });
         tpl.set(
             "conn_color",
             if self.online { "green-400" } else { "red-400" },
         );
         tpl.set("project", self.project.clone());
+        tpl.set("branch", self.branch.clone());
+
+        let palette = self.palette();
+        tpl.set("show_palette", !palette.is_empty());
+        let rows = palette
+            .iter()
+            .enumerate()
+            .map(|(index, (name, hint))| {
+                let mut row = TemplateContext::new();
+                row.set("name", name.to_string());
+                row.set("hint", hint.to_string());
+                row.set(
+                    "selected",
+                    index == self.palette_choice.min(palette.len() - 1),
+                );
+                row
+            })
+            .collect();
+        tpl.set("palette", TemplateValue::List(rows));
+
+        tpl.set("selecting_model", self.selecting_model);
+        tpl.set(
+            "selected_provider",
+            self.catalogue
+                .get(self.provider_choice)
+                .map(|(name, _)| name.clone())
+                .unwrap_or_default(),
+        );
+        let filtered = self.filtered_models();
+        let model_rows = filtered
+            .iter()
+            .enumerate()
+            .skip(self.model_choice.unwrap_or_default().saturating_sub(2))
+            .take(MODEL_ROWS)
+            .map(|(index, model)| {
+                let mut row = TemplateContext::new();
+                row.set("model_id", (*model).clone());
+                row.set("selected", Some(index) == self.model_choice);
+                row
+            })
+            .collect();
+        tpl.set("model_rows", TemplateValue::List(model_rows));
     }
 }
 
 fn main() -> anyhow::Result<()> {
     let mut app = App::new();
+    app.refresh_state();
     let mut tpl = Template::from_source(include_str!("../shell.crepus"));
 
     enable_raw_mode()?;
@@ -331,7 +786,10 @@ fn flush_scrollback(app: &mut App, terminal: &mut Term) -> anyhow::Result<()> {
 fn run(app: &mut App, tpl: &mut Template, terminal: &mut Term) -> anyhow::Result<()> {
     while !app.quit {
         while let Ok(event) = app.rx.try_recv() {
-            app.handle_event(event);
+            match event {
+                UiEvent::Agent(event) => app.handle_event(event),
+                UiEvent::State(state) => app.apply_state(state),
+            }
         }
 
         flush_scrollback(app, terminal)?;
@@ -361,13 +819,41 @@ fn run(app: &mut App, tpl: &mut Template, terminal: &mut Term) -> anyhow::Result
                     {
                         app.quit = true;
                     }
+                    KeyCode::F(1) => app.show_header = !app.show_header,
+                    KeyCode::Esc if app.selecting_model => app.close_model_selector(),
+                    KeyCode::Enter if app.selecting_model => app.choose_model(),
+                    KeyCode::Left if app.selecting_model => app.move_provider_choice(-1),
+                    KeyCode::Right if app.selecting_model => app.move_provider_choice(1),
                     KeyCode::Enter => app.submit(),
+                    KeyCode::Tab => app.complete_palette(),
                     KeyCode::Backspace => {
                         app.input.pop();
+                        if app.selecting_model {
+                            app.reset_model_choice();
+                        }
+                        app.palette_choice = 0;
                     }
-                    KeyCode::Up => app.history_step(true),
-                    KeyCode::Down => app.history_step(false),
-                    KeyCode::Char(c) => app.input.push(c),
+                    KeyCode::Up => {
+                        if app.selecting_model {
+                            app.move_model_choice(-1);
+                        } else if !app.move_palette_choice(-1) {
+                            app.history_step(true);
+                        }
+                    }
+                    KeyCode::Down => {
+                        if app.selecting_model {
+                            app.move_model_choice(1);
+                        } else if !app.move_palette_choice(1) {
+                            app.history_step(false);
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        app.input.push(c);
+                        if app.selecting_model {
+                            app.reset_model_choice();
+                        }
+                        app.palette_choice = 0;
+                    }
                     _ => {}
                 }
             }
@@ -451,5 +937,157 @@ mod tests {
         assert_eq!(a.input, "two");
         a.history_step(false);
         assert_eq!(a.input, "");
+    }
+
+    #[test]
+    fn the_palette_only_offers_matching_commands() {
+        assert!(palette_matches("hello").is_empty());
+        assert!(palette_matches("/model claude").is_empty());
+        assert_eq!(palette_matches("/co").len(), 3);
+        assert!(palette_matches("/comp")
+            .iter()
+            .all(|(name, _)| *name == "/compact"));
+        assert_eq!(palette_matches("/").len(), COMMANDS.len());
+    }
+
+    #[test]
+    fn tab_completes_the_selected_command() {
+        let mut a = app();
+        a.input = "/he".into();
+        a.complete_palette();
+        assert_eq!(a.input, "/help");
+    }
+
+    #[test]
+    fn arrow_keys_walk_the_palette_before_the_history() {
+        let mut a = app();
+        a.history = vec!["earlier".into()];
+        a.input = "/c".into();
+        assert!(a.move_palette_choice(1));
+        assert_eq!(a.input, "/c");
+        a.input = "plain".into();
+        assert!(!a.move_palette_choice(1));
+    }
+
+    #[test]
+    fn help_lists_every_command() {
+        let mut a = app();
+        a.run_command("/help");
+        let text = &a.live[0].text;
+        for (name, _) in COMMANDS {
+            assert!(text.contains(name), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn quit_commands_end_the_session() {
+        for command in ["/quit", "/exit"] {
+            let mut a = app();
+            a.run_command(command);
+            assert!(a.quit, "{command} did not quit");
+        }
+    }
+
+    #[test]
+    fn clear_empties_the_transcript() {
+        let mut a = app();
+        a.note("something");
+        a.scrollback.push("old".into());
+        a.run_command("/clear");
+        assert!(a.live.is_empty());
+        assert!(a.scrollback.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_command_says_so_instead_of_being_sent() {
+        let mut a = app();
+        a.run_command("/nope");
+        assert!(a.live[0].text.contains("unknown command"));
+    }
+
+    #[test]
+    fn the_selector_filters_models_and_walks_providers() {
+        let mut a = app();
+        a.catalogue = vec![
+            (
+                "anthropic".into(),
+                vec!["claude-haiku-3-5".into(), "claude-opus-4".into()],
+            ),
+            ("ollama".into(), vec!["qwen".into()]),
+        ];
+        a.model = "claude-opus-4".into();
+        a.open_model_selector();
+        assert!(a.selecting_model);
+        assert_eq!(a.model_choice, Some(1));
+        a.input = "haiku".into();
+        a.reset_model_choice();
+        assert_eq!(a.filtered_models().len(), 1);
+        assert_eq!(a.model_choice, Some(0));
+        a.input.clear();
+        a.reset_model_choice();
+        a.move_provider_choice(1);
+        assert_eq!(a.provider_choice, 1);
+        assert_eq!(a.filtered_models(), vec![&"qwen".to_string()]);
+        a.close_model_selector();
+        assert!(!a.selecting_model);
+        assert!(a.model_choice.is_none());
+    }
+
+    #[test]
+    fn model_choice_wraps_in_both_directions() {
+        let mut a = app();
+        a.catalogue = vec![("p".into(), vec!["a".into(), "b".into(), "c".into()])];
+        a.open_model_selector();
+        assert_eq!(a.model_choice, Some(0));
+        a.move_model_choice(-1);
+        assert_eq!(a.model_choice, Some(2));
+        a.move_model_choice(1);
+        assert_eq!(a.model_choice, Some(0));
+    }
+
+    #[test]
+    fn context_colours_follow_the_thresholds() {
+        assert_eq!(context_color(0), "green-400");
+        assert_eq!(context_color(69), "green-400");
+        assert_eq!(context_color(70), "amber-400");
+        assert_eq!(context_color(89), "amber-400");
+        assert_eq!(context_color(90), "red-400");
+        assert_eq!(context_color(100), "red-400");
+    }
+
+    #[test]
+    fn token_counts_are_abbreviated() {
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(32_000), "32k");
+        assert_eq!(format_tokens(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn state_from_the_server_replaces_the_config_guess() {
+        let mut a = app();
+        a.apply_state(AgentState {
+            model: "claude-opus-4".into(),
+            engine: "rx4".into(),
+            mode: "coding".into(),
+            cost_usd: 1.5,
+            total_tokens: 10,
+            call_count: 2,
+            context_tokens: 900,
+            context_window: 1000,
+            context_pct: 90,
+        });
+        assert_eq!(a.model, "claude-opus-4");
+        assert_eq!(a.engine, "rx4");
+        assert_eq!(a.mode, "coding");
+        assert_eq!(context_color(a.context_pct), "red-400");
+        assert!(a.online);
+    }
+
+    #[test]
+    fn the_spinner_stays_empty_while_idle() {
+        let start = Instant::now() - Duration::from_millis(500);
+        assert_eq!(spinner_text(false, start), "");
+        assert_eq!(spinner_text(false, Instant::now()), "");
+        assert!(!spinner_text(true, start).is_empty());
     }
 }
