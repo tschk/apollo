@@ -408,6 +408,29 @@ mod tests {
         assert_eq!(result.output, "plain prose answer");
     }
 
+    /// End-to-end against a real `tk`. Ignored by default: the test suite must
+    /// pass on a machine without telekinesis installed. A provider auth or
+    /// credit failure still exercises the contract, since it arrives as the
+    /// documented `{"ok":false,...}` object.
+    #[tokio::test]
+    #[ignore = "requires telekinesis (tk) on PATH and a working provider login"]
+    async fn delegates_to_a_real_worker() {
+        let workspace = std::env::current_dir().unwrap();
+        let tool = TelekinesisTool::new(workspace).with_timeout(180);
+        let args = serde_json::json!({ "prompt": "Reply with exactly the word PONG." }).to_string();
+
+        let result = Tool::execute(&tool, &args).await.unwrap();
+        assert!(
+            !result.output.is_empty(),
+            "a real run must report something back"
+        );
+        assert!(
+            !result.output.contains("no parseable result"),
+            "tk exec --json must yield the documented object, got: {}",
+            result.output
+        );
+    }
+
     #[test]
     fn long_output_is_truncated_by_chars_not_bytes() {
         let long = "日".repeat(30_000);
