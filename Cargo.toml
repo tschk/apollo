@@ -137,9 +137,6 @@ rand = "0.8"
 parking_lot = "0.12"
 libc = "0.2"
 
-# File system watcher (hot reload for tools/skills/memory)
-notify = { version = "6", features = ["serde"] }
-
 # Scheduling (Phase 4: cron)
 cron = "0.12"
 
