@@ -366,6 +366,10 @@ impl Plugin for ShellPlugin {
             .and_then(|v| v.as_str())
             .ok_or_else(|| PluginError::new(-32602, "Missing cmd parameter"))?;
 
+        if let Err(reason) = self.policy.check_shell_command(cmd) {
+            return Err(PluginError::new(-32604, &reason));
+        }
+
         match crate::process_cmd::run_argv_command(cmd, 120).await {
             Ok((output, ok)) => Ok(serde_json::json!({
                 "stdout": output,

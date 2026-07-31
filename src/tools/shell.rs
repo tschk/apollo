@@ -85,7 +85,7 @@ impl Tool for ShellTool {
         let args: ShellArgs = serde_json::from_str(arguments)?;
 
         // Guard: block catastrophic commands unconditionally
-        if let Some(reason) = check_catastrophic_command(&args.command) {
+        if let Err(reason) = self.policy.check_shell_command(&args.command) {
             return Ok(ToolResult::error(format!(
                 "⛔ Blocked catastrophic command: {}",
                 reason
@@ -202,7 +202,7 @@ impl Tool for ShellTool {
 /// the real controls are `policy.allow_shell` and the permission hooks. Keep
 /// this cheap and obvious rather than growing it into a pattern zoo that
 /// invites misplaced trust.
-fn check_catastrophic_command(cmd: &str) -> Option<&'static str> {
+pub(crate) fn check_catastrophic_command(cmd: &str) -> Option<&'static str> {
     let lower = cmd.to_lowercase();
 
     // Whitespace-insensitive, so reflowed variants still match.

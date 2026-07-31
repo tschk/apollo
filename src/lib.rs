@@ -42,6 +42,7 @@ pub mod providers;
 pub mod redaction;
 pub mod scheduler;
 pub mod self_update;
+pub mod shell_scan;
 pub mod skills;
 pub mod streaming_parser;
 #[cfg(feature = "swarm")]
