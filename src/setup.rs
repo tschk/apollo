@@ -647,7 +647,9 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
     cfg.model = model.clone();
     apply_permission_profile(&mut cfg, &permission_profile);
     let json = serde_json::to_string_pretty(&cfg)?;
-    std::fs::write(&config_path, &json)?;
+    // The sandbox classifies apollo.json as a credential file, so it must not
+    // be written world-readable.
+    write_private(&config_path, &json)?;
 
     // === Write systemd service ===
     let bin_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("apollo"));

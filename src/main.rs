@@ -1957,7 +1957,13 @@ fn run_config_command(action: ConfigAction, path: &str) -> anyhow::Result<()> {
             let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
             Config::splice_into_raw(&mut raw, &key, written.clone());
             let rendered = serde_json::to_string_pretty(&raw)?;
-            std::fs::write(path, format!("{rendered}\n"))?;
+            // apollo.json is a credential file, and a plain write truncates
+            // first — a crash there leaves an empty config apollo cannot
+            // start from. write_secret_file is 0600 and atomic.
+            apollo::fs_secure::write_secret_file(
+                std::path::Path::new(path),
+                &format!("{rendered}\n"),
+            )?;
             let shown = if apollo::config::is_secret_key(key.rsplit('.').next().unwrap_or(&key)) {
                 serde_json::Value::String("********".to_string())
             } else {
