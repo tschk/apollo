@@ -1550,7 +1550,7 @@ checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.1.14",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -5870,15 +5870,16 @@ dependencies = [
 
 [[package]]
 name = "praefectus"
-version = "0.4.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3416c9b94ae40f58e16112cad0827abbcf751546f0a050246070e69086c4bb7"
+checksum = "4b5180b5a1b185992180430fc66aa5728ba8b2f5fad6f6c66310fa790558472b"
 dependencies = [
  "accessibility-sys",
  "atspi",
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
  "ed25519-dalek",
+ "foreign-types",
  "fs2",
  "hex",
  "libc",

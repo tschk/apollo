@@ -47,8 +47,8 @@ enum PraefectusArgs {
         operation_id: String,
         deadline_at_ms: i64,
         interaction_mode: InteractionMode,
-        desktop_action: Action,
-        target: SemanticTargetRef,
+        desktop_action: Box<Action>,
+        target: Box<SemanticTargetRef>,
     },
 }
 
@@ -169,14 +169,14 @@ impl PraefectusRuntime {
                 desktop_action,
                 target,
             } => {
-                if !matches!(desktop_action, Action::Invoke | Action::SetValue { .. }) {
+                if !matches!(*desktop_action, Action::Invoke | Action::SetValue { .. }) {
                     anyhow::bail!(
                         "praefectus execution only permits semantic invoke and set_value actions"
                     );
                 }
                 let request = signed_request(
-                    desktop_action,
-                    target,
+                    *desktop_action,
+                    *target,
                     operation_id,
                     deadline_at_ms,
                     interaction_mode,
@@ -543,8 +543,8 @@ mod tests {
                         .expect("time should resolve")
                         .saturating_add(ACTION_WINDOW_MS),
                     interaction_mode: InteractionMode::Interactive,
-                    desktop_action: Action::Invoke,
-                    target: target(),
+                    desktop_action: Box::new(Action::Invoke),
+                    target: Box::new(target()),
                 },
                 &cancellation,
             )
