@@ -188,6 +188,7 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) {
             .route("/health", get(|| async { "ok" }))
             .route("/v1/chat", post(chat_handler))
             .route("/v1/chat/stream", get(ws_chat_upgrade))
+            .route("/shutdown", post(shutdown_handler))
             .with_state(runner);
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => l,
@@ -204,6 +205,21 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) {
             tracing::error!("apollo http server: {}", e);
         }
     });
+}
+
+/// Stop a detached server started by `apollo tui`.
+///
+/// Authenticated like the chat routes: whoever can drive the agent can also
+/// stop it, and nobody else can.
+async fn shutdown_handler(headers: axum::http::HeaderMap) -> Result<&'static str, StatusCode> {
+    authorize(&headers)?;
+    tracing::info!("shutdown requested over HTTP");
+    tokio::spawn(async {
+        // Let the response flush before the process goes away.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        std::process::exit(0);
+    });
+    Ok("stopping")
 }
 
 async fn chat_handler(

@@ -78,18 +78,27 @@ fn main() -> anyhow::Result<()> {
             copy_exe(&src, &dst)?;
             println!("Installed {}", dst.display());
             if let Some(parent) = src.parent() {
-                let installer = parent.join("apollo-install");
-                if installer.is_file() {
-                    let idst = dest.join("apollo-install");
-                    copy_exe(&installer, &idst)?;
-                    println!("Installed {}", idst.display());
+                // apollo-tui matters here: `apollo` with no arguments opens the
+                // TUI only when this binary is alongside it, and otherwise
+                // falls back to the line-based chat.
+                for name in ["apollo-install", "apollo-tui"] {
+                    let sibling = parent.join(name);
+                    if sibling.is_file() {
+                        let sdst = dest.join(name);
+                        copy_exe(&sibling, &sdst)?;
+                        println!("Installed {}", sdst.display());
+                    } else if name == "apollo-tui" {
+                        println!(
+                            "Skipped apollo-tui (not built) — `cargo build --release -p apollo-tui`"
+                        );
+                    }
                 }
             }
             path_hint(&dest);
         }
         Cmd::Uninstall { dest } => {
             let dest = expand_dest(&dest);
-            for name in ["apollo", "apollo-install"] {
+            for name in ["apollo", "apollo-install", "apollo-tui"] {
                 let p = dest.join(name);
                 if p.is_file() {
                     fs::remove_file(&p)?;

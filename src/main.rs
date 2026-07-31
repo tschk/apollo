@@ -1,7 +1,7 @@
 //! apollo — Lightweight agent runtime CLI
 //! Successor to OpenClaw. Best-of-breed from ZeroClaw, NanoClaw, HiClaw.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -256,6 +256,24 @@ enum Commands {
 
     /// Launch the desktop UI (apollo-ui)
     Ui,
+
+    /// Stop the background agent server
+    Stop,
+
+    /// Start the agent automatically when you log in
+    Autostart {
+        /// Remove the autostart entry instead of adding it
+        #[arg(long, default_value_t = false)]
+        disable: bool,
+
+        /// Configuration file path
+        #[arg(short, long, default_value = "apollo.json")]
+        config: String,
+
+        /// Workspace directory (defaults to the current directory)
+        #[arg(short, long)]
+        workspace: Option<PathBuf>,
+    },
 
     /// Run the agent headless, serving only the HTTP/WS API
     Serve {
@@ -1753,6 +1771,22 @@ async fn main() -> anyhow::Result<()> {
             launch_apollo_tui(config, model, workspace).await?;
         }
 
+        Commands::Stop => {
+            stop_background_server().await?;
+        }
+
+        Commands::Autostart {
+            disable,
+            config,
+            workspace,
+        } => {
+            let workspace = match workspace {
+                Some(w) => w,
+                None => std::env::current_dir()?,
+            };
+            configure_autostart(disable, &config, &workspace)?;
+        }
+
         Commands::Serve { .. } => unreachable!("rewritten to Chat above"),
     }
 
@@ -1780,6 +1814,191 @@ async fn launch_apollo_ui() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Spawn `apollo serve` detached and wait until it answers `/health`.
+///
+/// `kill_on_drop` is deliberately NOT set: the point is a server that keeps
+/// running after the client that started it exits.
+async fn start_background_server(
+    config: &str,
+    model: Option<&str>,
+    workspace: Option<&Path>,
+) -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.arg("serve").arg("--config").arg(config);
+    if let Some(model) = model {
+        cmd.arg("--model").arg(model);
+    }
+    if let Some(workspace) = workspace {
+        cmd.arg("--workspace").arg(workspace);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = cmd.spawn()?;
+    // Drop the handle without killing it, so the process is reparented and
+    // survives this one.
+    std::mem::forget(child);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !server_healthy().await {
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!("background apollo serve did not become healthy in 30s");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Ok(())
+}
+
+/// Register (or remove) a login item that runs `apollo serve` at startup.
+///
+/// Writes a launchd agent on macOS and a systemd user unit on Linux, both in
+/// the user's own directory — nothing here needs root, and nothing is
+/// installed system-wide.
+#[allow(clippy::needless_return)]
+fn configure_autostart(disable: bool, config: &str, workspace: &Path) -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.into());
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot locate the home directory"))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let path = home.join("Library/LaunchAgents/dev.apollo.agent.plist");
+        if disable {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", &path.to_string_lossy()])
+                .status();
+            if path.is_file() {
+                std::fs::remove_file(&path)?;
+                println!("Removed {}", path.display());
+            } else {
+                println!("Autostart was not enabled.");
+            }
+            return Ok(());
+        }
+
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.apollo.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exe}</string>
+    <string>serve</string>
+    <string>--config</string>
+    <string>{config}</string>
+    <string>--workspace</string>
+    <string>{workspace}</string>
+  </array>
+  <key>WorkingDirectory</key><string>{workspace}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+"#,
+            exe = exe.display(),
+            config = config,
+            workspace = workspace.display(),
+        );
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, plist)?;
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &path.to_string_lossy()])
+            .status();
+        let status = std::process::Command::new("launchctl")
+            .args(["load", &path.to_string_lossy()])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("launchctl load failed for {}", path.display());
+        }
+        println!("Autostart enabled — {}", path.display());
+        println!("Disable with: apollo autostart --disable");
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let path = home.join(".config/systemd/user/apollo.service");
+        if disable {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "disable", "--now", "apollo.service"])
+                .status();
+            if path.is_file() {
+                std::fs::remove_file(&path)?;
+                println!("Removed {}", path.display());
+            } else {
+                println!("Autostart was not enabled.");
+            }
+            return Ok(());
+        }
+
+        let unit = format!(
+            "[Unit]\n\
+             Description=apollo agent\n\
+             After=network-online.target\n\n\
+             [Service]\n\
+             ExecStart={exe} serve --config {config} --workspace {workspace}\n\
+             WorkingDirectory={workspace}\n\
+             Restart=on-failure\n\n\
+             [Install]\n\
+             WantedBy=default.target\n",
+            exe = exe.display(),
+            config = config,
+            workspace = workspace.display(),
+        );
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, unit)?;
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", "apollo.service"])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("systemctl enable failed for {}", path.display());
+        }
+        println!("Autostart enabled — {}", path.display());
+        println!("Disable with: apollo autostart --disable");
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (disable, config, workspace, exe, home);
+        anyhow::bail!("autostart is only implemented for macOS and Linux")
+    }
+}
+
+/// Ask a running server to exit, using the same token its clients use.
+async fn stop_background_server() -> anyhow::Result<()> {
+    if !server_healthy().await {
+        println!("No apollo server is running.");
+        return Ok(());
+    }
+    let token = apollo::agent_http::load_or_create_token()?;
+    let url = format!("http://{}/shutdown", apollo::agent_http::http_listen_addr());
+    let resp = apollo::http::standard()
+        .post(url)
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if resp.status().is_success() {
+        println!("Stopped the apollo server.");
+        Ok(())
+    } else {
+        anyhow::bail!("server refused the shutdown: HTTP {}", resp.status())
+    }
+}
+
 async fn server_healthy() -> bool {
     let url = format!("http://{}/health", apollo::agent_http::http_listen_addr());
     reqwest::Client::new()
@@ -1803,40 +2022,17 @@ async fn launch_apollo_tui(
     })?;
 
     // ponytail: reuse an already-running server rather than owning a pidfile.
-    let mut server = None;
+    // The server outlives this TUI on purpose — the next `apollo` starts
+    // instantly against it, and cron and heartbeat keep running in between.
+    // `apollo stop` shuts it down.
     if !server_healthy().await {
-        let exe = std::env::current_exe()?;
-        let mut cmd = tokio::process::Command::new(exe);
-        cmd.arg("serve").arg("--config").arg(&config);
-        if let Some(model) = &model {
-            cmd.arg("--model").arg(model);
-        }
-        if let Some(workspace) = &workspace {
-            cmd.arg("--workspace").arg(workspace);
-        }
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let child = cmd.spawn()?;
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !server_healthy().await {
-            if std::time::Instant::now() > deadline {
-                anyhow::bail!("background apollo serve did not become healthy in 30s");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        server = Some(child);
+        start_background_server(&config, model.as_deref(), workspace.as_deref()).await?;
     }
 
     let status = tokio::process::Command::new(&binary)
         .current_dir(std::env::current_dir()?)
         .status()
         .await?;
-
-    if let Some(mut child) = server.take() {
-        let _ = child.kill().await;
-    }
 
     if !status.success() {
         anyhow::bail!("apollo-tui exited with status: {status}");
