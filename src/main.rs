@@ -1622,11 +1622,35 @@ async fn start_background_server(
 
 /// Register (or remove) a login item that runs `apollo serve` at startup.
 ///
+/// The config path is interpolated into a launchd plist and a systemd unit,
+/// neither of which has an escaping syntax we could rely on. Accept only a
+/// plain path, so nothing can close a `<string>` element or start a new unit
+/// directive and gain boot-persistent execution.
+fn validate_autostart_config_path(config: &str) -> anyhow::Result<String> {
+    let path = config.trim();
+    if path.is_empty() {
+        anyhow::bail!("--config is required for autostart");
+    }
+    if let Some(bad) = path
+        .chars()
+        .find(|c| c.is_whitespace() || c.is_control() || "<>&\"'`$%\\;|".contains(*c))
+    {
+        anyhow::bail!(
+            "refusing to install autostart: the config path contains {:?}. \
+             Use a plain path with no whitespace or shell/markup characters.",
+            bad
+        );
+    }
+    Ok(path.to_string())
+}
+
 /// Writes a launchd agent on macOS and a systemd user unit on Linux, both in
 /// the user's own directory — nothing here needs root, and nothing is
 /// installed system-wide.
 #[allow(clippy::needless_return)]
 fn configure_autostart(disable: bool, config: &str, workspace: &Path) -> anyhow::Result<()> {
+    let config = validate_autostart_config_path(config)?;
+    let config = config.as_str();
     let exe = std::env::current_exe()?;
     let workspace = workspace
         .canonicalize()
@@ -1938,4 +1962,38 @@ fn init_tracing(cfg: &apollo::config::ObservabilityConfig) -> anyhow::Result<()>
         "tracing initialized"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod autostart_tests {
+    use super::validate_autostart_config_path;
+
+    #[test]
+    fn accepts_plain_paths() {
+        assert_eq!(
+            validate_autostart_config_path(" apollo.json ").unwrap(),
+            "apollo.json"
+        );
+        assert_eq!(
+            validate_autostart_config_path("/home/u/.config/apollo.json").unwrap(),
+            "/home/u/.config/apollo.json"
+        );
+    }
+
+    #[test]
+    fn rejects_injection_attempts() {
+        for bad in [
+            "a.json</string><key>Program</key><string>/bin/sh",
+            "a.json\nExecStartPre=/bin/sh -c evil",
+            "a.json --extra",
+            "a.json;rm -rf /",
+            "%h/evil.json",
+            "",
+        ] {
+            assert!(
+                validate_autostart_config_path(bad).is_err(),
+                "accepted {bad:?}"
+            );
+        }
+    }
 }
