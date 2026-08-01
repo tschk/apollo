@@ -119,6 +119,24 @@ src/
 
 ## 4) Key Implementation Notes
 
+### Skill discovery roots
+
+`discover_skills_for_workspace` scans, in order: the OpenClaw npm skills dir,
+`~/.openclaw/workspace/skills`, `<workspace>/.apollo/skills`, and the three
+host-plugin roots `<workspace>/plugins`, `.openclaw/plugins`, `.hermes/plugins`.
+
+The plugin roots are there because `plugin_hosts::discover_host_plugins` scans
+exactly those directories for SKILL.md and used to only *log* what it found —
+so an OpenClaw plugin dropped into `plugins/` was discovered and then ignored
+by the one subsystem that could have run it. The two functions must keep
+scanning the same roots; if you add a root to one, add it to the other.
+
+Security note: these roots load and preprocess SKILL.md, which supports inline
+shell. That is the same trust level as `.apollo/skills` — anything that can
+write to a workspace plugin directory can already write to the managed skills
+directory — but it is a wider surface than it was, so do not add roots outside
+the workspace.
+
 ### Memory
 - SurrealDB + RocksDB is the intended primary backend direction
 - Sticker cache: `sticker_id → description` (avoids re-analysis)
@@ -309,10 +327,24 @@ makes a channel selectable with no feature flag, no `mod.rs` entry and no core
 edit. `PluginRegistry::register` merges those into the registry that
 `--channel` consults; `tests/plugin_channel.rs` drives that path end to end.
 
-Note the asymmetry: plugin-registered **tools** are currently logged and
-dropped in `PluginRegistry::register`, so they never reach the agent. Channels
-are wired through; tools are not. Do not assume the rest of `PluginContext`
-works because channels do.
+Plugin-registered **tools** reach the agent through
+`LoopRunner::with_plugin_registry`, which appends `registry.tools()` to the
+agent's tool list. A plugin tool whose name collides with a built-in is
+refused with a warning — the built-in wins, so a dropped-in plugin cannot
+silently replace `shell`.
+
+Registration is only real if something consumes it. Both `register_tool` and
+`register_channel` were once accepted, logged and discarded, which looked
+identical to working from the plugin's side. `tests/plugin_channel.rs` asserts
+each one arrives at its consumer — for tools that means the *agent's* list, not
+the registry's.
+
+What still does not exist: a `HostPluginEntry` carries only id/kind/path/name/
+description. There is no entrypoint in it, so a discovered `plugin.json` that
+declares neither a SKILL.md nor an in-process registration does nothing.
+Giving those an execution model means running code out of a discovered
+directory, which is the `.apollo/skills` prompt-injection surface in section 10
+all over again — decide that deliberately, do not slide into it.
 
 ### Media
 
