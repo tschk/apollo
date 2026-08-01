@@ -339,21 +339,78 @@ identical to working from the plugin's side. `tests/plugin_channel.rs` asserts
 each one arrives at its consumer — for tools that means the *agent's* list, not
 the registry's.
 
-What still does not exist: a `HostPluginEntry` carries only id/kind/path/name/
-description. There is no entrypoint in it, so a discovered `plugin.json` that
-declares neither a SKILL.md nor an in-process registration does nothing.
-Giving those an execution model means running code out of a discovered
-directory, which is the `.apollo/skills` prompt-injection surface in section 10
-all over again — decide that deliberately, do not slide into it.
+### Executing host plugin tools
+
+A `plugin.json` may declare `tools: [{name, description, command, args}]`, and
+`plugin_exec::HostPluginToolAdapter` exposes them to the agent.
+
+**Discovery grants nothing.** The tools are only built if the plugin's id is
+listed in `plugin_layer.trusted_host_plugins`, which is empty by default.
+There is no master switch that trusts everything found — each plugin is named,
+because anything that can write into `plugins/` would otherwise have code
+execution, which is the section 10 prompt-injection path from the other side.
+
+Inside that gate the execution is still narrow, and each constraint is load
+bearing:
+
+- the command is executed **directly, never through a shell**, so quoting and
+  metacharacters are inert;
+- JSON arguments arrive on **stdin, not argv**, so an argument cannot become
+  another flag or another command;
+- the working directory is the plugin's own;
+- there is a timeout and the captured output is truncated by character.
+
+`tests/plugin_channel.rs` asserts that a discovered-but-untrusted plugin
+contributes nothing, and that trusting a *different* id does not help. Keep
+those tests honest if you touch this.
 
 ### Media
 
 `Channel::send_media` carries images, documents, voice, video and animations,
-from either a URL (the platform fetches it) or a local path (uploaded as
-multipart). The default implementation **errors**, and `supports_media()`
-reports which channels mean it — a channel must never accept an attachment and
-quietly deliver a text message with a link in it, because the caller cannot
-detect that. Telegram is the only implementation so far.
+from either a URL or a local path. The default implementation **errors**, and
+`supports_media()` reports which channels mean it — a channel must never accept
+an attachment and quietly deliver a text message with a link in it, because the
+caller cannot detect that.
+
+Implemented for Telegram, Discord and Slack. The three upload differently and
+the difference is not incidental:
+
+- **Telegram** takes a URL and fetches it itself, so a URL source stays a JSON
+  call; only local paths are multipart.
+- **Discord** does not fetch URLs, so `channels::media::load` downloads first
+  and re-uploads as `files[0]` alongside `payload_json`.
+- **Slack**'s `files.upload` is deprecated. It is the three-step external
+  flow: `files.getUploadURLExternal` → PUT the bytes to the URL Slack returns
+  → `files.completeUploadExternal`, which is the step that actually posts into
+  the channel.
+
+`channels::media::load` is the shared "get me the bytes and a filename" for the
+two that upload. It caps what it will buffer and sanitises the filename derived
+from a URL, because that filename reaches a multipart header.
+
+### Discord transport
+
+Discord defaults to the **gateway websocket** (`channels::discord_gateway`).
+`transport = "polling"` in `[channel].settings` selects REST polling instead,
+which is the fallback for a bot whose privileged `MESSAGE_CONTENT` intent has
+not been granted — without that intent the gateway delivers empty message
+bodies, which looks exactly like the dropped-sender bug it replaced.
+
+The gateway implements HELLO/heartbeat, IDENTIFY and MESSAGE_CREATE only.
+There is **no RESUME**: a dropped connection re-identifies and loses whatever
+was sent during the gap. Polling sees one channel and no DMs. Both limits are
+deliberate and neither is a bug to be surprised by.
+
+### Verifying against the real service
+
+`tests/channel_conformance.rs` proves a channel works against a mock built from
+the published API shapes. It cannot prove a field name, a scope or a deprecated
+endpoint is right. `apollo channel-check --channel <name>` closes that gap:
+it starts the channel, sends a nonce, optionally uploads an attachment, and
+waits for you to echo the nonce back. Every step must pass.
+
+Only Telegram and CLI have been through it. Run it before advertising any
+other channel as working — that claim is exactly what 0.4.0 got wrong.
 
 ### Webhook channels
 

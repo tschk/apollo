@@ -32,6 +32,11 @@ autonomous coding mode, and a plugin system with lifecycle hooks.
 ### Messaging Channels
 Telegram, CLI, Discord, Slack, WhatsApp, Matrix, Signal, IRC, Google Chat, MS Teams
 
+Telegram and CLI are the default features and the two exercised against the
+real services. The rest are opt-in Cargo features, covered end-to-end against
+a mock server by `tests/channel_conformance.rs`. Verify one against its real
+service with `apollo channel-check --channel <name>`.
+
 ### LLM Providers
 Anthropic (default), OpenAI-compat, Ollama, Copilot, OpenRouter, Groq, Together,
 Mistral, DeepSeek, Fireworks, Perplexity, xAI, Moonshot, Venice, HuggingFace,
