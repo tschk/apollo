@@ -225,6 +225,8 @@ pub struct PluginRegistry {
     plugins: HashMap<String, Arc<dyn Plugin>>,
     hooks: HookManager,
     channels: crate::channels::ChannelRegistry,
+    tools: Vec<Arc<dyn crate::tools::Tool>>,
+    host_plugins: Vec<crate::plugin_hosts::HostPluginEntry>,
 }
 
 impl PluginRegistry {
@@ -233,7 +235,23 @@ impl PluginRegistry {
             plugins: HashMap::new(),
             hooks: HookManager::new(),
             channels: crate::channels::ChannelRegistry::with_builtins(),
+            tools: Vec::new(),
+            host_plugins: Vec::new(),
         }
+    }
+
+    /// Tools contributed by plugins during `on_register`.
+    ///
+    /// `LoopRunner::with_plugin_registry` appends these to the agent's tool
+    /// list. They were previously logged and dropped, so a plugin could
+    /// "register" a tool the agent could never call.
+    pub fn tools(&self) -> &[Arc<dyn crate::tools::Tool>] {
+        &self.tools
+    }
+
+    /// Host plugin directories found by `ingest_host_plugins`.
+    pub fn host_plugins(&self) -> &[crate::plugin_hosts::HostPluginEntry] {
+        &self.host_plugins
     }
 
     /// Every channel that can be selected by name — built-ins plus whatever
@@ -242,10 +260,16 @@ impl PluginRegistry {
         &self.channels
     }
 
-    /// Log discovered OpenClaw/Hermes plugins from workspace (host-agnostic).
+    /// Discover OpenClaw/Hermes plugin directories and keep them.
+    ///
+    /// Kept, not just logged: `host_plugins()` is what feeds SKILL.md-bearing
+    /// plugin directories into skill discovery. A `HostPluginEntry` carries no
+    /// entrypoint, so a plugin whose manifest declares neither a skill nor an
+    /// in-process registration still does nothing — see `docs/` before adding
+    /// an execution model for those.
     pub fn ingest_host_plugins(&mut self, workspace: &std::path::Path, extra: &[PathBuf]) {
         let found = crate::plugin_hosts::discover_host_plugins(workspace, extra);
-        for p in found {
+        for p in &found {
             tracing::info!(
                 "[plugin-host] {:?} {} {:?}",
                 p.kind,
@@ -253,6 +277,7 @@ impl PluginRegistry {
                 p.path
             );
         }
+        self.host_plugins.extend(found);
     }
 
     /// Register a plugin and call its on_register with a PluginContext
@@ -260,9 +285,10 @@ impl PluginRegistry {
         let name = plugin.name().to_string();
         let mut ctx = PluginContext::default();
         plugin.on_register(&mut ctx).await;
-        // Register any tools the plugin exposed during on_register
+        // Keep the tools the plugin exposed — `tools()` hands them to the agent.
         for tool in ctx.tools {
             tracing::info!("[plugin] '{}' registered tool: {}", name, tool.name());
+            self.tools.push(tool);
         }
         // Merge channels so `--channel <name>` can reach them.
         for (channel_name, builder) in ctx.channels {

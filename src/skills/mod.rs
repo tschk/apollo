@@ -40,9 +40,27 @@ pub fn discover_skills_for_workspace(workspace: Option<&Path>) -> Vec<Skill> {
     if let Some(workspace) = workspace {
         let managed = managed_skills_dir(workspace);
         scan_skill_dir(&managed, &mut skills);
+
+        // Host plugin directories carry SKILL.md too. `discover_host_plugins`
+        // scanned these and only logged what it found, so an OpenClaw plugin
+        // dropped into `plugins/` was discovered and then ignored by the one
+        // system that could have used it.
+        for dir in host_plugin_skill_dirs(workspace) {
+            scan_skill_dir(&dir, &mut skills);
+        }
     }
 
     skills
+}
+
+/// Plugin roots that may contain SKILL.md-bearing directories. Same roots
+/// `plugin_hosts::discover_host_plugins` scans, deliberately.
+fn host_plugin_skill_dirs(workspace: &Path) -> Vec<PathBuf> {
+    vec![
+        workspace.join("plugins"),
+        workspace.join(".openclaw/plugins"),
+        workspace.join(".hermes/plugins"),
+    ]
 }
 
 pub fn managed_skills_dir(workspace: &Path) -> PathBuf {
@@ -292,6 +310,55 @@ fn slugify(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_plugin_skills_are_discovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path();
+
+        // An OpenClaw-style plugin dropped into the workspace. Discovery used
+        // to find this and log it; nothing loaded it.
+        let plugin = workspace.join("plugins/weather");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plugin.join("SKILL.md"),
+            "---\nname: weather\ndescription: forecast lookup\n---\n# Weather\n",
+        )
+        .unwrap();
+
+        let skills = discover_skills_for_workspace(Some(workspace));
+        assert!(
+            skills.iter().any(|s| s.name == "weather"),
+            "host plugin SKILL.md was discovered but never loaded; got {:?}",
+            skills.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn hermes_and_openclaw_plugin_roots_are_both_scanned() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path();
+
+        for (root, name) in [
+            (".hermes/plugins", "hermes-skill"),
+            (".openclaw/plugins", "openclaw-skill"),
+        ] {
+            let plugin = workspace.join(root).join(name);
+            std::fs::create_dir_all(&plugin).unwrap();
+            std::fs::write(
+                plugin.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: d\n---\n"),
+            )
+            .unwrap();
+        }
+
+        let found: Vec<String> = discover_skills_for_workspace(Some(workspace))
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(found.contains(&"hermes-skill".to_string()), "{found:?}");
+        assert!(found.contains(&"openclaw-skill".to_string()), "{found:?}");
+    }
 
     #[test]
     fn test_parse_frontmatter() {

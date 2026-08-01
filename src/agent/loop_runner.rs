@@ -129,6 +129,22 @@ impl AgentRunner {
     }
 
     pub async fn with_plugin_registry(self, registry: PluginRegistry) -> Self {
+        // Plugin tools join the agent's tool list here. Registering a tool and
+        // never exposing it is the failure this closes: the plugin API
+        // accepted it, the log said so, and the agent could not call it.
+        {
+            let mut tools = self.tools.write().await;
+            for tool in registry.tools() {
+                if tools.iter().any(|t| t.name() == tool.name()) {
+                    tracing::warn!(
+                        "plugin tool '{}' shadows a built-in of the same name; keeping the built-in",
+                        tool.name()
+                    );
+                    continue;
+                }
+                tools.push(Arc::clone(tool));
+            }
+        }
         *self.plugin_registry.write().await = registry;
         self
     }
