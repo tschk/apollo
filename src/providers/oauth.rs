@@ -304,6 +304,23 @@ fn load_oauth_token_from_path(
         .as_i64()
         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() + 3600 * 1000);
 
+    // A token that has expired and carries nothing to refresh with is dead.
+    // Returning it produces a 401 several layers away from the cause, so say
+    // what is actually wrong here. On macOS this is the common case: Claude
+    // Code keeps its live credentials in the login keychain and leaves this
+    // file behind at whatever it last held. apollo does not read the keychain.
+    if refresh_token.is_none() && expires_at <= chrono::Utc::now().timestamp_millis() {
+        anyhow::bail!(
+            "The Claude OAuth credential in {} has expired and has no refresh token, \
+             so apollo cannot renew it. On macOS, Claude Code keeps its live \
+             credentials in the login keychain rather than this file, and apollo \
+             does not read the keychain. Log in again with `apollo login`, or set an \
+             Anthropic API key with `apollo config set provider.api_key sk-ant-...` \
+             or the ANTHROPIC_API_KEY environment variable.",
+            credentials_path.display()
+        );
+    }
+
     Ok((access_token, refresh_token, expires_at))
 }
 
@@ -461,6 +478,36 @@ mod tests {
         let cache = OAuthTokenCache::new("stale".to_string(), None, 1);
         let err = cache.get_token().await.unwrap_err().to_string();
         assert!(err.contains("No refresh token available"), "got {err}");
+    }
+
+    #[test]
+    fn a_dead_file_credential_says_why_it_is_dead() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"claudeAiOauth":{"accessToken":"tok","expiresAt":1}}"#,
+        )
+        .unwrap();
+
+        let err = load_oauth_token_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("expired"), "got {err}");
+        assert!(err.contains("keychain"), "got {err}");
+        assert!(err.contains("ANTHROPIC_API_KEY"), "got {err}");
+    }
+
+    #[test]
+    fn an_expired_file_credential_with_a_refresh_token_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"claudeAiOauth":{"accessToken":"tok","refreshToken":"r","expiresAt":1}}"#,
+        )
+        .unwrap();
+
+        // The cache refreshes it; refusing here would break a working setup.
+        assert!(load_oauth_token_from_path(&path).is_ok());
     }
 
     #[test]
