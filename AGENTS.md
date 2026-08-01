@@ -49,10 +49,41 @@ Goals:
 >   machine in `loop_runner.rs`
 > - `rx4` — the rotary harness owns model calls and tool cycling
 >
-> Under either engine apollo owns everything around the loop: system prompt,
-> skill injection, conversation history, memory recall, tool set,
+> Under either engine apollo owns the same things around the loop: system
+> prompt, skill injection, conversation history, memory recall, tool set,
 > persistence, and lifecycle hooks. Delegation happens at the single
 > `handle_message` chokepoint, so every channel honors the setting.
+>
+> **The engines are not at parity.** Choosing `rx4` today skips
+> `loop_runner.rs:784-1350` — roughly 566 lines — and you get a materially
+> different agent. Verified against rx4 0.5.0; recheck when the pin moves.
+>
+> Missing under `rx4`, and worth knowing before switching:
+>
+> | Legacy behaviour | Status under `rx4` |
+> |---|---|
+> | Context-budget check + `compact_messages` | **Disabled.** rx4 auto-compacts, but the bridge leaves `Agent::auto_compact_after` at `0`, which turns it off. Nothing compacts. |
+> | Loop detection / duplicate-call guardrails | **Absent.** rx4 0.5.0 exports `ToolGuardrails` but never calls it from `Agent::prompt`. |
+> | Self-healing re-prompt on tool failure | **Absent.** Same: `SelfHealingRetry` is exported, not wired. |
+> | Whole-plan approval (`PendingPlan`, approve/reject by reply) | **Absent.** rx4's `Approver` gates one tool call, not a proposed plan. |
+> | Planning → Executing → Summarizing states | Gone by design. rx4 runs one loop. |
+> | Per-state model selection (`fast_model`) | Gone. rx4 uses one model per turn. |
+> | `classify_request` tool-vs-direct routing | Gone, and unneeded — it only existed to pick a state. |
+> | Steering queue | Not drained. rx4 0.5.0 added `Agent::messages_handle()` and the bridge exposes it, but `loop_runner.rs` does not yet push into it. |
+> | Swarm routing | Not wired. rx4 prefers exposing sub-agents as a tool. |
+>
+> Working identically under both: pre/post tool hooks, plugin pre-tool
+> blocking, `BeforeToolCall`/`AfterToolCall` lifecycle events, and
+> `ToolStart`/`ToolEnd` stream events — all funnel through
+> `rotary_bridge::execute_tool_with_hooks`. Draft progress works because the
+> bridge is handed the turn's stream sink.
+>
+> Trajectory recording stays in apollo under both engines and is fed from
+> `rx4::Event` subscription; it is not a gap.
+>
+> `tests/rx4_engine.rs` drives a real turn under `engine = "rx4"`. Extend it
+> before changing the bridge — the gaps above went unnoticed for as long as
+> they did because nothing exercised the path.
 
 Key extension points:
 - `src/providers/traits.rs` — AI model providers
@@ -134,33 +165,54 @@ embedded storage engine, selected by the `kv-rocksdb` feature on the
   `librocksdb-sys` that SurrealDB already pulls in, so it costs no extra
   compilation and should not be "consolidated away".
 
-Vector search is an in-process brute-force cosine scan. There is deliberately
-**no MTREE index**, and that is now a measured decision rather than an
-assumption — see `bench_search_embeddings_scaling` and
-`bench_mtree_feasibility` in `src/memory/surreal.rs`. Both are `#[ignore]`d;
-run them under `--release` or the numbers are meaningless:
+Vector search is an **exact** brute-force cosine scan over an in-process
+vector cache, not over SurrealDB rows. There is deliberately **no MTREE index
+and no ANN crate**, and both are measured decisions rather than assumptions —
+see `bench_search_embeddings_scaling` and `bench_mtree_feasibility` in
+`src/memory/surreal.rs`. Both are `#[ignore]`d; run them under `--release` or
+the numbers are meaningless:
 
 ```bash
-APOLLO_BENCH_SIZES=100,1000,10000 \
+APOLLO_BENCH_SIZES=100,1000,10000,50000 \
   cargo test --release -p apollo-agent --lib bench_ -- --ignored --nocapture
 ```
 
-Scan latency, dim 1536, release, macOS arm64, 100 queries per size:
+Search latency, dim 1536, release, macOS arm64, 100 queries per size. "Before"
+is the previous design (`array` rows read from SurrealDB on every query);
+"after" is the cache. Both columns were measured on the same host:
 
-| rows | median | p95 | insert/row |
-|------|--------|-----|------------|
-| 100 | 30ms | 34ms | 1.8ms |
-| 1 000 | 278ms | 321ms | 0.9ms |
-| 10 000 | 2 538ms | 5 018ms | 1.2ms |
+| rows | before median | after median | after p95 | insert/row |
+|------|---------------|--------------|-----------|------------|
+| 100 | 30ms | 2.4ms | 3.0ms | 1.1ms |
+| 1 000 | 278ms | 6.2ms | 7.4ms | 0.4ms |
+| 10 000 | 2 538ms | 38.1ms | 43.5ms | 0.35ms |
+| 50 000 | ~13s (extrapolated) | 219ms | 712ms | 0.63ms |
 
-(50 000 was not measured: a 10k corpus already costs ~900MB on disk, so 50k
-needs ~4.5GB free that the benchmark host did not have. The curve is linear —
-~0.27ms per candidate row with no meaningful constant — so 50k extrapolates to
-roughly 13s.)
+Writes did not get more expensive — they got cheaper, because the packed
+encoding is less work to serialise (10k rows: 0.35ms/row versus 3.60ms/row for
+`array`), and on-disk size roughly halved (10k: 83.8MB versus 180.9MB).
 
-So the scan *is* too slow for an interactive agent above a few hundred rows —
-it crosses 50ms at around 200 rows. MTREE is nonetheless the wrong fix, on all
-three axes:
+Two costs are real and were **not** free:
+
+- **Cold start.** The first search in a namespace loads every vector for it:
+  ~1.8s at 10k rows, ~26s at 50k. Steady state is the table above. The load is
+  once per namespace per process.
+- **RAM.** The cache holds `dim * 4` bytes per row — ~60MB at 10k rows and
+  ~300MB at 50k. This is the reason the <10MB RAM goal is dead, not a new
+  regression, but it does scale with corpus size.
+
+Why not an ANN crate. `hnsw_rs`, `instant-distance`, `usearch`, `arroy`,
+`granne` and `annoy-rs` were all evaluated. All are permissively licensed, but:
+`instant-distance` and `granne` are archived/unmaintained and build-once only;
+`annoy-rs` cannot build an index at all, only read Spotify Annoy files;
+`hnsw_rs` has no delete API whatsoever; `usearch` and `arroy` are the only two
+with insert+delete+persistence, and both compile native C/C++ (relevant for the
+musl cross-compile targets). Every one of them fixes dimension per index, so
+mixed dimensions would need one index instance per dimension. None of that is
+worth taking on when an exact scan of a cached corpus already answers in 38ms
+at 10k rows — and an approximate index would trade away exactness for it.
+
+MTREE remains the wrong fix, on all three axes:
 
 - **It cannot coexist with mixed dimensions.** One MTREE index locks the whole
   table to its `DIMENSION`; a subsequent 3-dim insert fails with `Incorrect
@@ -171,12 +223,23 @@ three axes:
 - **It is slower to read.** At 2 000 rows, `vector <|10,COSINE|> $q` measured a
   2 558ms median against 961ms for the scan.
 
-The bottleneck is materializing a 1536-element array as SurrealDB `Value`s for
-every candidate row, not the cosine arithmetic. Pushing the score into the
-engine (`vector::similarity::cosine(...) ORDER BY score LIMIT k`) was measured
-too and is ~1.6x slower, because it walks the same arrays. A real fix has to
-make a row cheaper to read — a compact vector encoding, or an ANN index kept
-outside SurrealDB. Do not re-litigate MTREE without new numbers.
+Correction to an earlier note in this file: materializing the 1536-element
+array as SurrealDB `Value`s was *not* the whole bottleneck. Storing the vector
+as a single packed base64 `string` instead of an `array` — one `Value` per row
+rather than 1536 — only bought 2.2x (1 000 rows: 265ms to 122ms). The rest is
+SurrealDB's own per-row query cost: a `SELECT namespace, key` that projects no
+vector at all still measured ~0.07ms/row, i.e. a ~700ms floor at 10k rows that
+no encoding can get under. That floor is why the vectors are cached in process.
+The packed encoding was kept anyway — it halves disk and makes the cold load
+and the inserts cheaper. Do not re-litigate MTREE without new numbers.
+
+The vector is stored in `vector_b64` as base64 of little-endian `f32`, not as a
+native `bytes` field, because neither reachable `Bytes` type round-trips:
+`surrealdb::Bytes` is a newtype with a derived `Serialize` and stores as an
+array of 6144 integers, and `surrealdb::sql::Bytes`, which does emit a native
+bytes value, is not exported by the 2.3 SDK. Rows written before this encoding
+still carry `vector` as an array and are read back through the same path, so no
+migration is needed.
 
 SurrealDB's native KNN operator is *not* used, despite what earlier notes said.
 The query was written `vector <| $v |>`, which does not parse (K must be a

@@ -2,12 +2,15 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use surrealdb::engine::local::RocksDb;
 use surrealdb::Surreal;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, RwLock};
 
 use super::traits::*;
 
@@ -15,6 +18,21 @@ use super::traits::*;
 pub struct SurrealMemory {
     path: PathBuf,
     cell: Arc<OnceCell<Surreal<surrealdb::engine::local::Db>>>,
+    /// Namespace → cached vectors, the candidate set every similarity search
+    /// scans. Shared across clones, because `SurrealMemory` is cloned freely
+    /// and all clones address the same embedded database.
+    vectors: Arc<RwLock<HashMap<String, Vec<CachedVector>>>>,
+}
+
+/// One namespace entry in the vector cache.
+///
+/// `dim` is stored alongside the vector so a namespace can hold vectors from
+/// several embedding models at once, which is exactly what an MTREE index could
+/// not do. Filtering happens per entry at scan time.
+struct CachedVector {
+    key: String,
+    dim: i64,
+    vector: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,13 +66,50 @@ struct StickerRow {
 struct EmbeddingRow {
     namespace: String,
     key: String,
-    vector: Vec<f32>,
+    /// Packed little-endian `f32` payload, base64-encoded — the canonical
+    /// vector encoding.
+    ///
+    /// One SurrealDB `Value` per row instead of one per component. Reading a
+    /// 1536-element `array` back out costs ~0.27ms per row in `Value`
+    /// materialization alone, which dominated the old scan.
+    ///
+    /// It is a base64 `string` and not a native `bytes` field because neither
+    /// reachable `Bytes` type round-trips: `surrealdb::Bytes` is a newtype with
+    /// a derived `Serialize`, so it stores as an array of 6144 integers — the
+    /// exact cost this encoding exists to avoid — and `surrealdb::sql::Bytes`,
+    /// which does emit a native bytes value, is not exported by the 2.3 SDK.
+    vector_b64: String,
     text: String,
     created_at: String,
     #[serde(default)]
     dim: Option<i64>,
     #[serde(default)]
     model: Option<String>,
+}
+
+/// Row shape used to populate the vector cache for a namespace.
+///
+/// `vector_b64` is the current encoding; `vector` is only present on rows
+/// written before it existed. Selecting both keeps legacy rows scoreable
+/// without a migration pass, and costs nothing for new rows, which do not carry
+/// a `vector` field at all.
+#[derive(Debug, Clone, Deserialize)]
+struct EmbeddingCandidate {
+    key: String,
+    dim: i64,
+    #[serde(default)]
+    vector_b64: Option<String>,
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
+}
+
+/// The fields a search returns that are not worth caching, fetched for the
+/// top-`k` winners only.
+#[derive(Debug, Clone, Deserialize)]
+struct EmbeddingDetail {
+    key: String,
+    text: String,
+    created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,11 +153,84 @@ impl SurrealMemory {
         Ok(Self {
             path,
             cell: Arc::new(OnceCell::new()),
+            vectors: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
     fn memory_id(namespace: &str, key: &str) -> String {
         format!("{namespace}::{key}")
+    }
+
+    /// Populate the vector cache for `namespace` if it is not already loaded.
+    ///
+    /// This is the only full read of the `embeddings` table, and it happens
+    /// once per namespace per process. Two concurrent first searches may both
+    /// run it; they produce the same contents, so the duplicate is wasteful but
+    /// not wrong, and that is cheaper than serialising every search behind a
+    /// write lock.
+    async fn ensure_vectors_loaded(&self, namespace: &str) -> Result<()> {
+        if self.vectors.read().await.contains_key(namespace) {
+            return Ok(());
+        }
+
+        // Rows with no `dim` are skipped by the query, matching the behaviour
+        // of the previous per-search filter: a vector whose dimension was never
+        // recorded is not comparable to anything and must not be ranked.
+        let mut result = self
+            .db()
+            .await?
+            .query(
+                "SELECT key, dim, vector_b64, vector FROM embeddings \
+                 WHERE namespace = $namespace AND dim != NONE",
+            )
+            .bind(("namespace", namespace.to_string()))
+            .await?;
+        let rows: Vec<EmbeddingCandidate> = result.take(0)?;
+
+        let mut raw: Vec<u8> = Vec::new();
+        let mut entries: Vec<CachedVector> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut vector = Vec::new();
+            match (&row.vector_b64, row.vector) {
+                (Some(encoded), _) => unpack_vector_into(encoded, &mut raw, &mut vector),
+                (None, Some(v)) => vector = v,
+                // Neither encoding present: unscoreable, so it never enters the
+                // candidate set.
+                (None, None) => continue,
+            }
+            entries.push(CachedVector {
+                key: row.key,
+                dim: row.dim,
+                vector,
+            });
+        }
+
+        self.vectors
+            .write()
+            .await
+            .insert(namespace.to_string(), entries);
+        Ok(())
+    }
+
+    /// Write-through: keep a loaded namespace in step with a new or replaced
+    /// vector, so a store followed by a search sees the store.
+    ///
+    /// A namespace that is not loaded is left alone — it will read the new row
+    /// from the table when it is first loaded.
+    async fn cache_vector(&self, namespace: &str, key: &str, vector: &[f32]) {
+        let mut cache = self.vectors.write().await;
+        let Some(entries) = cache.get_mut(namespace) else {
+            return;
+        };
+        let entry = CachedVector {
+            key: key.to_string(),
+            dim: vector.len() as i64,
+            vector: vector.to_vec(),
+        };
+        match entries.iter_mut().find(|e| e.key == key) {
+            Some(existing) => *existing = entry,
+            None => entries.push(entry),
+        }
     }
 }
 
@@ -135,7 +263,10 @@ const SCHEMA_SQL: &str = r#"
     DEFINE TABLE IF NOT EXISTS embeddings SCHEMALESS;
     DEFINE FIELD IF NOT EXISTS namespace ON embeddings TYPE string;
     DEFINE FIELD IF NOT EXISTS key ON embeddings TYPE string;
-    DEFINE FIELD IF NOT EXISTS vector ON embeddings TYPE array;
+    -- `vector` is the legacy array encoding. New writes emit `blob` instead, so
+    -- the field is optional and only present on rows written before the change.
+    DEFINE FIELD IF NOT EXISTS vector ON embeddings TYPE option<array>;
+    DEFINE FIELD IF NOT EXISTS vector_b64 ON embeddings TYPE option<string>;
     DEFINE FIELD IF NOT EXISTS text ON embeddings TYPE string;
     DEFINE FIELD IF NOT EXISTS created_at ON embeddings TYPE string;
     DEFINE FIELD IF NOT EXISTS dim ON embeddings TYPE option<int>;
@@ -521,7 +652,7 @@ impl MemoryBackend for SurrealMemory {
             key: key.to_string(),
             dim: Some(vector.len() as i64),
             model: Some(model.to_string()),
-            vector: vector.to_vec(),
+            vector_b64: pack_vector(vector),
             text: text.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
@@ -532,6 +663,7 @@ impl MemoryBackend for SurrealMemory {
             .upsert(("embeddings", &id))
             .content(row)
             .await?;
+        self.cache_vector(namespace, key, vector).await;
         Ok(())
     }
 
@@ -546,8 +678,16 @@ impl MemoryBackend for SurrealMemory {
         }
         let dim = query_vector.len() as i64;
 
-        // Brute-force cosine scan over the namespace's embeddings of the
-        // matching dimension.
+        // Exact brute-force cosine scan, but over an in-process cache rather
+        // than over SurrealDB rows.
+        //
+        // Reading candidates out of SurrealDB is the bottleneck, and it is not
+        // only the vector payload: a `SELECT namespace, key` that projects no
+        // vector at all still costs ~0.07ms per row, so the query layer alone
+        // puts a ~700ms floor under a 10k-row search. No row encoding gets
+        // below that, which is why the vectors are held in memory instead. The
+        // packed encoding still pays for itself — it halves both the cost of
+        // the one-time load and the on-disk size.
         //
         // SurrealDB's KNN operator is not used here. `vector <|K,COSINE|> $v`
         // only produces matches when an MTREE index is defined on the field,
@@ -560,33 +700,74 @@ impl MemoryBackend for SurrealMemory {
         // are not comparable, so they must never enter the candidate set.
         // Rows written before `dim` was recorded have no dimension and are
         // therefore excluded; they are picked up again on their next write.
+        self.ensure_vectors_loaded(namespace).await?;
+
+        // `cosine_similarity` returns None for mismatched lengths rather than
+        // scoring them, so an entry that slipped past the `dim` filter is
+        // dropped instead of ranked.
+        let ranked: Vec<(String, Vec<f32>)> = {
+            let cache = self.vectors.read().await;
+            let Some(entries) = cache.get(namespace) else {
+                return Ok(Vec::new());
+            };
+            let query_magnitude = magnitude(query_vector);
+            let mut scored: Vec<(f32, usize)> = Vec::with_capacity(entries.len());
+            for (idx, entry) in entries.iter().enumerate() {
+                if entry.dim != dim {
+                    continue;
+                }
+                let sim =
+                    cosine_similarity_with_magnitude(query_vector, query_magnitude, &entry.vector);
+                if let Some(sim) = sim {
+                    scored.push((sim, idx));
+                }
+            }
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(limit);
+            scored
+                .into_iter()
+                .map(|(_, idx)| (entries[idx].key.clone(), entries[idx].vector.clone()))
+                .collect()
+        };
+
+        if ranked.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // `text` and `created_at` are deliberately not cached. They are read
+        // back for the handful of winners only, which keeps the cache
+        // proportional to the vectors alone and keeps the returned text from
+        // ever going stale against the table.
+        // Looked up by namespace and key rather than by record id: rows created
+        // outside `store_embedding` do not necessarily follow the `ns::key` id
+        // convention, and dropping them here would silently lose a hit that the
+        // scan had already ranked.
+        let keys: Vec<String> = ranked.iter().map(|(key, _)| key.clone()).collect();
         let mut result = self
             .db()
             .await?
-            .query("SELECT * FROM embeddings WHERE namespace = $namespace AND dim = $dim")
+            .query(
+                "SELECT key, text, created_at FROM embeddings \
+                 WHERE namespace = $namespace AND key IN $keys",
+            )
             .bind(("namespace", namespace.to_string()))
-            .bind(("dim", dim))
+            .bind(("keys", keys))
             .await?;
-        let rows: Vec<EmbeddingRow> = result.take(0)?;
+        let rows: Vec<EmbeddingDetail> = result.take(0)?;
+        let details: std::collections::HashMap<String, EmbeddingDetail> =
+            rows.into_iter().map(|r| (r.key.clone(), r)).collect();
 
-        // `cosine_similarity` returns None for mismatched lengths rather than
-        // scoring them, so a stale row that slipped past the `dim` filter is
-        // dropped instead of ranked.
-        let mut scored: Vec<(f32, EmbeddingRow)> = rows
+        Ok(ranked
             .into_iter()
-            .filter_map(|row| cosine_similarity(query_vector, &row.vector).map(|sim| (sim, row)))
-            .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
-
-        Ok(scored
-            .into_iter()
-            .map(|(_, row)| EmbeddingEntry {
-                namespace: row.namespace,
-                key: row.key,
-                vector: row.vector,
-                text: row.text,
-                created_at: parse_timestamp(&row.created_at),
+            .filter_map(|(key, vector)| {
+                let detail = details.get(&key)?;
+                Some(EmbeddingEntry {
+                    namespace: namespace.to_string(),
+                    key,
+                    vector,
+                    text: detail.text.clone(),
+                    created_at: parse_timestamp(&detail.created_at),
+                })
             })
             .collect())
     }
@@ -668,25 +849,80 @@ impl MemoryBackend for SurrealMemory {
     }
 }
 
+/// Pack an `f32` vector into base64-encoded little-endian bytes.
+///
+/// Endianness is fixed rather than native so a database file stays readable if
+/// it is moved between a little- and a big-endian host.
+fn pack_vector(vector: &[f32]) -> String {
+    let mut bytes = Vec::with_capacity(vector.len() * 4);
+    for x in vector {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    BASE64.encode(&bytes)
+}
+
+/// Decode a packed vector into `out`, replacing its contents.
+///
+/// Undecodable input yields an empty vector, and a trailing partial component
+/// is ignored. Either way the resulting length does not match the query, so
+/// `cosine_similarity` drops the row rather than scoring a truncated vector.
+fn unpack_vector_into(encoded: &str, scratch: &mut Vec<u8>, out: &mut Vec<f32>) {
+    out.clear();
+    scratch.clear();
+    if BASE64.decode_vec(encoded, scratch).is_err() {
+        return;
+    }
+    out.reserve(scratch.len() / 4);
+    for chunk in scratch.chunks_exact(4) {
+        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+}
+
+/// Allocating form of `unpack_vector_into`, for callers with nothing to reuse.
+#[cfg(test)]
+fn unpack_vector(encoded: &str) -> Vec<f32> {
+    let mut scratch = Vec::new();
+    let mut out = Vec::new();
+    unpack_vector_into(encoded, &mut scratch, &mut out);
+    out
+}
+
 /// Cosine similarity, or `None` when the two vectors are not comparable.
 ///
 /// Vectors of different lengths come from different embedding models and have
 /// no meaningful similarity; returning `None` forces callers to drop the pair
 /// rather than treat a fabricated score as a real one.
+///
+/// The scan calls `cosine_similarity_with_magnitude` directly; this wrapper is
+/// the form the tests pin that behaviour against.
+#[cfg(test)]
 fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
+    cosine_similarity_with_magnitude(a, magnitude(a), b)
+}
+
+/// Cosine similarity with the query's magnitude supplied by the caller.
+///
+/// The query is fixed for a whole scan, so its magnitude is a loop invariant
+/// worth about a third of the arithmetic. Hoisting it is bit-identical: it is
+/// the same value computed by the same operations in the same order, just once
+/// instead of once per candidate.
+fn cosine_similarity_with_magnitude(a: &[f32], ma: f32, b: &[f32]) -> Option<f32> {
     if a.len() != b.len() || a.is_empty() {
         return None;
     }
 
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let ma: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let mb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mb: f32 = magnitude(b);
 
     if ma == 0.0 || mb == 0.0 {
         return Some(0.0);
     }
 
     Some(dot / (ma * mb))
+}
+
+fn magnitude(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
 /// Simple hash for file path → record ID
@@ -838,6 +1074,95 @@ mod tests {
         assert!(!results.is_empty());
         // The closest to [1,0,0] should be e1 or e3
         assert!(results[0].key == "e1" || results[0].key == "e3");
+    }
+
+    /// The scan reads a cache, so a write after the cache is warm has to be
+    /// visible to the next search, and a rewrite of an existing key has to
+    /// replace it rather than add a duplicate.
+    #[tokio::test]
+    async fn test_search_embeddings_sees_writes_after_cache_is_warm() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+
+        mem.store_embedding("ns", "a", &[1.0, 0.0, 0.0], "a", "m")
+            .await
+            .unwrap();
+        // Warms the cache for "ns".
+        assert_eq!(
+            mem.search_embeddings("ns", &[1.0, 0.0, 0.0], 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        mem.store_embedding("ns", "b", &[0.0, 1.0, 0.0], "b", "m")
+            .await
+            .unwrap();
+        let results = mem
+            .search_embeddings("ns", &[0.0, 1.0, 0.0], 10)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].key, "b");
+
+        // Rewriting "b" to point the other way must move it, not duplicate it.
+        mem.store_embedding("ns", "b", &[1.0, 0.0, 0.0], "b2", "m")
+            .await
+            .unwrap();
+        let results = mem
+            .search_embeddings("ns", &[0.0, 1.0, 0.0], 10)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].key, "a");
+        assert_eq!(results.iter().filter(|r| r.key == "b").count(), 1);
+        assert_eq!(
+            results.iter().find(|r| r.key == "b").unwrap().text,
+            "b2",
+            "text must come from the table, not a stale cache entry"
+        );
+    }
+
+    #[test]
+    fn test_pack_vector_round_trips() {
+        let v = vec![1.0f32, -0.5, 0.0, 1e-8, f32::MAX, f32::MIN];
+        assert_eq!(unpack_vector(&pack_vector(&v)), v);
+        assert!(unpack_vector(&pack_vector(&[])).is_empty());
+        // Undecodable input must not produce a partial vector that could be
+        // scored against a query of the same length by accident.
+        assert!(unpack_vector("not base64 !!!").is_empty());
+    }
+
+    /// Rows written before the packed encoding existed still carry `vector` as
+    /// an array and no `vector_b64`. They must keep ranking normally rather
+    /// than silently vanishing from every search.
+    #[tokio::test]
+    async fn test_search_embeddings_reads_legacy_array_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let db = mem.db().await.unwrap();
+
+        db.query(
+            "CREATE embeddings:legacy SET namespace = 'ns', key = 'legacy',
+             vector = [1.0, 0.0, 0.0], text = 'legacy row',
+             created_at = '2024-01-01T00:00:00Z', dim = 3",
+        )
+        .await
+        .unwrap();
+        mem.store_embedding("ns", "modern", &[0.0, 1.0, 0.0], "modern row", "m")
+            .await
+            .unwrap();
+
+        // Both encodings compete in the same ranking, and the query is aligned
+        // with the legacy row, so the legacy row must win.
+        let results = mem
+            .search_embeddings("ns", &[1.0, 0.0, 0.0], 10)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].key, "legacy");
+        assert_eq!(results[0].vector, vec![1.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -1024,40 +1349,80 @@ mod tests {
             let (median, p95, max) = percentiles(&mut samples);
 
             println!(
-                "size={size:>6} dim={DIM} search_median={median:>8.2}ms search_p95={p95:>8.2}ms \
-                 search_max={max:>8.2}ms insert_total={:>8.2}s insert_per_row={:>6.2}ms",
+                "packed size={size:>6} dim={DIM} search_median={median:>8.2}ms \
+                 search_p95={p95:>8.2}ms search_max={max:>8.2}ms insert_total={:>8.2}s \
+                 insert_per_row={:>6.2}ms disk={:>7.1}MB",
                 write_elapsed.as_secs_f64(),
                 write_elapsed.as_secs_f64() * 1000.0 / size as f64,
+                dir_size_mb(dir.path()),
             );
+            drop(mem);
+            drop(dir);
 
-            // Same ranking, but scored inside SurrealDB so only the top `k`
-            // rows cross the boundary instead of every candidate vector.
+            // The same corpus in the previous `array` encoding, on the same
+            // machine in the same run, so the comparison is not against numbers
+            // recorded on another day.
+            //
+            // Both arms search the same in-memory cache, so their `median` is
+            // expected to match — the encoding no longer affects a warm search.
+            // What this arm measures is what the encoding still does affect:
+            // insert cost, on-disk size, and the cold first query, which loads
+            // the cache and shows up in `search_max`.
+            let dir = tempfile::tempdir().unwrap();
+            let mem = SurrealMemory::new(dir.path()).await.unwrap();
             let db = mem.db().await.unwrap();
+            let mut rng = Xorshift(0x2545_F491_4F6C_DD1D);
+
+            let write_start = std::time::Instant::now();
+            for i in 0..size {
+                let v = rng.unit_vector(DIM);
+                db.query(
+                    "CREATE type::thing('embeddings', $id) SET namespace = 'bench', \
+                     key = $id, vector = $v, text = 'text', \
+                     created_at = '2024-01-01T00:00:00Z', dim = $dim, model = 'bench-model'",
+                )
+                .bind(("id", format!("k{i}")))
+                .bind(("v", v))
+                .bind(("dim", DIM as i64))
+                .await
+                .unwrap();
+            }
+            let write_elapsed = write_start.elapsed();
+
             let mut samples: Vec<u128> = Vec::with_capacity(QUERIES);
             for q in &queries {
                 let start = std::time::Instant::now();
-                let mut result = db
-                    .query(
-                        "SELECT namespace, key, text, created_at, \
-                         vector::similarity::cosine(vector, $q) AS score \
-                         FROM embeddings WHERE namespace = $namespace AND dim = $dim \
-                         ORDER BY score DESC LIMIT 10",
-                    )
-                    .bind(("namespace", "bench".to_string()))
-                    .bind(("dim", DIM as i64))
-                    .bind(("q", q.clone()))
-                    .await
-                    .unwrap();
-                let rows: Vec<serde_json::Value> = result.take(0).unwrap();
+                let hits = mem.search_embeddings("bench", q, 10).await.unwrap();
                 samples.push(start.elapsed().as_micros());
-                assert_eq!(rows.len(), 10.min(size));
+                assert_eq!(hits.len(), 10.min(size));
             }
             let (median, p95, max) = percentiles(&mut samples);
             println!(
-                "size={size:>6} dim={DIM}  indb_median={median:>8.2}ms  indb_p95={p95:>8.2}ms  \
-                 indb_max={max:>8.2}ms"
+                "array  size={size:>6} dim={DIM} search_median={median:>8.2}ms \
+                 search_p95={p95:>8.2}ms search_max={max:>8.2}ms insert_total={:>8.2}s \
+                 insert_per_row={:>6.2}ms disk={:>7.1}MB",
+                write_elapsed.as_secs_f64(),
+                write_elapsed.as_secs_f64() * 1000.0 / size as f64,
+                dir_size_mb(dir.path()),
             );
         }
+    }
+
+    fn dir_size_mb(path: &Path) -> f64 {
+        fn walk(path: &Path) -> u64 {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return 0;
+            };
+            entries
+                .flatten()
+                .map(|e| match e.metadata() {
+                    Ok(m) if m.is_dir() => walk(&e.path()),
+                    Ok(m) => m.len(),
+                    Err(_) => 0,
+                })
+                .sum()
+        }
+        walk(path) as f64 / (1024.0 * 1024.0)
     }
 
     /// Feasibility spike for a per-dimension MTREE index: does SurrealDB
