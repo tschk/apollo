@@ -89,7 +89,24 @@ computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 # providers, sessions, skills, memory, guardrails, and MCP support.
 # Used during the migration from apollo's built-in agent loop to rx4's
 # harness.
-rx4 = { version = "0.4.8", default-features = false, features = ["ipc", "builtin-tools", "providers", "mcp", "skills", "graph-memory", "zkr-memory"] }
+#
+# Every feature here is load-bearing; read this before trimming.
+#   ipc       — despite the name, this gates mid-turn *cancellation* in rx4's
+#               agent loop, not just the ACP/LSP transports. Removing it
+#               silently drops the ability to cancel a running turn.
+#   providers — gates `provider::StreamResult` and `Provider::stream`
+#               themselves, so the bridge's `impl rx4::Provider for
+#               RotaryProviderAdapter` will not compile without it. It is
+#               needed even though apollo supplies its own model backends.
+#   skills    — rx4's `SkillEngine`, used by `RotaryAgentBridge::
+#               enable_skill_engine`.
+#   graph-memory — rx4's `GraphMemory`, used by `RotaryAgentBridge::
+#               enable_graph_memory`.
+#
+# Deliberately off: `builtin-tools` (apollo registers its own tools; also
+# pulls in the fff/git2/notify stack), `mcp` (apollo has src/mcp_server.rs),
+# `zkr-memory` (gates rx4's self_improve; apollo depends on zkr directly).
+rx4 = { version = "0.5.0", default-features = false, features = ["ipc", "providers", "skills", "graph-memory"] }
 
 # Async runtime (optimized features only)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }
