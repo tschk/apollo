@@ -1,0 +1,284 @@
+//! End-to-end cover for the rx4 engine.
+//!
+//! `agent.engine = "rx4"` hands the loop to the rotary harness. Everything
+//! apollo owns around that loop — the assembled context going in, the tool set,
+//! the permission hooks, the reply coming back out and being persisted — is
+//! only exercised by driving a real turn. Before this test the rx4 path had no
+//! coverage at all, which is how it silently shipped without permission hooks,
+//! lifecycle events or stream events.
+//!
+//! Deliberately a real `AgentRunner` over a real `SurrealMemory`, with only the
+//! provider and channel stubbed, so the assertions fail if the engine branch,
+//! the bridge, the tool registration or the reply plumbing regress.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use apollo::agent::hooks::PermissionHook;
+use apollo::agent::mode::NullChannel;
+use apollo::agent::AgentRunner;
+use apollo::channels::IncomingMessage;
+use apollo::memory::surreal::SurrealMemory;
+use apollo::providers::traits::{
+    ChatRequest, ChatResponse, Provider, ProviderCapabilities, ToolCall,
+};
+use apollo::tools::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
+
+const FINAL_REPLY: &str = "the file says hello";
+
+/// A provider that calls `probe` once, then answers with text.
+///
+/// It also records the system prompt and tool specs it was handed, so the test
+/// can assert apollo's context assembly still reaches the model under rx4.
+struct ToolThenTextProvider {
+    calls: AtomicUsize,
+    seen_system: Mutex<Vec<String>>,
+    seen_tools: Mutex<Vec<Vec<String>>>,
+}
+
+impl ToolThenTextProvider {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            seen_system: Mutex::new(Vec::new()),
+            seen_tools: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ToolThenTextProvider {
+    fn name(&self) -> &str {
+        "tool-then-text"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            native_tools: true,
+            streaming: false,
+            vision: false,
+            max_context: 32_000,
+            native_web_search: false,
+        }
+    }
+
+    async fn chat(&self, request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
+        self.seen_system.lock().unwrap().extend(
+            request
+                .messages
+                .iter()
+                .filter(|m| m.role == "system")
+                .map(|m| m.content.clone()),
+        );
+        self.seen_tools.lock().unwrap().push(
+            request
+                .tools
+                .unwrap_or(&[])
+                .iter()
+                .map(|t| t.name.clone())
+                .collect(),
+        );
+
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            Ok(ChatResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "probe".to_string(),
+                    arguments: r#"{"path":"hello.txt"}"#.to_string(),
+                }],
+                usage: None,
+            })
+        } else {
+            Ok(ChatResponse {
+                text: Some(FINAL_REPLY.to_string()),
+                tool_calls: vec![],
+                usage: None,
+            })
+        }
+    }
+}
+
+/// Records that it ran, so a blocked call is distinguishable from an allowed
+/// one that happened to return an error.
+struct ProbeTool {
+    runs: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for ProbeTool {
+    fn name(&self) -> &str {
+        "probe"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "probe".to_string(),
+            description: "read a path".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+            }),
+        }
+    }
+
+    async fn execute(&self, _arguments: &str) -> anyhow::Result<ToolResult> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolResult::success("hello"))
+    }
+}
+
+/// Owns the tempdir for the lifetime of the runner.
+///
+/// `tests/reply_delivery.rs` leaks its tempdir with `std::mem::forget` to keep
+/// the SurrealDB files alive; holding the handle in a struct achieves the same
+/// without leaking, so the RocksDB directory is removed when the test ends.
+struct Harness {
+    runner: AgentRunner,
+    provider: Arc<ToolThenTextProvider>,
+    tool_runs: Arc<AtomicUsize>,
+    _dir: tempfile::TempDir,
+}
+
+async fn harness() -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let memory = SurrealMemory::new(dir.path()).await.unwrap();
+    let provider = Arc::new(ToolThenTextProvider::new());
+    let tool_runs = Arc::new(AtomicUsize::new(0));
+    let tool: Arc<dyn Tool> = Arc::new(ProbeTool {
+        runs: Arc::clone(&tool_runs),
+    });
+
+    let runner = AgentRunner::new(
+        Arc::clone(&provider) as Arc<dyn Provider>,
+        vec![tool],
+        Arc::new(memory),
+        "you are a test agent",
+        "test-model",
+    )
+    .with_config(apollo::config::AgentConfig {
+        engine: "rx4".to_string(),
+        ..Default::default()
+    })
+    .with_workspace(dir.path().to_path_buf());
+
+    Harness {
+        runner,
+        provider,
+        tool_runs,
+        _dir: dir,
+    }
+}
+
+fn message(chat_id: &str, text: &str) -> IncomingMessage {
+    IncomingMessage {
+        id: "m1".to_string(),
+        sender_id: "test".to_string(),
+        sender_name: None,
+        chat_id: chat_id.to_string(),
+        text: text.to_string(),
+        is_group: false,
+        reply_to: None,
+        timestamp: chrono::Utc::now(),
+    }
+}
+
+/// The engine selector must actually route to rx4, rx4 must cycle a tool, and
+/// the final text must come back out through apollo's `finish_execution`.
+#[tokio::test]
+async fn rx4_engine_runs_a_tool_and_returns_the_reply() {
+    let h = harness().await;
+
+    let response = h
+        .runner
+        .handle_message(
+            &message("rx4-turn", "read hello.txt"),
+            &NullChannel::new("test"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response, FINAL_REPLY, "rx4 turn did not return the reply");
+    assert_eq!(
+        h.tool_runs.load(Ordering::SeqCst),
+        1,
+        "rx4 did not execute the registered apollo tool"
+    );
+    assert!(
+        h.provider.calls.load(Ordering::SeqCst) >= 2,
+        "rx4 did not cycle back to the model after the tool"
+    );
+
+    // apollo still owns context assembly: the system prompt and the tool set
+    // must survive the hand-off to the harness.
+    let system = h.provider.seen_system.lock().unwrap().join("\n");
+    assert!(
+        system.contains("you are a test agent"),
+        "system prompt lost crossing the bridge: {system:?}"
+    );
+    let tools = h.provider.seen_tools.lock().unwrap().clone();
+    assert!(
+        tools.iter().all(|t| t.iter().any(|n| n == "probe")),
+        "tool specs lost crossing the bridge: {tools:?}"
+    );
+}
+
+/// A denied tool must not execute under rx4. This is the assertion that was
+/// missing when the rx4 path ran without permission hooks: the turn still
+/// completes, but the tool body never runs.
+#[tokio::test]
+async fn rx4_engine_enforces_permission_hooks() {
+    let h = harness().await;
+    h.runner.add_hook(Arc::new(PermissionHook::new(
+        vec!["probe".to_string()],
+        vec![],
+    )));
+
+    let response = h
+        .runner
+        .handle_message(
+            &message("rx4-denied", "read hello.txt"),
+            &NullChannel::new("test"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        h.tool_runs.load(Ordering::SeqCst),
+        0,
+        "a denied tool executed under rx4"
+    );
+    assert_eq!(
+        response, FINAL_REPLY,
+        "the turn must still finish after a blocked tool"
+    );
+}
+
+/// The rx4 turn must persist through apollo's memory backend, not rx4's own
+/// session store — history is what apollo feeds back in on the next turn.
+#[tokio::test]
+async fn rx4_engine_persists_the_turn() {
+    let h = harness().await;
+    h.runner
+        .handle_message(
+            &message("rx4-persist", "read hello.txt"),
+            &NullChannel::new("test"),
+        )
+        .await
+        .unwrap();
+
+    let history = h
+        .runner
+        .memory()
+        .get_conversation_history("rx4-persist", 20)
+        .await
+        .unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|(_, content)| content.contains(FINAL_REPLY)),
+        "rx4 reply not persisted: {history:?}"
+    );
+}

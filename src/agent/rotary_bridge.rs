@@ -205,25 +205,6 @@ pub fn rx4_message_to_chat(msg: &Message) -> ChatMessage {
     }
 }
 
-/// Convert a slice of apollo `ChatMessage`s to rx4 `Message`s.
-pub fn chat_messages_to_rx4(messages: &[ChatMessage]) -> Vec<Message> {
-    messages.iter().map(chat_message_to_rx4).collect()
-}
-
-/// Convert apollo `ToolSpec`s to rx4 tool definitions (JSON array).
-pub fn tool_specs_to_rx4_json(specs: &[ToolSpec]) -> Vec<serde_json::Value> {
-    specs
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "name": s.name,
-                "description": s.description,
-                "parameters": s.parameters,
-            })
-        })
-        .collect()
-}
-
 // ── Provider adapter ─────────────────────────────────────────────────────
 
 /// Adapter that wraps an apollo `Provider` and implements rx4's `Provider`
@@ -457,14 +438,26 @@ impl RotaryAgentBridge {
         agent.set_workspace_root(&config.workspace);
         agent.max_tool_iterations = config.max_tool_iterations;
 
+        // apollo, not rx4, is the authorization authority here.
+        //
+        // `rx4::Policy` defaults to `workspace_write()`, which asks for
+        // approval before running a tool it does not recognise. With no
+        // approver attached that resolves to a denial, so leaving the default
+        // in place means *no apollo tool can ever run under this engine* — the
+        // turn completes with every call reporting "approval required".
+        //
+        // Authorization instead happens one layer in, inside the closure
+        // `register_apollo_tools` installs: `execute_tool_with_hooks` runs
+        // apollo's `PermissionHook` and the plugin pre-tool hooks, which are
+        // driven by apollo's own permission profile and mode. Handing rx4
+        // `full_access` makes it defer to that single gate rather than
+        // second-guessing it with a policy apollo never configured.
+        agent.set_policy(rx4::Policy::full_access());
+
         // Register apollo's tools into rx4's tool registry
         let mut tool_registry = rx4::ToolRegistry::new();
         register_apollo_tools(&mut tool_registry, &config.tools, &config.hook_ctx);
         agent.tools = Arc::new(tool_registry);
-
-        // Use rx4's guardrails for loop detection (replaces apollo's
-        // ToolGuardrails in the main loop path)
-        // rx4's Agent already has built-in tool caching and effect classification
 
         Self {
             agent,
@@ -599,6 +592,43 @@ impl RotaryAgentBridge {
     pub fn compact(&mut self, reason: &str) {
         self.agent.compact(reason);
     }
+
+    /// Give rx4 a shared handle on the message buffer.
+    ///
+    /// rx4 0.5.0 keeps `Agent::messages` behind an `Arc`, so a host can append
+    /// to the conversation while `prompt()` is still running and the next tool
+    /// iteration will see it. This is what apollo's steering queue needs: a
+    /// message that arrives mid-turn is pushed here rather than queued until
+    /// the turn ends.
+    pub fn messages_handle(&self) -> Arc<parking_lot::RwLock<Vec<Message>>> {
+        self.agent.messages_handle()
+    }
+
+    /// Load rx4's `SkillEngine` over apollo's skill directories and hand it to
+    /// the agent, which runs its background skill reviewer after each prompt.
+    ///
+    /// This is additive to apollo's own `skills` module: rx4's engine does not
+    /// perform apollo's template-variable substitution or inline shell
+    /// expansion, so it supplements rather than replaces `skills::match_skill`.
+    pub fn enable_skill_engine(&mut self, workspace: &std::path::Path) {
+        let mut engine = build_rx4_skill_engine(workspace);
+        if let Err(error) = engine.load() {
+            tracing::warn!("rx4 skill engine load failed, leaving it unset: {error}");
+            return;
+        }
+        self.agent.set_skill_engine(engine);
+    }
+
+    /// Attach an rx4 `GraphMemory` rooted at the workspace.
+    ///
+    /// rx4 extracts concepts, decisions and patterns from the conversation
+    /// after each prompt and adds them to the graph. `auto_dream` additionally
+    /// runs one consolidation pass per prompt.
+    pub fn enable_graph_memory(&mut self, workspace: &std::path::Path, auto_dream: bool) {
+        self.agent
+            .set_graph_memory(rx4::GraphMemory::from_workspace(workspace));
+        self.agent.enable_auto_dream(auto_dream);
+    }
 }
 
 // ── Skill bridge ─────────────────────────────────────────────────────────
@@ -640,177 +670,6 @@ pub fn build_rx4_skill_engine(workspace: &std::path::Path) -> rx4::SkillEngine {
     engine
 }
 
-/// Match a skill using rx4's SkillEngine keyword search.
-///
-/// This replaces apollo's `skills::match_skill()` when using the rx4
-/// bridge path. Returns the best-matching skill's name and instructions
-/// (raw, unpreprocessed).
-///
-/// The caller should preprocess the instructions using
-/// `apollo::skills::preprocess_skill_content()` before injecting
-/// into the system prompt, as rx4's SkillEngine does not perform template
-/// variable substitution or inline shell expansion.
-pub fn match_skill_via_rx4(
-    engine: &rx4::SkillEngine,
-    user_message: &str,
-) -> Option<(String, String)> {
-    let results = engine.search(user_message);
-    if results.is_empty() {
-        return None;
-    }
-
-    // Pick the first result (rx4's search returns matches sorted by relevance)
-    let skill = results[0];
-    Some((skill.name.clone(), skill.instructions.clone()))
-}
-
-/// Discover skills using rx4's SkillEngine, returning apollo-compatible
-/// Skill structs for backward compatibility with existing code that expects
-/// the `Vec<skills::Skill>` type.
-///
-/// This loads skills from disk via rx4's SkillEngine (which handles both
-/// JSON and SKILL.md formats with YAML frontmatter), then converts them to
-/// apollo's Skill type.
-pub fn discover_skills_via_rx4(workspace: &std::path::Path) -> Vec<crate::skills::Skill> {
-    let mut engine = build_rx4_skill_engine(workspace);
-    if engine.load().is_err() {
-        tracing::warn!("rx4 SkillEngine load failed, returning empty skill list");
-        return Vec::new();
-    }
-
-    engine
-        .list()
-        .into_iter()
-        .map(|rx4_skill| {
-            let location = engine.skills_dir().join(format!("{}.json", rx4_skill.id));
-            crate::skills::Skill {
-                name: rx4_skill.name.clone(),
-                description: rx4_skill.description.clone(),
-                location,
-            }
-        })
-        .collect()
-}
-
-// ── Memory bridge ────────────────────────────────────────────────────────
-
-/// Bridge that wraps rx4's GraphMemory for agent memory (concepts, decisions,
-/// patterns, bugs) while keeping apollo's SurrealDB for channel state,
-/// swarm coordination, and cron scheduling.
-///
-/// rx4's GraphMemory is an in-memory knowledge graph with PageRank, community
-/// detection, and JSON persistence. It does not require SQLite (unlike rx4's
-/// MemoryStore which uses rusqlite 0.37).
-///
-/// This bridge provides:
-/// - Graph-based agent memory via rx4::GraphMemory (concepts, decisions, patterns)
-/// - Conversation extraction via rx4::ConversationExtractor
-/// - JSON persistence for the graph
-///
-/// TODO: Enable rx4's `memory` feature to also get SQLite FTS5 full-text search
-/// via rx4::MemoryStore. For now, apollo's SurrealDB backend remains
-/// the primary persistent memory for conversation history and key-value store.
-pub struct RotaryMemoryBridge {
-    graph: rx4::GraphMemory,
-    extractor: rx4::ConversationExtractor,
-    /// Path for JSON persistence of the graph
-    graph_path: Option<std::path::PathBuf>,
-}
-
-impl RotaryMemoryBridge {
-    /// Create a new memory bridge rooted at the given workspace.
-    pub fn new(workspace: &std::path::Path) -> Self {
-        let graph = rx4::GraphMemory::from_workspace(workspace);
-        let graph_path = workspace.join(".apollo/graph_memory.json");
-        Self {
-            graph,
-            extractor: rx4::ConversationExtractor::new(),
-            graph_path: Some(graph_path),
-        }
-    }
-
-    /// Create a new memory bridge with an empty graph (no workspace).
-    pub fn empty() -> Self {
-        Self {
-            graph: rx4::GraphMemory::new(),
-            extractor: rx4::ConversationExtractor::new(),
-            graph_path: None,
-        }
-    }
-
-    /// Extract memory nodes and edges from a conversation and add them to
-    /// the graph.
-    ///
-    /// This uses rx4's ConversationExtractor to identify concepts, decisions,
-    /// and patterns from the conversation, then adds them as nodes in the
-    /// GraphMemory.
-    pub fn extract_conversation(
-        &mut self,
-        conversation: &[rx4::graph_memory::ConversationTurn],
-    ) -> rx4::ExtractionResult {
-        let result = self.extractor.extract(conversation);
-
-        // Add extracted nodes to the graph
-        for node in &result.nodes {
-            self.graph.add_node(node.clone());
-        }
-        for edge in &result.edges {
-            let _ = self.graph.add_edge(edge.clone());
-        }
-
-        result
-    }
-
-    /// Search the graph memory for nodes matching the query.
-    pub fn search(&self, query: &str) -> Vec<&rx4::GraphMemoryNode> {
-        self.graph.search(query)
-    }
-
-    /// Get PageRank scores for all nodes (identifies the most important
-    /// concepts/decisions in the agent's memory).
-    pub fn pagerank(&self) -> Vec<(String, f64)> {
-        self.graph.pagerank()
-    }
-
-    /// Get graph statistics (node count, edge count, etc.)
-    pub fn stats(&self) -> rx4::graph_memory::GraphStats {
-        self.graph.stats()
-    }
-
-    /// Save the graph to disk (JSON format).
-    pub fn save(&self) -> Result<(), rx4::GraphMemoryError> {
-        if let Some(path) = &self.graph_path {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            self.graph.save(path)?;
-            tracing::debug!("graph memory saved to {:?}", self.graph_path);
-        }
-        Ok(())
-    }
-
-    /// Load the graph from disk (JSON format).
-    pub fn load(&mut self) -> Result<(), rx4::GraphMemoryError> {
-        if let Some(path) = &self.graph_path {
-            if path.exists() {
-                self.graph = rx4::GraphMemory::load(path)?;
-                tracing::debug!("graph memory loaded from {:?}", self.graph_path);
-            }
-        }
-        Ok(())
-    }
-
-    /// Get a reference to the inner GraphMemory.
-    pub fn graph(&self) -> &rx4::GraphMemory {
-        &self.graph
-    }
-
-    /// Get a mutable reference to the inner GraphMemory.
-    pub fn graph_mut(&mut self) -> &mut rx4::GraphMemory {
-        &mut self.graph
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,18 +708,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_specs_to_rx4_json() {
-        let specs = vec![ToolSpec {
-            name: "shell".to_string(),
-            description: "Run shell commands".to_string(),
-            parameters: serde_json::json!({"type": "object"}),
-        }];
-        let json = tool_specs_to_rx4_json(&specs);
-        assert_eq!(json.len(), 1);
-        assert_eq!(json[0]["name"], "shell");
-    }
-
-    #[test]
     fn test_roundtrip_translation() {
         let original = ChatMessage::user("roundtrip test");
         let rx4_msg = chat_message_to_rx4(&original);
@@ -878,16 +725,6 @@ mod tests {
             engine.skills_dir().exists()
                 || engine.skills_dir() == tmp.path().join(".apollo/skills")
         );
-    }
-
-    #[test]
-    fn test_match_skill_via_rx4_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut engine = build_rx4_skill_engine(tmp.path());
-        let _ = engine.load();
-        // No skills in empty dir, should return None
-        let result = match_skill_via_rx4(&engine, "test query");
-        assert!(result.is_none());
     }
 
     struct RecordingTool {
@@ -1117,29 +954,5 @@ mod tests {
             seen.lock().unwrap().clone(),
             vec!["before:exec", "after:exec"]
         );
-    }
-
-    #[test]
-    fn test_rotary_memory_bridge_empty() {
-        let bridge = RotaryMemoryBridge::empty();
-        let stats = bridge.stats();
-        assert_eq!(stats.node_count, 0);
-    }
-
-    #[test]
-    fn test_rotary_memory_bridge_search_empty() {
-        let bridge = RotaryMemoryBridge::empty();
-        let results = bridge.search("test");
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_rotary_memory_bridge_save_load() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut bridge = RotaryMemoryBridge::new(tmp.path());
-        // Save and load should work even with empty graph
-        bridge.save().unwrap();
-        bridge.load().unwrap();
-        assert_eq!(bridge.stats().node_count, 0);
     }
 }
