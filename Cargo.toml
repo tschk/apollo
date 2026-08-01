@@ -183,6 +183,3 @@ lto = true          # Link-time optimization
 codegen-units = 1   # Single codegen unit
 strip = true        # Strip symbols
 panic = "abort"     # No unwind tables
-
-[patch.crates-io]
-rs_ai_oauth = { path = "../rs_ai/crates/rs_ai_oauth" }

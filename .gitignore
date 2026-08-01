@@ -12,3 +12,12 @@ ui/target/
 # Keep shared macOS bindgen config; ignore other local cargo state
 .cargo/*
 !.cargo/config.toml
+
+# Personal memory files
+HEARTBEAT.md
+IDENTITY.md
+MEMORY.md
+NOW.md
+SOUL.md
+USER.md
+memory/

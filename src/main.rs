@@ -30,7 +30,12 @@ use apollo::telegram_runtime::{run_telegram_chat, TelegramChatRun};
 mod setup;
 
 #[derive(Parser)]
-#[command(name = "apollo", about = "Local-first AI agent runtime", version)]
+#[command(
+    name = "apollo",
+    about = "Local-first AI agent runtime",
+    version,
+    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\n{all-args}{after-help}"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
