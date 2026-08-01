@@ -41,6 +41,7 @@ impl TelegramIngressFilter {
 #[derive(Clone)]
 pub struct TelegramChannel {
     bot_token: String,
+    api_base: String,
     chat_id: i64,
     client: reqwest::Client,
     memory: Option<Arc<dyn MemoryBackend>>,
@@ -124,11 +125,18 @@ impl TelegramChannel {
     pub fn new(bot_token: String, chat_id: i64) -> Self {
         Self {
             bot_token,
+            api_base: "https://api.telegram.org".to_string(),
             chat_id,
             client: crate::http::shared(),
             memory: None,
             ingress: TelegramIngressFilter::default(),
         }
+    }
+
+    /// Point the Telegram API at another origin (conformance tests).
+    pub fn with_api_base(mut self, base: impl Into<String>) -> Self {
+        self.api_base = base.into().trim_end_matches('/').to_string();
+        self
     }
 
     pub fn with_memory(mut self, memory: Arc<dyn MemoryBackend>) -> Self {
@@ -142,15 +150,15 @@ impl TelegramChannel {
     }
 
     fn api_url(&self, method: &str) -> String {
-        format!("https://api.telegram.org/bot{}/{}", self.bot_token, method)
+        format!("{}/bot{}/{}", self.api_base, self.bot_token, method)
     }
 
     /// Transcribe voice/audio file using faster-whisper
     async fn transcribe_voice(&self, file_id: &str) -> anyhow::Result<String> {
         // 1. Get file info from Telegram API
         let file_info_url = format!(
-            "https://api.telegram.org/bot{}/getFile?file_id={}",
-            self.bot_token, file_id
+            "{}/bot{}/getFile?file_id={}",
+            self.api_base, self.bot_token, file_id
         );
 
         let resp = self.client.get(&file_info_url).send().await?;
@@ -170,10 +178,7 @@ impl TelegramChannel {
             .ok_or_else(|| anyhow::anyhow!("No file_path in response"))?;
 
         // 2. Download the file
-        let download_url = format!(
-            "https://api.telegram.org/file/bot{}/{}",
-            self.bot_token, file_path
-        );
+        let download_url = format!("{}/file/bot{}/{}", self.api_base, self.bot_token, file_path);
 
         let file_resp = self.client.get(&download_url).send().await?;
         if !file_resp.status().is_success() {
@@ -413,6 +418,7 @@ impl Channel for TelegramChannel {
     async fn start(&mut self) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
         let (tx, rx) = mpsc::channel(100);
         let bot_token = self.bot_token.clone();
+        let api_base = self.api_base.clone();
         let chat_id = self.chat_id;
         let client = self.client.clone();
         let memory = self.memory.clone();
@@ -421,6 +427,7 @@ impl Channel for TelegramChannel {
         tokio::spawn(async move {
             let ch = TelegramChannel {
                 bot_token,
+                api_base,
                 chat_id,
                 client,
                 memory,

@@ -153,6 +153,9 @@ rs_ai_providers = { version = "0.2", optional = true, features = ["claude", "cha
 rs_ai_oauth = { version = "0.2.25", optional = true, default-features = false }
 
 [dev-dependencies]
+axum = "0.8"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde_json = "1"
 tempfile = "3"
 temp-env = "0.3"
 tokio-test = "0.4"

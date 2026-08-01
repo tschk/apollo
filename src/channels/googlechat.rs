@@ -9,6 +9,8 @@ use super::traits::*;
 pub struct GoogleChatChannel {
     service_account_key: String,
     space_id: Option<String>,
+    api_base: String,
+    bind_addr: std::net::SocketAddr,
 }
 
 impl GoogleChatChannel {
@@ -16,7 +18,21 @@ impl GoogleChatChannel {
         Self {
             service_account_key: service_account_key.into(),
             space_id: None,
+            api_base: "https://chat.googleapis.com/v1".to_string(),
+            bind_addr: ([0, 0, 0, 0], 3001).into(),
         }
+    }
+
+    /// Point the Chat API at another origin (conformance tests).
+    pub fn with_api_base(mut self, base: impl Into<String>) -> Self {
+        self.api_base = base.into().trim_end_matches('/').to_string();
+        self
+    }
+
+    /// Bind the webhook receiver somewhere other than 0.0.0.0:3001.
+    pub fn with_bind_addr(mut self, addr: std::net::SocketAddr) -> Self {
+        self.bind_addr = addr;
+        self
     }
 
     pub fn with_space(mut self, space_id: impl Into<String>) -> Self {
@@ -55,6 +71,7 @@ impl Channel for GoogleChatChannel {
         let (tx, rx) = mpsc::channel(32);
         // Google Chat uses webhooks/pub-sub — webhook receiver needed
         let _key = self.service_account_key.clone();
+        let bind_addr = self.bind_addr;
 
         tokio::spawn(async move {
             use axum::{routing::post, Json, Router};
@@ -72,7 +89,7 @@ impl Channel for GoogleChatChannel {
                 }),
             );
 
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
+            let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -87,10 +104,7 @@ impl Channel for GoogleChatChannel {
         });
 
         client
-            .post(format!(
-                "https://chat.googleapis.com/v1/{}/messages",
-                message.chat_id
-            ))
+            .post(format!("{}/{}/messages", self.api_base, message.chat_id))
             .header(
                 "Authorization",
                 format!("Bearer {}", self.service_account_key),

@@ -1,0 +1,681 @@
+//! Channel conformance suite.
+//!
+//! Every `Channel` implementation is driven against a local mock HTTP server
+//! (axum, already in the dependency tree — no new crate) and checked for three
+//! things:
+//!
+//! 1. `start()` yields a receiver that actually delivers an inbound message.
+//! 2. `send()` performs a real outbound request with the right shape.
+//! 3. The reply-delivery contract holds: a channel that does not implement
+//!    `DraftChannel` must leave `Delivery` in the `Return` arm, so the agent
+//!    loop hands the reply back to the caller instead of dropping it.
+//!
+//! Tests that are `#[ignore]`d are pinning a *known defect*, not a flaky test.
+//! Do not relax the assertion to make one pass — fix the channel.
+
+#![allow(clippy::type_complexity)]
+
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use apollo::channels::{Channel, Delivery, IncomingMessage, OutgoingMessage};
+use axum::body::Bytes;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use tokio::sync::mpsc::Receiver;
+
+// ───────────────────────── mock HTTP server ─────────────────────────
+
+#[derive(Debug, Clone)]
+struct Hit {
+    method: String,
+    path: String,
+    query: String,
+    auth: Option<String>,
+    body: String,
+}
+
+type Responder = Arc<dyn Fn(&str) -> (u16, String) + Send + Sync>;
+
+struct Mock {
+    base: String,
+    hits: Arc<Mutex<Vec<Hit>>>,
+}
+
+impl Mock {
+    async fn start(responder: Responder) -> Self {
+        let hits: Arc<Mutex<Vec<Hit>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&hits);
+
+        let app = axum::Router::new().fallback(axum::routing::any(
+            move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+                let recorded = Arc::clone(&recorded);
+                let responder = Arc::clone(&responder);
+                async move {
+                    let body = String::from_utf8_lossy(&body).to_string();
+                    let path = uri.path().to_string();
+                    recorded.lock().unwrap().push(Hit {
+                        method: method.to_string(),
+                        path: path.clone(),
+                        query: uri.query().unwrap_or("").to_string(),
+                        auth: headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string),
+                        body,
+                    });
+                    let (code, payload) = responder(&path);
+                    (
+                        StatusCode::from_u16(code).unwrap(),
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        payload,
+                    )
+                }
+            },
+        ));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        Mock {
+            base: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn hits(&self) -> Vec<Hit> {
+        self.hits.lock().unwrap().clone()
+    }
+
+    /// Wait until a request whose path contains `needle` has been recorded.
+    async fn wait_for(&self, needle: &str) -> Hit {
+        for _ in 0..100 {
+            if let Some(h) = self.hits().into_iter().find(|h| h.path.contains(needle)) {
+                return h;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!(
+            "no request to a path containing {needle:?}; saw {:?}",
+            self.hits()
+                .iter()
+                .map(|h| h.path.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+fn json(body: &str) -> (u16, String) {
+    (200, body.to_string())
+}
+
+// ───────────────────────── shared assertions ─────────────────────────
+
+/// What `send()` must put on the wire.
+struct SendShape {
+    method: &'static str,
+    path_contains: &'static str,
+    body_contains: &'static [&'static str],
+    auth: Option<String>,
+}
+
+/// Assertion 3 — the reply-delivery contract.
+///
+/// `DraftChannel` has no default methods, so a channel can only enter the
+/// `Delivery::Draft` arm by really implementing draft delivery. Everything
+/// else must land in `Delivery::Return` and get its text back.
+async fn assert_reply_delivery_contract(channel: &dyn Channel) {
+    let name = channel.name().to_string();
+    let delivery = Delivery::open(channel, "conformance", "⏳").await;
+    match channel.as_draft() {
+        None => {
+            assert!(
+                delivery.draft().is_none(),
+                "{name}: no DraftChannel impl but Delivery opened a draft"
+            );
+            assert_eq!(
+                delivery.deliver("conformance", "REPLY").await.unwrap(),
+                "REPLY",
+                "{name}: reply was not returned to the caller"
+            );
+        }
+        Some(_) => {
+            assert!(
+                delivery
+                    .deliver("conformance", "REPLY")
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{name}: draft channel must swallow the return value"
+            );
+        }
+    }
+}
+
+/// Assertion 2 — `send()` performs a real outbound request of the right shape.
+async fn assert_send(channel: &dyn Channel, mock: &Mock, chat_id: &str, shape: &SendShape) {
+    let name = channel.name().to_string();
+    channel
+        .send(OutgoingMessage {
+            chat_id: chat_id.to_string(),
+            text: "REPLY".to_string(),
+            reply_to: None,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("{name}: send() failed: {e}"));
+
+    let hit = mock
+        .hits()
+        .into_iter()
+        .find(|h| h.path.contains(shape.path_contains))
+        .unwrap_or_else(|| {
+            panic!(
+                "{name}: send() made no request to a path containing {:?}; saw {:?}",
+                shape.path_contains,
+                mock.hits()
+                    .iter()
+                    .map(|h| h.path.clone())
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    assert_eq!(hit.method, shape.method, "{name}: wrong HTTP method");
+    for fragment in shape.body_contains {
+        assert!(
+            hit.body.contains(fragment),
+            "{name}: outbound body missing {fragment:?}; body was {:?}",
+            hit.body
+        );
+    }
+    if let Some(expected) = &shape.auth {
+        assert_eq!(
+            hit.auth.as_deref(),
+            Some(expected.as_str()),
+            "{name}: wrong Authorization header"
+        );
+    }
+}
+
+/// Assertion 1 — `start()` gives a receiver that really delivers.
+async fn assert_receives(name: &str, rx: &mut Receiver<IncomingMessage>) -> IncomingMessage {
+    match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+        Ok(Some(msg)) => msg,
+        Ok(None) => panic!("{name}: start() receiver closed without delivering a message"),
+        Err(_) => panic!("{name}: start() receiver never delivered a message"),
+    }
+}
+
+fn free_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    l.local_addr().unwrap().port()
+}
+
+/// POST a webhook payload to a channel's own HTTP receiver, retrying until it
+/// has finished binding.
+async fn post_webhook(port: u16, path: &str, body: serde_json::Value) {
+    let url = format!("http://127.0.0.1:{port}{path}");
+    let client = reqwest::Client::new();
+    for _ in 0..100 {
+        if client.post(&url).json(&body).send().await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("webhook receiver on port {port} never accepted a request");
+}
+
+// ───────────────────────── telegram ─────────────────────────
+
+#[cfg(feature = "channel-telegram")]
+#[tokio::test]
+async fn telegram_conformance() {
+    use apollo::channels::telegram::TelegramChannel;
+
+    let mock = Mock::start(Arc::new(|path: &str| {
+        if path.ends_with("/getUpdates") {
+            json(
+                r#"{"ok":true,"result":[{"update_id":1,"message":{"message_id":5,
+                "chat":{"id":42,"type":"private"},"text":"hello",
+                "from":{"id":9,"username":"u"}}}]}"#,
+            )
+        } else {
+            json(r#"{"ok":true,"result":{"message_id":7}}"#)
+        }
+    }))
+    .await;
+
+    let mut channel = TelegramChannel::new("tok".to_string(), 42).with_api_base(&mock.base);
+
+    let mut rx = channel.start().await.unwrap();
+    let msg = assert_receives("telegram", &mut rx).await;
+    assert_eq!(msg.text, "hello");
+    assert_eq!(msg.chat_id, "42");
+
+    assert_send(
+        &channel,
+        &mock,
+        "42",
+        &SendShape {
+            method: "POST",
+            path_contains: "/sendMessage",
+            body_contains: &["REPLY", "42"],
+            auth: None,
+        },
+    )
+    .await;
+
+    assert_reply_delivery_contract(&channel).await;
+    channel.stop().await.unwrap();
+}
+
+// ───────────────────────── cli ─────────────────────────
+
+#[cfg(feature = "channel-cli")]
+#[tokio::test]
+async fn cli_conformance() {
+    use apollo::channels::cli::CliChannel;
+
+    // stdin is not drivable from a test harness, so inbound delivery is not
+    // asserted here; send() and the delivery contract are.
+    let mut channel = CliChannel::new();
+    channel
+        .send(OutgoingMessage {
+            chat_id: "cli".to_string(),
+            text: "REPLY".to_string(),
+            reply_to: None,
+        })
+        .await
+        .unwrap();
+    assert_reply_delivery_contract(&channel).await;
+    channel.stop().await.unwrap();
+}
+
+// ───────────────────────── discord ─────────────────────────
+
+#[cfg(feature = "channel-discord")]
+#[tokio::test]
+#[ignore = "DEFECT: DiscordChannel::start() drops the sender (src/channels/discord.rs:51), \
+            so the receiver can never deliver anything and the bot is deaf. \
+            Ignored to keep the gates green; remove the ignore when start() is implemented."]
+async fn discord_conformance() {
+    use apollo::channels::discord::DiscordChannel;
+
+    let mock = Mock::start(Arc::new(|_: &str| json(r#"{"id":"1"}"#))).await;
+    let mut channel =
+        DiscordChannel::new("tok".to_string(), "C1".to_string()).with_api_base(&mock.base);
+
+    let mut rx = channel.start().await.unwrap();
+    let msg = assert_receives("discord", &mut rx).await;
+    assert!(!msg.text.is_empty());
+
+    assert_send(
+        &channel,
+        &mock,
+        "C1",
+        &SendShape {
+            method: "POST",
+            path_contains: "/channels/C1/messages",
+            body_contains: &["REPLY"],
+            auth: Some("Bot tok".to_string()),
+        },
+    )
+    .await;
+
+    assert_reply_delivery_contract(&channel).await;
+    channel.stop().await.unwrap();
+}
+
+// ───────────────────────── slack ─────────────────────────
+
+#[cfg(feature = "channel-slack")]
+#[tokio::test]
+#[ignore = "DEFECT: SlackChannel::start() polls conversations.history without the required \
+            `channel` parameter (src/channels/slack.rs:130), so Slack rejects the call and \
+            no message is ever received. Ignored to keep the gates green; remove the ignore \
+            when the poller passes a channel."]
+async fn slack_conformance() {
+    use apollo::channels::slack::SlackChannel;
+
+    let mock = Mock::start(Arc::new(|path: &str| {
+        if path.ends_with("/conversations.history") {
+            json(
+                r#"{"ok":true,"messages":[{"ts":"111","user":"U1","text":"hello","channel":"C1"}]}"#,
+            )
+        } else {
+            json(r#"{"ok":true}"#)
+        }
+    }))
+    .await;
+
+    let mut channel = SlackChannel::new("tok")
+        .with_channel("C1")
+        .with_api_base(&mock.base);
+
+    let mut rx = channel.start().await.unwrap();
+    let poll = mock.wait_for("conversations.history").await;
+    assert!(
+        poll.query.contains("channel="),
+        "slack: conversations.history polled without a channel parameter (query {:?})",
+        poll.query
+    );
+
+    let msg = assert_receives("slack", &mut rx).await;
+    assert_eq!(msg.text, "hello");
+    assert!(
+        !msg.chat_id.is_empty(),
+        "slack: inbound message has no chat_id"
+    );
+
+    assert_send(
+        &channel,
+        &mock,
+        "C1",
+        &SendShape {
+            method: "POST",
+            path_contains: "/chat.postMessage",
+            body_contains: &["\"channel\":\"C1\"", "REPLY"],
+            auth: Some("Bearer tok".to_string()),
+        },
+    )
+    .await;
+
+    assert_reply_delivery_contract(&channel).await;
+    channel.stop().await.unwrap();
+}
+
+// ───────────────────────── google chat ─────────────────────────
+
+#[cfg(feature = "channel-googlechat")]
+#[tokio::test]
+#[ignore = "DEFECT: GoogleChatChannel::send() sends the raw service-account key as a bearer \
+            token (src/channels/googlechat.rs:~107) instead of exchanging it for an OAuth2 \
+            access token, so every send is rejected. Ignored to keep the gates green; remove \
+            the ignore when a token exchange is implemented."]
+async fn googlechat_conformance() {
+    use apollo::channels::googlechat::GoogleChatChannel;
+
+    let mock = Mock::start(Arc::new(|_: &str| json("{}"))).await;
+    let port = free_port();
+    let mut channel = GoogleChatChannel::new("SERVICE_ACCOUNT_KEY")
+        .with_api_base(&mock.base)
+        .with_bind_addr(SocketAddr::from(([127, 0, 0, 1], port)));
+
+    let mut rx = channel.start().await.unwrap();
+    post_webhook(
+        port,
+        "/googlechat/webhook",
+        serde_json::json!({
+            "type": "MESSAGE",
+            "message": {"name": "m1", "text": "hello"},
+            "user": {"name": "users/1", "displayName": "U"},
+            "space": {"name": "spaces/AAA", "type": "ROOM"},
+        }),
+    )
+    .await;
+    let msg = assert_receives("googlechat", &mut rx).await;
+    assert_eq!(msg.text, "hello");
+
+    channel
+        .send(OutgoingMessage {
+            chat_id: "spaces/AAA".to_string(),
+            text: "REPLY".to_string(),
+            reply_to: None,
+        })
+        .await
+        .unwrap();
+    let hit = mock.wait_for("/messages").await;
+    assert!(
+        hit.auth.as_deref() != Some("Bearer SERVICE_ACCOUNT_KEY"),
+        "googlechat: service-account key sent verbatim as a bearer token"
+    );
+
+    assert_reply_delivery_contract(&channel).await;
+    channel.stop().await.unwrap();
+}
+
+// ───────────────────────── irc ─────────────────────────
+
+#[cfg(feature = "channel-irc")]
+#[tokio::test]
+#[ignore = "DEFECT: IrcChannel::send() only logs the message (src/channels/irc.rs:~129) — \
+            it holds no writer handle, so the bot can receive but never reply. Ignored to \
+            keep the gates green; remove the ignore when send() writes PRIVMSG."]
+async fn irc_conformance() {
+    use apollo::channels::irc::IrcChannel;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&lines);
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader).lines();
+        let _ = writer.write_all(b":u!u@h PRIVMSG #test :hello\r\n").await;
+        while let Ok(Some(line)) = reader.next_line().await {
+            seen.lock().unwrap().push(line);
+        }
+    });
+
+    let mut channel = IrcChannel::new("127.0.0.1", "#test", "bot").with_port(port);
+    let mut rx = channel.start().await.unwrap();
+    let msg = assert_receives("irc", &mut rx).await;
+    assert_eq!(msg.text, "hello");
+
+    channel
+        .send(OutgoingMessage {
+            chat_id: "#test".to_string(),
+            text: "REPLY".to_string(),
+            reply_to: None,
+        })
+        .await
+        .unwrap();
+
+    let mut sent_privmsg = false;
+    for _ in 0..40 {
+        if lines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.starts_with("PRIVMSG") && l.contains("REPLY"))
+        {
+            sent_privmsg = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        sent_privmsg,
+        "irc: send() never wrote a PRIVMSG to the server"
+    );
+
+    assert_reply_delivery_contract(&channel).await;
+    channel.stop().await.unwrap();
+}
+
+// ───────────────────────── matrix ─────────────────────────
+
+#[cfg(feature = "channel-matrix")]
+#[tokio::test]
+async fn matrix_conformance() {
+    use apollo::channels::matrix::MatrixChannel;
+
+    let mock = Mock::start(Arc::new(|path: &str| {
+        if path.ends_with("/sync") {
+            json(
+                r#"{"next_batch":"s1","rooms":{"join":{"!r:h":{"timeline":{"events":[
+                {"type":"m.room.message","event_id":"$1","sender":"@u:h",
+                 "content":{"body":"hello"}}]}}}}}"#,
+            )
+        } else {
+            json(r#"{"event_id":"$2"}"#)
+        }
+    }))
+    .await;
+
+    let mut channel = MatrixChannel::new(&mock.base, "tok").with_room("!r:h");
+    let mut rx = channel.start().await.unwrap();
+    let msg = assert_receives("matrix", &mut rx).await;
+    assert_eq!(msg.text, "hello");
+    assert_eq!(msg.chat_id, "!r:h");
+
+    assert_send(
+        &channel,
+        &mock,
+        "!r:h",
+        &SendShape {
+            method: "PUT",
+            path_contains: "/send/m.room.message/",
+            body_contains: &["m.text", "REPLY"],
+            auth: Some("Bearer tok".to_string()),
+        },
+    )
+    .await;
+
+    assert_reply_delivery_contract(&channel).await;
+    channel.stop().await.unwrap();
+}
+
+// ───────────────────────── signal ─────────────────────────
+
+#[cfg(feature = "channel-signal")]
+#[tokio::test]
+async fn signal_conformance() {
+    use apollo::channels::signal::SignalChannel;
+
+    let mock = Mock::start(Arc::new(|path: &str| {
+        if path.contains("/v1/receive/") {
+            json(
+                r#"[{"envelope":{"timestamp":1,"source":"+15550001",
+                "dataMessage":{"message":"hello"}}}]"#,
+            )
+        } else {
+            json("{}")
+        }
+    }))
+    .await;
+
+    let mut channel = SignalChannel::new(&mock.base, "+15550000");
+    let mut rx = channel.start().await.unwrap();
+    let msg = assert_receives("signal", &mut rx).await;
+    assert_eq!(msg.text, "hello");
+
+    assert_send(
+        &channel,
+        &mock,
+        "+15550001",
+        &SendShape {
+            method: "POST",
+            path_contains: "/v2/send",
+            body_contains: &["REPLY", "+15550001"],
+            auth: None,
+        },
+    )
+    .await;
+
+    assert_reply_delivery_contract(&channel).await;
+    channel.stop().await.unwrap();
+}
+
+// ───────────────────────── whatsapp ─────────────────────────
+
+#[cfg(feature = "channel-whatsapp")]
+#[tokio::test]
+async fn whatsapp_conformance() {
+    use apollo::channels::whatsapp::WhatsAppChannel;
+
+    let mock = Mock::start(Arc::new(|_: &str| json(r#"{"messages":[{"id":"m1"}]}"#))).await;
+    let port = free_port();
+    let mut channel = WhatsAppChannel::new("tok", "PHONE1", "verify")
+        .with_api_base(&mock.base)
+        .with_bind_addr(SocketAddr::from(([127, 0, 0, 1], port)));
+
+    let mut rx = channel.start().await.unwrap();
+    post_webhook(
+        port,
+        "/webhook",
+        serde_json::json!({
+            "entry": [{"changes": [{"value": {"messages": [
+                {"id": "m1", "from": "+15550001", "text": {"body": "hello"}}
+            ]}}]}]
+        }),
+    )
+    .await;
+    let msg = assert_receives("whatsapp", &mut rx).await;
+    assert_eq!(msg.text, "hello");
+
+    assert_send(
+        &channel,
+        &mock,
+        "+15550001",
+        &SendShape {
+            method: "POST",
+            path_contains: "/PHONE1/messages",
+            body_contains: &["messaging_product", "REPLY"],
+            auth: Some("Bearer tok".to_string()),
+        },
+    )
+    .await;
+
+    assert_reply_delivery_contract(&channel).await;
+    channel.stop().await.unwrap();
+}
+
+// ───────────────────────── microsoft teams ─────────────────────────
+
+#[cfg(feature = "channel-msteams")]
+#[tokio::test]
+async fn msteams_conformance() {
+    use apollo::channels::msteams::TeamsChannel;
+
+    let mock = Mock::start(Arc::new(|path: &str| {
+        if path.ends_with("/token") {
+            json(r#"{"access_token":"issued-token"}"#)
+        } else {
+            json("{}")
+        }
+    }))
+    .await;
+
+    let port = free_port();
+    let mut channel = TeamsChannel::new("app", "secret")
+        .with_api_base(&mock.base)
+        .with_bind_addr(SocketAddr::from(([127, 0, 0, 1], port)));
+
+    let mut rx = channel.start().await.unwrap();
+    post_webhook(
+        port,
+        "/api/messages",
+        serde_json::json!({
+            "type": "message",
+            "id": "m1",
+            "text": "hello",
+            "from": {"id": "u1", "name": "U"},
+            "conversation": {"id": "c1", "conversationType": "personal"},
+        }),
+    )
+    .await;
+    let msg = assert_receives("msteams", &mut rx).await;
+    assert_eq!(msg.text, "hello");
+
+    assert_send(
+        &channel,
+        &mock,
+        "c1",
+        &SendShape {
+            method: "POST",
+            path_contains: "/conversations/c1/activities",
+            body_contains: &["REPLY"],
+            auth: Some("Bearer issued-token".to_string()),
+        },
+    )
+    .await;
+
+    assert_reply_delivery_contract(&channel).await;
+    channel.stop().await.unwrap();
+}

@@ -11,6 +11,8 @@ pub struct WhatsAppChannel {
     access_token: String,
     phone_number_id: String,
     verify_token: String,
+    api_base: String,
+    bind_addr: std::net::SocketAddr,
 }
 
 impl WhatsAppChannel {
@@ -23,7 +25,21 @@ impl WhatsAppChannel {
             access_token: access_token.into(),
             phone_number_id: phone_number_id.into(),
             verify_token: verify_token.into(),
+            api_base: "https://graph.facebook.com/v18.0".to_string(),
+            bind_addr: ([0, 0, 0, 0], 3000).into(),
         }
+    }
+
+    /// Point the Cloud API at another origin (conformance tests).
+    pub fn with_api_base(mut self, base: impl Into<String>) -> Self {
+        self.api_base = base.into().trim_end_matches('/').to_string();
+        self
+    }
+
+    /// Bind the webhook receiver somewhere other than 0.0.0.0:3000.
+    pub fn with_bind_addr(mut self, addr: std::net::SocketAddr) -> Self {
+        self.bind_addr = addr;
+        self
     }
 
     /// Load from env vars
@@ -35,6 +51,8 @@ impl WhatsAppChannel {
                 .map_err(|_| anyhow::anyhow!("WHATSAPP_PHONE_NUMBER_ID not set"))?,
             verify_token: std::env::var("WHATSAPP_VERIFY_TOKEN")
                 .unwrap_or_else(|_| "aclaw-verify".to_string()),
+            api_base: "https://graph.facebook.com/v18.0".to_string(),
+            bind_addr: ([0, 0, 0, 0], 3000).into(),
         })
     }
 }
@@ -52,6 +70,7 @@ impl Channel for WhatsAppChannel {
         // For now, start a simple HTTP server to receive webhooks
         let verify_token = self.verify_token.clone();
         let _access_token = self.access_token.clone();
+        let bind_addr = self.bind_addr;
 
         tokio::spawn(async move {
             use axum::{
@@ -134,7 +153,7 @@ impl Channel for WhatsAppChannel {
                     }),
                 );
 
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+            let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -156,8 +175,8 @@ impl Channel for WhatsAppChannel {
 
         let resp = client
             .post(format!(
-                "https://graph.facebook.com/v18.0/{}/messages",
-                self.phone_number_id
+                "{}/{}/messages",
+                self.api_base, self.phone_number_id
             ))
             .header("Authorization", format!("Bearer {}", self.access_token))
             .header("Content-Type", "application/json")

@@ -11,6 +11,7 @@ use super::traits::{Channel, IncomingMessage, OutgoingMessage};
 pub struct DiscordChannel {
     bot_token: String,
     channel_id: String,
+    api_base: String,
 }
 
 impl DiscordChannel {
@@ -18,16 +19,20 @@ impl DiscordChannel {
         Self {
             bot_token,
             channel_id,
+            api_base: "https://discordapp.com/api".to_string(),
         }
+    }
+
+    /// Point the Discord API at another origin (conformance tests).
+    pub fn with_api_base(mut self, base: impl Into<String>) -> Self {
+        self.api_base = base.into().trim_end_matches('/').to_string();
+        self
     }
 
     /// Send message to Discord
     async fn send_message(&self, channel_id: &str, text: &str) -> anyhow::Result<()> {
         let formatted = format_outgoing_text(FormatTarget::Discord, text);
-        let url = format!(
-            "https://discordapp.com/api/channels/{}/messages",
-            channel_id
-        );
+        let url = format!("{}/channels/{}/messages", self.api_base, channel_id);
         let _resp = crate::http::shared()
             .post(&url)
             .header("Authorization", format!("Bot {}", self.bot_token))

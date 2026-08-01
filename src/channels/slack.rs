@@ -10,6 +10,7 @@ pub struct SlackChannel {
     bot_token: String,
     app_token: Option<String>,
     channel_id: Option<String>,
+    api_base: String,
 }
 
 impl SlackChannel {
@@ -18,7 +19,14 @@ impl SlackChannel {
             bot_token: bot_token.into(),
             app_token: None,
             channel_id: None,
+            api_base: "https://slack.com/api".to_string(),
         }
+    }
+
+    /// Point the Slack API at another origin (conformance tests).
+    pub fn with_api_base(mut self, base: impl Into<String>) -> Self {
+        self.api_base = base.into().trim_end_matches('/').to_string();
+        self
     }
 
     pub fn with_app_token(mut self, token: impl Into<String>) -> Self {
@@ -41,6 +49,7 @@ impl Channel for SlackChannel {
     async fn start(&mut self) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
         let (tx, rx) = mpsc::channel(32);
         let bot_token = self.bot_token.clone();
+        let api_base = self.api_base.clone();
 
         // Poll Slack conversations.history for new messages
         tokio::spawn(async move {
@@ -51,7 +60,7 @@ impl Channel for SlackChannel {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
                 let resp = client
-                    .get("https://slack.com/api/conversations.history")
+                    .get(format!("{}/conversations.history", api_base))
                     .header("Authorization", format!("Bearer {}", bot_token))
                     .query(&[("limit", "5")])
                     .send()
@@ -116,7 +125,7 @@ impl Channel for SlackChannel {
         }
 
         let resp = client
-            .post("https://slack.com/api/chat.postMessage")
+            .post(format!("{}/chat.postMessage", self.api_base))
             .header("Authorization", format!("Bearer {}", self.bot_token))
             .header("Content-Type", "application/json")
             .json(&body)

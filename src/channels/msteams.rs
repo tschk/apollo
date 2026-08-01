@@ -9,6 +9,9 @@ use super::traits::*;
 pub struct TeamsChannel {
     app_id: String,
     app_password: String,
+    token_url: String,
+    service_base: String,
+    bind_addr: std::net::SocketAddr,
 }
 
 impl TeamsChannel {
@@ -16,7 +19,26 @@ impl TeamsChannel {
         Self {
             app_id: app_id.into(),
             app_password: app_password.into(),
+            token_url: "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
+                .to_string(),
+            service_base: "https://smba.trafficmanager.net/teams/v3".to_string(),
+            bind_addr: ([0, 0, 0, 0], 3978).into(),
         }
+    }
+
+    /// Point the Bot Framework token + service endpoints at another origin
+    /// (conformance tests).
+    pub fn with_api_base(mut self, base: impl Into<String>) -> Self {
+        let base = base.into().trim_end_matches('/').to_string();
+        self.token_url = format!("{base}/oauth2/v2.0/token");
+        self.service_base = format!("{base}/teams/v3");
+        self
+    }
+
+    /// Bind the Bot Framework receiver somewhere other than 0.0.0.0:3978.
+    pub fn with_bind_addr(mut self, addr: std::net::SocketAddr) -> Self {
+        self.bind_addr = addr;
+        self
     }
 }
 
@@ -29,6 +51,7 @@ impl Channel for TeamsChannel {
     async fn start(&mut self) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
         let (tx, rx) = mpsc::channel(32);
         let _app_id = self.app_id.clone();
+        let bind_addr = self.bind_addr;
 
         tokio::spawn(async move {
             use axum::{routing::post, Json, Router};
@@ -68,7 +91,7 @@ impl Channel for TeamsChannel {
                 }),
             );
 
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:3978").await.unwrap();
+            let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -80,7 +103,7 @@ impl Channel for TeamsChannel {
 
         // Get Bot Framework token
         let token_resp = client
-            .post("https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token")
+            .post(&self.token_url)
             .form(&[
                 ("grant_type", "client_credentials"),
                 ("client_id", &self.app_id),
@@ -100,8 +123,8 @@ impl Channel for TeamsChannel {
 
         client
             .post(format!(
-                "https://smba.trafficmanager.net/teams/v3/conversations/{}/activities",
-                message.chat_id
+                "{}/conversations/{}/activities",
+                self.service_base, message.chat_id
             ))
             .header("Authorization", format!("Bearer {}", token))
             .json(&body)
