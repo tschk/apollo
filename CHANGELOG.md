@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.6.0]
+
+### Breaking
+
+- **Discord now uses the gateway websocket by default.** Polling could only
+  ever see the one configured channel, on a two-second delay, and never saw
+  DMs. The gateway requires the privileged `MESSAGE_CONTENT` intent to be
+  enabled on the bot — without it Discord delivers empty message bodies. Set
+  `transport = "polling"` in `[channel].settings` to keep the old behaviour.
+
+### Added
+
+- **`apollo channel-check --channel <name>`** — verify a channel against its
+  real service. Starts the channel, sends a nonce, optionally uploads an
+  attachment with `--media`, and waits for you to echo the nonce back. The
+  conformance suite proves a channel works against a mock built from published
+  API shapes; it cannot prove a field name, scope or endpoint is right. This
+  can, but it needs credentials and a human, so it is a command not a test.
+- **Media on Discord and Slack.** Discord does not fetch remote URLs, so a URL
+  source is downloaded and re-uploaded as multipart. Slack's `files.upload` is
+  deprecated, so uploads use the three-step external flow
+  (`files.getUploadURLExternal` → PUT → `files.completeUploadExternal`).
+- **Host plugin tool execution.** A `plugin.json` may declare
+  `tools: [{name, description, command, args}]`. These are **deny-by-default**:
+  a tool is only built if its plugin id appears in
+  `plugin_layer.trusted_host_plugins`, which is empty, and there is no switch
+  that trusts everything discovered. Commands are executed directly rather
+  than through a shell, JSON arguments arrive on stdin rather than argv, the
+  working directory is the plugin's own, and runs are bounded and truncated.
+- `channels::discord_gateway`, `channels::media`, `channel_check` and
+  `plugin_exec` as public modules.
+
+### Known limitations
+
+- Channel coverage is still **mock-based**. Only Telegram and CLI have been
+  exercised against a real service. The Discord gateway and the Slack upload
+  flow are the most protocol-heavy code here and were written against
+  documentation — run `apollo channel-check` against a real workspace before
+  relying on either.
+- The gateway implements HELLO/heartbeat, IDENTIFY and MESSAGE_CREATE only.
+  There is **no RESUME**: a dropped connection re-identifies and loses
+  messages sent during the gap.
+- Media is implemented for Telegram, Discord and Slack. Every other channel
+  reports `supports_media() == false` and errors rather than degrading to a
+  text message with a link.
+
 ## [0.5.0]
 
 ### Breaking
