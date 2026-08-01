@@ -13,7 +13,7 @@ pub fn toolset_for_tool(name: &str) -> &'static str {
         "web_search" | "web_fetch" | "browser" => "web",
         "memory_search" | "memory_get" | "session_search" | "brain_search" | "brain_query"
         | "brain_put" | "brain_get" => "memory",
-        "list_models" | "doctor" => "sessions",
+        "doctor" => "sessions",
         "message" => "messaging",
         "skill_manager" => "skills",
         "praefectus" => "desktop",

@@ -99,10 +99,7 @@ pub fn audit_config(cfg: &Config) -> Vec<Finding> {
         });
     }
 
-    if cfg.provider.api_key.is_none()
-        && std::env::var("ANTHROPIC_API_KEY").is_err()
-        && std::env::var("OPENAI_API_KEY").is_err()
-    {
+    if cfg.provider.api_key.is_none() && std::env::var("OPENAI_API_KEY").is_err() {
         findings.push(Finding {
             code: "provider_credentials_missing",
             severity: Severity::Warn,
@@ -180,9 +177,8 @@ pub async fn collect_doctor_report(
     checks.push(local_bin_path_check());
     checks.push(shared_login_check());
 
-    let provider_key_present = cfg.provider.api_key.is_some()
-        || std::env::var("ANTHROPIC_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok();
+    let provider_key_present =
+        cfg.provider.api_key.is_some() || std::env::var("OPENAI_API_KEY").is_ok();
     checks.push(Check {
         name: "Provider credentials".into(),
         ok: provider_key_present,

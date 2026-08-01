@@ -1,4 +1,4 @@
-//! rs_ai-backed provider adapter for first-class ChatGPT, Gemini, xAI, Claude,
+//! rs_ai-backed provider adapter for first-class ChatGPT, Gemini, xAI,
 //! Cloudflare and generic OpenAI-compatible endpoints.
 
 use async_trait::async_trait;
@@ -44,7 +44,6 @@ impl RsAiProvider {
             "chatgpt" | "openai" => "gpt-4o",
             "gemini" => "gemini-2.5-flash",
             "xai" | "grok" => "grok-4.20-reasoning",
-            "claude" => "claude-sonnet-4-6",
             "cloudflare" => "@cf/meta/llama-3.1-8b-instruct",
             _ => "",
         }
@@ -52,14 +51,11 @@ impl RsAiProvider {
 
     fn build_model(&self) -> anyhow::Result<Box<dyn rs_ai_core::LanguageModel>> {
         use rs_ai_providers::{
-            ChatGptProvider, ClaudeProvider, CloudflareProvider, GeminiProvider,
-            OpenAiCompatibleConfig, OpenAiCompatibleProvider, XaiProvider,
+            ChatGptProvider, CloudflareProvider, GeminiProvider, OpenAiCompatibleConfig,
+            OpenAiCompatibleProvider, XaiProvider,
         };
 
         let model: Box<dyn rs_ai_core::LanguageModel> = match self.provider_name.as_str() {
-            "claude" => {
-                Box::new(ClaudeProvider::new(&self.api_key).model(self.effective_model_id()))
-            }
             "chatgpt" | "openai" => {
                 Box::new(ChatGptProvider::new(&self.api_key).model(self.effective_model_id()))
             }
@@ -107,7 +103,7 @@ impl Provider for RsAiProvider {
             streaming: true,
             vision: matches!(
                 self.provider_name.as_str(),
-                "claude" | "chatgpt" | "openai" | "gemini" | "xai" | "grok"
+                "chatgpt" | "openai" | "gemini" | "xai" | "grok"
             ),
             max_context: 200_000,
             native_web_search: false,

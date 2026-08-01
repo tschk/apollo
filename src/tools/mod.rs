@@ -5,7 +5,7 @@
 //!   group:fs       — Read, Write, Edit
 //!   group:web      — web_search, web_fetch
 //!   group:memory   — memory_search, memory_get
-//!   group:sessions — session_status, list_models
+//!   group:sessions — session_status
 //!   group:messaging — message (Telegram send/edit/delete)
 
 pub mod brief;
@@ -13,7 +13,6 @@ pub mod brief;
 pub mod browser;
 pub mod build_runner;
 pub mod child_proc;
-pub mod claude_usage;
 #[cfg(feature = "swarm")]
 pub mod coding_swarm;
 pub mod config_tool;

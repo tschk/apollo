@@ -419,7 +419,7 @@ enum SwarmAction {
         name: String,
 
         /// LLM model
-        #[arg(long, default_value = "claude-sonnet-4-5")]
+        #[arg(long, default_value = "gpt-5.5")]
         model: String,
 
         /// Capabilities (comma-separated: coding,research,review,testing,documentation,design,devops,security)
@@ -728,13 +728,6 @@ async fn main() -> anyhow::Result<()> {
             runner_arc
                 .add_tool(Arc::new(apollo::tools::mode_switch::ModeSwitchTool::new(
                     runner_arc.mode_handle(),
-                )))
-                .await;
-
-            // Add claude_usage tool (needs cost tracker reference)
-            runner_arc
-                .add_tool(Arc::new(apollo::tools::claude_usage::ClaudeUsageTool::new(
-                    runner_arc.cost_tracker(),
                 )))
                 .await;
 

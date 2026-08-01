@@ -24,7 +24,6 @@ fn resolve_api_key(
         "chatgpt" | "openai" => "OPENAI_API_KEY",
         "gemini" => "GOOGLE_API_KEY",
         "xai" | "grok" => "XAI_API_KEY",
-        "claude" => "ANTHROPIC_API_KEY",
         _ => "OPENAI_API_KEY",
     };
     if let Ok(k) = std::env::var(env_var) {
@@ -82,7 +81,6 @@ fn build_client(
         "chatgpt" => rs_ai::chatgpt(),
         "gemini" => rs_ai::gemini(),
         "xai" => rs_ai::xai(),
-        "claude" => rs_ai::claude(),
         _ => rs_ai::chatgpt(),
     };
     Ok(builder.api_key(api_key).model(model))

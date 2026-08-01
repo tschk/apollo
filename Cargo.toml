@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "apollo-agent"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "Local-first Rust AI agent runtime — Telegram-first, trait-driven, SurrealDB + RocksDB state layer."
 license = "MPL-2.0"
@@ -33,7 +33,6 @@ default = [
     "core",
     "channel-cli",
     "channel-telegram",
-    "provider-anthropic",
     "provider-ollama",
     "rs-ai",
     "zkr-memory",
@@ -63,7 +62,6 @@ channel-googlechat = []
 channel-msteams = []
 
 # Providers — pick what you need
-provider-anthropic = []
 provider-copilot = []
 provider-ollama = []
 
@@ -78,7 +76,7 @@ zkr-memory = ["dep:zkr"]
 
 # Bundles
 all-channels = ["channel-cli", "channel-telegram", "channel-discord", "channel-slack", "channel-whatsapp", "channel-signal", "channel-matrix", "channel-irc", "channel-googlechat", "channel-msteams"]
-all-providers = ["provider-anthropic", "provider-copilot", "provider-ollama"]
+all-providers = ["provider-copilot", "provider-ollama"]
 desktop = ["plugin-browser", "computer-use-praefectus"]
 all-plugins = ["plugin-web", "plugin-browser", "plugin-skills", "plugin-advanced", "computer-use-praefectus"]
 full = ["all-channels", "all-providers", "all-plugins", "swarm"]
@@ -166,8 +164,8 @@ ed25519-dalek = { version = "2.1", features = ["rand_core"], optional = true }
 zkr = { version = "0.4.1", optional = true }
 rs_ai = { version = "0.2", optional = true }
 rs_ai_core = { version = "0.2", optional = true }
-rs_ai_providers = { version = "0.2", optional = true, features = ["claude", "chatgpt", "gemini", "openai-compatible", "xai", "cloudflare"] }
-rs_ai_oauth = { version = "0.2.29", optional = true, default-features = false }
+rs_ai_providers = { version = "0.2", optional = true, features = ["chatgpt", "gemini", "openai-compatible", "xai", "cloudflare"] }
+rs_ai_oauth = { version = "0.2.30", optional = true, default-features = false }
 
 [dev-dependencies]
 axum = "0.8"

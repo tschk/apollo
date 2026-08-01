@@ -9,8 +9,8 @@ use crate::memory::search::{MemoryGetTool, MemorySearchTool, SessionSearchTool};
 use crate::memory::surreal::SurrealMemory;
 use crate::memory::MemoryBackend;
 use crate::policy::ExecutionPolicy;
-#[cfg(feature = "provider-anthropic")]
-use crate::providers::anthropic::AnthropicProvider;
+#[cfg(feature = "rs-ai")]
+use crate::providers::codex::CodexProvider;
 use crate::providers::defaults::default_model_for_provider;
 #[cfg(feature = "provider-ollama")]
 use crate::providers::ollama::OllamaProvider;
@@ -47,31 +47,28 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
         crate::plugins::apply_workspace_manifest(&mut cfg, ws);
     }
 
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        cfg.provider.api_key = Some(key);
+    if matches!(cfg.provider.name.as_str(), "anthropic" | "claude") {
+        cfg.provider.name = "chatgpt".to_string();
+        cfg.provider.api_key = None;
+        if cfg.model.starts_with("claude") {
+            cfg.model = "gpt-5.5".to_string();
+        }
     }
 
     if cfg.provider.api_key.is_none() {
-        if let Ok(token) = resolve_openclaw_token("anthropic") {
+        #[cfg(feature = "rs-ai")]
+        if let Some((token, _, _)) =
+            crate::providers::shared_credentials::load(rs_ai_oauth::OAuthProvider::ChatGpt)
+        {
+            cfg.provider.name = "chatgpt".to_string();
             cfg.provider.api_key = Some(token);
         }
-        #[cfg(feature = "provider-anthropic")]
-        {
-            if let Ok(_provider) =
-                crate::providers::anthropic::AnthropicProvider::from_env_or_oauth()
-            {
-                let _ = _provider;
-                if let Ok((token, _, _)) = crate::providers::oauth::load_oauth_token_from_file() {
-                    cfg.provider.api_key = Some(token);
-                }
-            }
-        }
+    }
 
-        if cfg.provider.api_key.is_none() {
-            if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-                cfg.provider.name = "openai".to_string();
-                cfg.provider.api_key = Some(key);
-            }
+    if cfg.provider.api_key.is_none() {
+        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+            cfg.provider.name = "openai".to_string();
+            cfg.provider.api_key = Some(key);
         }
     }
 
@@ -128,15 +125,8 @@ pub fn build_provider(cfg: &Config) -> Arc<dyn Provider> {
     let api_key = cfg.provider.api_key.clone().unwrap_or_default();
 
     match cfg.provider.name.as_str() {
-        #[cfg(feature = "provider-anthropic")]
-        "anthropic" | "claude" => {
-            let mut p = AnthropicProvider::from_credential(&api_key)
-                .with_native_web_search(cfg.provider.native_web_search);
-            if let Some(url) = &cfg.provider.base_url {
-                p = p.with_base_url(url);
-            }
-            Arc::new(p)
-        }
+        #[cfg(feature = "rs-ai")]
+        "chatgpt" => Arc::new(CodexProvider::new(api_key)),
         #[cfg(feature = "provider-copilot")]
         "github-copilot" | "copilot" => {
             if let Ok(p) = crate::providers::copilot::CopilotProvider::from_openclaw() {
@@ -145,14 +135,6 @@ pub fn build_provider(cfg: &Config) -> Arc<dyn Provider> {
                 Arc::new(crate::providers::copilot::CopilotProvider::new(&api_key))
             }
         }
-        #[cfg(feature = "rs-ai")]
-        "chatgpt" => Arc::new(crate::providers::rs_ai::RsAiProvider::new(
-            "chatgpt",
-            &cfg.model,
-            &api_key,
-            cfg.provider.base_url.clone(),
-            None,
-        )),
         #[cfg(feature = "rs-ai")]
         "gemini" => Arc::new(crate::providers::rs_ai::RsAiProvider::new(
             "gemini",
@@ -243,7 +225,6 @@ pub fn build_base_tools(
             workspace.to_path_buf(),
             Arc::clone(&policy),
         )),
-        Arc::new(crate::tools::session::ListModelsTool::new()),
         Arc::new(crate::tools::dynamic::CreateToolTool::new(Arc::clone(
             &policy,
         ))),
@@ -385,64 +366,6 @@ pub async fn build_memory_backend(
     Ok(Arc::new(memory))
 }
 
-fn resolve_openclaw_token(provider: &str) -> anyhow::Result<String> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home dir"))?;
-    let auth_path = home.join(".openclaw/agents/main/agent/auth-profiles.json");
-
-    if !auth_path.exists() {
-        return Err(anyhow::anyhow!("No auth-profiles.json found"));
-    }
-
-    let content = std::fs::read_to_string(&auth_path)?;
-    let data: serde_json::Value = serde_json::from_str(&content)?;
-
-    let profile_key = format!("{}:default", provider);
-    if let Some(profile) = data["profiles"][&profile_key].as_object() {
-        if let Some(token) = profile.get("token").and_then(|t| t.as_str()) {
-            if !token.is_empty() {
-                tracing::info!("Loaded {} token from OpenClaw auth-profiles", provider);
-                return Ok(token.to_string());
-            }
-        }
-        if let Some(key) = profile.get("key").and_then(|k| k.as_str()) {
-            if !key.is_empty() {
-                tracing::info!("Loaded {} API key from OpenClaw auth-profiles", provider);
-                return Ok(key.to_string());
-            }
-        }
-    }
-
-    if let Some(profiles) = data["profiles"].as_object() {
-        for (key, value) in profiles {
-            if let Some(p) = value["provider"].as_str() {
-                if p == provider {
-                    if let Some(token) = value["token"].as_str() {
-                        if !token.is_empty() {
-                            tracing::info!(
-                                "Loaded {} token from OpenClaw profile {}",
-                                provider,
-                                key
-                            );
-                            return Ok(token.to_string());
-                        }
-                    }
-                    if let Some(key_val) = value["key"].as_str() {
-                        if !key_val.is_empty() {
-                            tracing::info!("Loaded {} key from OpenClaw profile {}", provider, key);
-                            return Ok(key_val.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "No {} credentials in auth-profiles",
-        provider
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,23 +406,23 @@ mod default_model_tests {
 
         let mut cfg = config_with("chatgpt", "");
         apply_default_model(&mut cfg);
-        assert_eq!(cfg.model, "gpt-5.6-sol");
+        assert_eq!(cfg.model, "gpt-5.5");
     }
 
     #[test]
     fn a_configured_model_is_never_replaced() {
         // Regression: credential detection used to overwrite the model even
         // when the config named one, so an OAuth user lost their choice.
-        let mut cfg = config_with("anthropic", "claude-haiku-4-5");
+        let mut cfg = config_with("chatgpt", "gpt-5.4-mini");
         apply_default_model(&mut cfg);
-        assert_eq!(cfg.model, "claude-haiku-4-5");
+        assert_eq!(cfg.model, "gpt-5.4-mini");
     }
 
     #[test]
     fn whitespace_counts_as_unset() {
-        let mut cfg = config_with("anthropic", "   ");
+        let mut cfg = config_with("chatgpt", "   ");
         apply_default_model(&mut cfg);
-        assert_eq!(cfg.model, "claude-fable-5");
+        assert_eq!(cfg.model, "gpt-5.5");
     }
 
     #[test]

@@ -121,8 +121,6 @@ fn compiled_in_providers() -> Vec<&'static str> {
         "vercel",
         "xai",
     ];
-    #[cfg(feature = "provider-anthropic")]
-    names.push("anthropic");
     #[cfg(feature = "provider-copilot")]
     names.push("copilot");
     #[cfg(feature = "provider-ollama")]
@@ -214,47 +212,26 @@ fn prompt_permission_profile_interactive() -> anyhow::Result<String> {
 /// The authentication methods this build can actually use, in the order the
 /// wizard offers them.
 fn auth_methods() -> Vec<(&'static str, &'static str)> {
-    let mut methods: Vec<(&'static str, &'static str)> = Vec::new();
-    #[cfg(feature = "provider-anthropic")]
-    {
-        methods.push((
-            "anthropic-oauth",
-            "Anthropic — Claude subscription sign-in (OAuth, no API key)",
-        ));
-        methods.push(("anthropic-key", "Anthropic — API key"));
-    }
-    #[cfg(feature = "provider-copilot")]
-    methods.push((
-        "copilot-oauth",
-        "GitHub Copilot — existing GitHub OAuth login",
-    ));
-    #[cfg(feature = "provider-ollama")]
-    methods.push(("ollama", "Ollama — local models, no key needed"));
-    methods.push((
-        "openai-compat",
-        "OpenAI-compatible endpoint — API key (+ optional base URL)",
-    ));
-    methods
-}
-
-fn anthropic_oauth_present() -> bool {
-    apollo::providers::oauth::load_oauth_token_from_file().is_ok()
+    vec![
+        #[cfg(feature = "provider-copilot")]
+        (
+            "copilot-oauth",
+            "GitHub Copilot — existing GitHub OAuth login",
+        ),
+        #[cfg(feature = "provider-ollama")]
+        ("ollama", "Ollama — local models, no key needed"),
+        (
+            "openai-compat",
+            "OpenAI-compatible endpoint — API key (+ optional base URL)",
+        ),
+    ]
 }
 
 fn prompt_auth_interactive(default_provider: &str) -> anyhow::Result<Auth> {
     let methods = auth_methods();
     println!("  How should apollo authenticate?\n");
-    for (i, (id, label)) in methods.iter().enumerate() {
-        let note = if *id == "anthropic-oauth" {
-            if anthropic_oauth_present() {
-                "  (existing Claude login detected)"
-            } else {
-                "  (requires an existing Claude Code login)"
-            }
-        } else {
-            ""
-        };
-        println!("    [{}] {}{}", i + 1, label, note);
+    for (i, (_, label)) in methods.iter().enumerate() {
+        println!("    [{}] {}", i + 1, label);
     }
     let default_index = methods
         .iter()
@@ -271,30 +248,6 @@ fn prompt_auth_interactive(default_provider: &str) -> anyhow::Result<Auth> {
     };
 
     match choice {
-        "anthropic-oauth" => {
-            if !anthropic_oauth_present() {
-                println!(
-                    "\n  No Claude credentials found. Sign in with Claude Code (`claude`) first,\n  \
-                     then re-run `apollo init`. Continuing with OAuth selected."
-                );
-            }
-            Ok(Auth {
-                provider: "anthropic".to_string(),
-                api_key: String::new(),
-                base_url: None,
-            })
-        }
-        "anthropic-key" => {
-            let key = read_secret("  Anthropic API key (input hidden): ")?;
-            if key.is_empty() {
-                anyhow::bail!("An API key is required for the API-key method");
-            }
-            Ok(Auth {
-                provider: "anthropic".to_string(),
-                api_key: key,
-                base_url: None,
-            })
-        }
         "copilot-oauth" => {
             println!("\n  apollo reuses the GitHub token from your existing Copilot login.");
             let key = read_secret("  GitHub token (leave empty to use the stored login): ")?;
@@ -382,7 +335,7 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
             let default_provider = existing
                 .as_ref()
                 .map(|c| c.provider.name.clone())
-                .unwrap_or_else(|| "anthropic".to_string());
+                .unwrap_or_else(|| "chatgpt".to_string());
             prompt_auth_interactive(&default_provider)?
         }
     };
@@ -392,7 +345,7 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
     let default_model = default_model_for_provider(&provider)
         .map(|m| m.to_string())
         .or_else(|| existing.as_ref().map(|c| c.model.clone()))
-        .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+        .unwrap_or_else(|| "gpt-5.5".to_string());
     let model = match opts.model {
         Some(m) if !m.trim().is_empty() => m.trim().to_string(),
         _ if interactive => read_with_default("\n  Model", &default_model)?,
@@ -528,30 +481,6 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
                 Err(e) => println!("❌ {}", e),
             }
         }
-        "anthropic" | "claude" if !api_key.is_empty() => {
-            print!("\n  Validating API key... ");
-            let is_oauth = api_key.contains("sk-ant-oat");
-            let auth_resp = if is_oauth {
-                client
-                    .get("https://api.anthropic.com/v1/models")
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .header("anthropic-version", "2023-06-01")
-                    .send()
-                    .await
-            } else {
-                client
-                    .get("https://api.anthropic.com/v1/models")
-                    .header("x-api-key", &api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .send()
-                    .await
-            };
-            match auth_resp {
-                Ok(r) if r.status().is_success() => println!("✅"),
-                Ok(r) => println!("⚠️  HTTP {} (may still work)", r.status()),
-                Err(e) => println!("❌ {}", e),
-            }
-        }
         "openai" => {
             print!("\n  Validating API key... ");
             let auth_resp = client
@@ -604,8 +533,6 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
         ));
     } else if api_key.is_empty() {
         // OAuth methods keep their credentials in the provider's own store.
-    } else if provider == "anthropic" || provider == "claude" {
-        env_content.push_str(&format!("ANTHROPIC_API_KEY=\"{}\"\n", api_key));
     } else if provider == "copilot" || provider == "github-copilot" {
         env_content.push_str(&format!("GITHUB_TOKEN=\"{}\"\n", api_key));
     } else {
@@ -762,7 +689,7 @@ mod tests {
 
     #[test]
     fn provider_selection_accepts_index_and_name() {
-        let all = ["anthropic", "ollama", "openai"];
+        let all = ["ollama", "openai"];
         let matches = get_provider_matches(&all, "ol");
         assert_eq!(matches, vec!["ollama"]);
         assert_eq!(
@@ -774,9 +701,10 @@ mod tests {
             Some("ollama")
         );
         assert_eq!(
-            parse_provider_selection("anthropic", &matches, &all).as_deref(),
-            Some("anthropic")
+            parse_provider_selection("openai", &get_provider_matches(&all, "o"), &all).as_deref(),
+            Some("openai")
         );
+        assert_eq!(parse_provider_selection("anthropic", &matches, &all), None);
         assert_eq!(
             parse_provider_selection("", &get_provider_matches(&all, "o"), &all),
             None
@@ -788,14 +716,7 @@ mod tests {
         for (id, label) in auth_methods() {
             assert!(!label.is_empty(), "{id} needs a label");
             assert!(
-                matches!(
-                    id,
-                    "anthropic-oauth"
-                        | "anthropic-key"
-                        | "copilot-oauth"
-                        | "ollama"
-                        | "openai-compat"
-                ),
+                matches!(id, "copilot-oauth" | "ollama" | "openai-compat"),
                 "unexpected auth id {id}"
             );
         }

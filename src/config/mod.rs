@@ -78,8 +78,8 @@ impl Default for AgentConfig {
             max_history_messages: 10,
             max_tool_result_chars: 20_000,
             max_context_chars: 150_000,
-            fast_model: "claude-haiku-4-5-20251001".to_string(),
-            heavy_model: "claude-sonnet-4-6".to_string(),
+            fast_model: "gpt-5.4-mini".to_string(),
+            heavy_model: "gpt-5.5".to_string(),
             permissions: PermissionRulesConfig::default(),
             permission_profile: "auto".to_string(),
             auto_compact_after: 0,
@@ -460,7 +460,7 @@ impl Config {
             provider: ProviderConfig::default(),
             embeddings: EmbeddingsConfig::default(),
             agent: AgentConfig::default(),
-            model: "claude-sonnet-4-6".to_string(),
+            model: "gpt-5.5".to_string(),
             system_prompt: "You are a helpful AI assistant.".to_string(),
             workspace: PathBuf::from("."),
             storage: StorageConfig::default(),
@@ -486,7 +486,7 @@ impl Default for Config {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            name: "anthropic".to_string(),
+            name: "chatgpt".to_string(),
             api_key: None,
             base_url: None,
             native_web_search: false,
@@ -615,7 +615,7 @@ mod config_path_tests {
     fn get_reads_nested_and_top_level_keys() {
         let cfg = Config::default_config();
         assert_eq!(cfg.get_path("model").unwrap(), cfg.model.as_str());
-        assert_eq!(cfg.get_path("provider.name").unwrap(), "anthropic");
+        assert_eq!(cfg.get_path("provider.name").unwrap(), "chatgpt");
         assert_eq!(cfg.get_path("agent.max_rounds").unwrap(), 50);
     }
 
@@ -680,7 +680,7 @@ mod config_path_tests {
         assert!(!rendered.contains("telegram-secret"), "{rendered}");
         assert_eq!(value["provider"]["api_key"], "********");
         assert_eq!(value["channel"]["token"], "********");
-        assert_eq!(value["provider"]["name"], "anthropic");
+        assert_eq!(value["provider"]["name"], "chatgpt");
     }
 
     #[test]

@@ -5,11 +5,8 @@ pub mod defaults;
 pub mod retry;
 pub mod traits;
 
-// Always available
-pub mod oauth;
-
-#[cfg(feature = "provider-anthropic")]
-pub mod anthropic;
+#[cfg(feature = "rs-ai")]
+pub mod codex;
 #[cfg(feature = "provider-copilot")]
 pub mod copilot;
 // OpenAI-compat covers: openai, openrouter, groq, together, mistral, deepseek,

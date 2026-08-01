@@ -74,6 +74,7 @@ pub struct SharedLogin {
 pub fn logins() -> Vec<SharedLogin> {
     credentials::logged_in_providers()
         .into_iter()
+        .filter(|provider| !matches!(provider, OAuthProvider::Claude))
         .filter_map(|provider| {
             let tokens = credentials::load(&provider)?;
             Some(SharedLogin {
@@ -142,20 +143,20 @@ mod tests {
             Some(dir.path().as_os_str()),
             || {
                 save(
-                    OAuthProvider::Claude,
+                    OAuthProvider::ChatGpt,
                     "access",
                     "refresh",
                     (now_secs() as i64 + 3600) * 1000,
                 )
                 .unwrap();
 
-                let (access, refresh, expires) = load(OAuthProvider::Claude).unwrap();
+                let (access, refresh, expires) = load(OAuthProvider::ChatGpt).unwrap();
                 assert_eq!(access, "access");
                 assert_eq!(refresh.as_deref(), Some("refresh"));
                 assert!(expires > now_secs() as i64 * 1000);
 
                 let names: Vec<&str> = logins().iter().map(|l| l.provider).collect();
-                assert!(names.contains(&"claude"), "got {names:?}");
+                assert!(names.contains(&"chatgpt"), "got {names:?}");
             },
         );
     }
