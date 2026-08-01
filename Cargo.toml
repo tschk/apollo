@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "apollo-agent"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "Local-first Rust AI agent runtime — Telegram-first, trait-driven, SurrealDB + RocksDB state layer."
 license = "MPL-2.0"
@@ -167,7 +167,7 @@ zkr = { version = "0.4.1", optional = true }
 rs_ai = { version = "0.2", optional = true }
 rs_ai_core = { version = "0.2", optional = true }
 rs_ai_providers = { version = "0.2", optional = true, features = ["claude", "chatgpt", "gemini", "openai-compatible", "xai", "cloudflare"] }
-rs_ai_oauth = { version = "0.2.25", optional = true, default-features = false }
+rs_ai_oauth = { version = "0.2.29", optional = true, default-features = false }
 
 [dev-dependencies]
 axum = "0.8"

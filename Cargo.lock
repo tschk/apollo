@@ -222,7 +222,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apollo-agent"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -6536,9 +6536,9 @@ dependencies = [
 
 [[package]]
 name = "rs_ai_oauth"
-version = "0.2.28"
+version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bba972e1fa78187be5c721ff54221a84c59346c17e5d4a0f11d44c088fa4910"
+checksum = "4fe4fd3c521ee4b82e92484c75ebb59da1fb679b1e0b2c10ebec5c09003810c4"
 dependencies = [
  "oauth2",
  "reqwest",
