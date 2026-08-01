@@ -27,4 +27,4 @@ pub mod telegram;
 #[cfg(feature = "channel-whatsapp")]
 pub mod whatsapp;
 
-pub use traits::{Channel, IncomingMessage, OutgoingMessage};
+pub use traits::{Channel, Delivery, DraftChannel, IncomingMessage, OutgoingMessage};

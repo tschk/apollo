@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use apollo::agent::mode::NullChannel;
 use apollo::agent::AgentRunner;
-use apollo::channels::{Channel, IncomingMessage, OutgoingMessage};
+use apollo::channels::{
+    Channel, DraftChannel as DraftChannelTrait, IncomingMessage, OutgoingMessage,
+};
 use apollo::memory::surreal::SurrealMemory;
 use apollo::providers::traits::{ChatRequest, ChatResponse, Provider, ProviderCapabilities};
 use async_trait::async_trait;
@@ -59,15 +61,36 @@ impl Channel for DraftChannel {
         Ok(None)
     }
 
-    fn supports_draft_updates(&self) -> bool {
-        true
+    fn as_draft(&self) -> Option<&dyn DraftChannelTrait> {
+        Some(self)
     }
 
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DraftChannelTrait for DraftChannel {
     async fn send_draft(&self, _chat_id: &str, _text: &str) -> anyhow::Result<Option<String>> {
         Ok(Some("draft-1".to_string()))
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn update_draft_progress(
+        &self,
+        _chat_id: &str,
+        _message_id: &str,
+        _text: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn finalize_draft(
+        &self,
+        _chat_id: &str,
+        _message_id: &str,
+        _text: &str,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 }

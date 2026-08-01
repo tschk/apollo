@@ -17,7 +17,7 @@ use crate::agent::mode::{
     is_approval, is_rejection, AgentMode, NullChannel, PendingPlan, PendingPlans,
 };
 use crate::agent::stream::{emit, AgentStreamEvent};
-use crate::channels::{Channel, IncomingMessage, OutgoingMessage};
+use crate::channels::{Channel, Delivery, IncomingMessage, OutgoingMessage};
 use crate::cost::{CostTracker, TokenUsage};
 use crate::memory::MemoryBackend;
 use crate::plugin::{HookManager, LifecycleEvent, PluginRegistry};
@@ -604,12 +604,10 @@ impl AgentRunner {
             }
         }
 
-        let draft_id: Option<String> = if channel.supports_draft_updates() {
-            channel.send_draft(&msg.chat_id, "⏳").await.unwrap_or(None)
-        } else {
+        let delivery = Delivery::open(channel, &msg.chat_id, "⏳").await;
+        if delivery.draft().is_none() {
             let _ = channel.send_typing(&msg.chat_id).await;
-            None
-        };
+        }
 
         if msg.is_group && !crate::context::should_respond(msg) {
             tracing::debug!(
@@ -778,7 +776,7 @@ impl AgentRunner {
             let text = self
                 .run_via_rotary(&messages, &tools_snapshot, &main_model)
                 .await?;
-            return self.finish_execution(msg, &text, &draft_id, channel).await;
+            return self.finish_execution(msg, &text, &delivery).await;
         }
 
         // ═══════════════════════════════════════════════════════
@@ -924,13 +922,7 @@ impl AgentRunner {
                             "**Coding Plan**\n\n{}\n\n---\nReply **go** to execute or **cancel** to abort.",
                             p
                         );
-                        if let Some(ref mid) = draft_id {
-                            let _ = channel
-                                .finalize_draft(&msg.chat_id, mid, &plan_response)
-                                .await;
-                            return Ok(String::new());
-                        }
-                        return Ok(plan_response);
+                        return delivery.deliver(&msg.chat_id, &plan_response).await;
                     }
                 }
                 Err(e) => {
@@ -1089,11 +1081,11 @@ impl AgentRunner {
                             continue;
                         }
                         tracing::info!("Done after {} round(s) [{:?}]", round + 1, state);
-                        return self.finish_execution(msg, &text, &draft_id, channel).await;
+                        return self.finish_execution(msg, &text, &delivery).await;
                     }
                     AgentState::Summarizing | AgentState::Direct | AgentState::Planning => {
                         tracing::info!("Done after {} round(s) [{:?}]", round + 1, state);
-                        return self.finish_execution(msg, &text, &draft_id, channel).await;
+                        return self.finish_execution(msg, &text, &delivery).await;
                     }
                 }
             }
@@ -1127,7 +1119,7 @@ impl AgentRunner {
                 }
             }
 
-            if !channel.supports_draft_updates() {
+            if delivery.draft().is_none() {
                 let _ = channel.send_typing(&msg.chat_id).await;
             }
 
@@ -1179,7 +1171,7 @@ impl AgentRunner {
             .with_stream(stream.clone());
 
             for tc in &response.tool_calls {
-                if let (true, Some(ref mid)) = (channel.supports_draft_updates(), &draft_id) {
+                if let Some((draft, mid)) = delivery.draft() {
                     let hint = extract_tool_hint(&tc.name, &tc.arguments);
                     let start_line = if hint.is_empty() {
                         format!("⏳ {}\n", tc.name)
@@ -1187,7 +1179,7 @@ impl AgentRunner {
                         format!("⏳ {}: {}\n", tc.name, hint)
                     };
                     progress_lines.push(start_line.clone());
-                    let _ = channel
+                    let _ = draft
                         .update_draft_progress(&msg.chat_id, mid, &progress_lines.join(""))
                         .await;
                 }
@@ -1212,9 +1204,7 @@ impl AgentRunner {
                         match decision {
                             GuardrailDecision::Stop(reason) => {
                                 tracing::warn!("Guardrail stop: {}", reason);
-                                return self
-                                    .finish_execution(msg, &reason, &draft_id, channel)
-                                    .await;
+                                return self.finish_execution(msg, &reason, &delivery).await;
                             }
                             GuardrailDecision::Warn(warning) => {
                                 tracing::warn!("Guardrail warn: {}", warning);
@@ -1241,7 +1231,7 @@ impl AgentRunner {
                     }
                 }
 
-                if let (true, Some(ref mid)) = (channel.supports_draft_updates(), &draft_id) {
+                if let Some((draft, mid)) = delivery.draft() {
                     let done_line = if result.is_error {
                         format!("❌ {} ({}s)\n", tc.name, elapsed)
                     } else {
@@ -1253,7 +1243,7 @@ impl AgentRunner {
                     } else {
                         progress_lines.push(done_line);
                     }
-                    let _ = channel
+                    let _ = draft
                         .update_draft_progress(&msg.chat_id, mid, &progress_lines.join(""))
                         .await;
                 }
@@ -1331,13 +1321,7 @@ impl AgentRunner {
             "⚠️ Hit {} rounds ({} compactions). Break into smaller tasks?",
             self.agent_config.max_rounds, compactions_done
         );
-        if let Some(ref mid) = draft_id {
-            let _ = channel
-                .finalize_draft(&msg.chat_id, mid, &circuit_msg)
-                .await;
-            return Ok(String::new());
-        }
-        Ok(circuit_msg)
+        delivery.deliver(&msg.chat_id, &circuit_msg).await
     }
 
     /// Run one turn through the rx4 (rotary) harness instead of the legacy
@@ -1402,8 +1386,7 @@ impl AgentRunner {
         &self,
         msg: &IncomingMessage,
         text: &str,
-        draft_id: &Option<String>,
-        channel: &dyn Channel,
+        delivery: &Delivery<'_>,
     ) -> anyhow::Result<String> {
         self.persist_conversation(msg, text).await?;
 
@@ -1443,12 +1426,7 @@ impl AgentRunner {
         // Draft-capable channels already have the text on screen; returning it
         // as well would post it twice. Every other channel relies on the
         // returned string being the reply.
-        let delivered_via_draft = if let Some(ref mid) = draft_id {
-            let _ = channel.finalize_draft(&msg.chat_id, mid, text).await;
-            true
-        } else {
-            false
-        };
+        let delivered = delivery.deliver(&msg.chat_id, text).await?;
 
         #[cfg(feature = "zkr-memory")]
         if self.zkr_config.self_improve {
@@ -1459,11 +1437,7 @@ impl AgentRunner {
             }
         }
 
-        if delivered_via_draft {
-            Ok(String::new())
-        } else {
-            Ok(text.to_string())
-        }
+        Ok(delivered)
     }
 
     async fn classify_request(&self, text: &str, _model: &str) -> bool {

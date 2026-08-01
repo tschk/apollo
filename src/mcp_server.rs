@@ -157,10 +157,17 @@ impl Channel for TelegramHttpChannel {
             .map(|id| id.to_string()))
     }
 
-    fn supports_draft_updates(&self) -> bool {
-        true
+    fn as_draft(&self) -> Option<&dyn crate::channels::DraftChannel> {
+        Some(self)
     }
 
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::channels::DraftChannel for TelegramHttpChannel {
     async fn send_draft(&self, chat_id: &str, text: &str) -> anyhow::Result<Option<String>> {
         let resp = self
             .tg_post(
@@ -241,10 +248,6 @@ impl Channel for TelegramHttpChannel {
                 )
                 .await;
         }
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
 }
