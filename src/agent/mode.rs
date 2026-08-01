@@ -1,9 +1,6 @@
-//! Agent execution modes — coding mode, swarm mode, and plan approval.
+//! Agent execution modes — coding mode, swarm mode.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -128,61 +125,6 @@ impl AgentMode {
     }
 }
 
-/// A plan waiting for user approval before execution.
-#[derive(Debug, Clone)]
-pub struct PendingPlan {
-    pub plan: String,
-    pub original_message: String,
-    pub preferred_model: String,
-    pub created_at: Instant,
-}
-
-impl PendingPlan {
-    const TTL: Duration = Duration::from_secs(30 * 60); // 30 minutes
-
-    pub fn is_expired(&self) -> bool {
-        self.created_at.elapsed() > Self::TTL
-    }
-}
-
-pub type PendingPlans = Arc<Mutex<HashMap<String, PendingPlan>>>;
-
-/// Returns true if `text` is an explicit approval ("go", "yes", "ok", etc.)
-pub fn is_approval(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    matches!(
-        lower.as_str(),
-        "yes"
-            | "y"
-            | "go"
-            | "ok"
-            | "okay"
-            | "proceed"
-            | "approve"
-            | "do it"
-            | "looks good"
-            | "lgtm"
-            | "go ahead"
-            | "continue"
-            | "run it"
-            | "execute"
-    ) || lower.starts_with("yes,")
-        || lower.starts_with("go ahead")
-        || lower.starts_with("looks good")
-        || lower.starts_with("lgtm")
-}
-
-/// Returns true if `text` is an explicit rejection ("no", "cancel", "abort", etc.)
-pub fn is_rejection(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    matches!(
-        lower.as_str(),
-        "no" | "n" | "nope" | "cancel" | "abort" | "stop" | "nevermind" | "never mind"
-    ) || lower.starts_with("no,")
-        || lower.starts_with("cancel")
-        || lower.starts_with("stop ")
-}
-
 /// No-op channel for headless swarm worker agents.
 /// All operations are discarded — only the return value of `handle_message` is used.
 pub struct NullChannel {
@@ -287,83 +229,5 @@ mod tests {
             agent_mode_from_permission_profile("unknown-profile"),
             AgentMode::Auto
         ));
-    }
-
-    #[test]
-    fn test_is_approval() {
-        // Exact matches
-        assert!(is_approval("yes"));
-        assert!(is_approval("y"));
-        assert!(is_approval("go"));
-        assert!(is_approval("ok"));
-        assert!(is_approval("okay"));
-        assert!(is_approval("proceed"));
-        assert!(is_approval("approve"));
-        assert!(is_approval("do it"));
-        assert!(is_approval("looks good"));
-        assert!(is_approval("lgtm"));
-        assert!(is_approval("go ahead"));
-        assert!(is_approval("continue"));
-        assert!(is_approval("run it"));
-        assert!(is_approval("execute"));
-
-        // Case insensitivity
-        assert!(is_approval("YES"));
-        assert!(is_approval("OkAy"));
-        assert!(is_approval("PROCEED"));
-        assert!(is_approval("LGTM"));
-
-        // Leading/trailing whitespace
-        assert!(is_approval("  yes  "));
-        assert!(is_approval("\tgo ahead\n"));
-
-        // Prefix matches
-        assert!(is_approval("yes, do it"));
-        assert!(is_approval("go ahead and run"));
-        assert!(is_approval("looks good to me"));
-        assert!(is_approval("lgtm, go for it"));
-
-        // Negative cases
-        assert!(!is_approval("no"));
-        assert!(!is_approval("yep"));
-        assert!(!is_approval("sure"));
-        assert!(!is_approval(""));
-        assert!(!is_approval("   "));
-        assert!(!is_approval("go ahea")); // not an exact match or prefix
-    }
-
-    #[test]
-    fn test_is_rejection() {
-        // Exact matches
-        assert!(is_rejection("no"));
-        assert!(is_rejection("n"));
-        assert!(is_rejection("nope"));
-        assert!(is_rejection("cancel"));
-        assert!(is_rejection("abort"));
-        assert!(is_rejection("stop"));
-        assert!(is_rejection("nevermind"));
-        assert!(is_rejection("never mind"));
-
-        // Case insensitivity
-        assert!(is_rejection("NO"));
-        assert!(is_rejection("Cancel"));
-        assert!(is_rejection("ABORT"));
-        assert!(is_rejection("STOP"));
-
-        // Leading/trailing whitespace
-        assert!(is_rejection("  no  "));
-        assert!(is_rejection("\tabort\n"));
-
-        // Prefix matches
-        assert!(is_rejection("no, don't do that"));
-        assert!(is_rejection("cancel the operation"));
-        assert!(is_rejection("stop executing"));
-
-        // Negative cases
-        assert!(!is_rejection("yes"));
-        assert!(!is_rejection("not really"));
-        assert!(!is_rejection(""));
-        assert!(!is_rejection("   "));
-        assert!(!is_rejection("stopit")); // starts_with("stop ") has a space
     }
 }

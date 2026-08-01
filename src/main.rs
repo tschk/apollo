@@ -327,7 +327,7 @@ enum ConfigAction {
     /// Print the effective configuration with secrets masked
     List,
 
-    /// Print one value by dotted path (e.g. `agent.engine`)
+    /// Print one value by dotted path (e.g. `agent.max_rounds`)
     Get {
         /// Dotted config key
         key: String,
@@ -971,7 +971,7 @@ async fn main() -> anyhow::Result<()> {
 
             if let Some(port) = port {
                 let system_prompt = cfg.system_prompt.clone();
-                let mut runner = apollo::agent::loop_runner::AgentRunner::new(
+                let mut runner = apollo::agent::AgentRunner::new(
                     Arc::clone(&provider),
                     tools.clone(),
                     Arc::clone(&memory),

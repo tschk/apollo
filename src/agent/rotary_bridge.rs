@@ -11,11 +11,9 @@
 //!   system prompt, and providing a `run_prompt` method that the outer
 //!   apollo shell (channels, swarm, cron, heartbeat) can call.
 //!
-//! The bridge is designed to be incremental. The existing `AgentRunner` loop
-//! remains available; this bridge provides an alternative execution path that
-//! delegates the core agent loop to rx4 while keeping apollo's unique
-//! features (channels, swarm, cron, heartbeat, autonomous mode, plugins, MCP)
-//! as the outer shell.
+//! The bridge delegates the core agent loop to rx4 while keeping apollo's
+//! unique features (channels, swarm, cron, heartbeat, autonomous mode,
+//! plugins, MCP) as the outer shell.
 
 use std::sync::Arc;
 
@@ -29,15 +27,13 @@ use crate::plugin::{HookManager, LifecycleEvent, PluginRegistry};
 use crate::providers::{ChatMessage, ChatRequest, Provider as UnthinkclawProvider};
 use crate::tools::{Tool as UnthinkclawTool, ToolResult as UnthinkclawToolResult, ToolSpec};
 
-/// Everything a tool call must be wrapped in, for either engine.
+/// Everything a tool call must be wrapped in.
 ///
-/// Both engines run the same sequence around every tool: the
-/// `BeforeToolCall` lifecycle event, a `ToolStart` stream event, plugin then
-/// policy pre-checks, execution, the post hooks, the `AfterToolCall`
-/// lifecycle event, plugin notification, and a `ToolEnd` stream event. That
-/// sequence lives once, in `execute_tool_with_hooks`; this type carries the
-/// collaborators it needs so a hook that fires under `agent.engine =
-/// "legacy"` fires identically under `"rx4"`.
+/// The same sequence runs around every tool: the `BeforeToolCall` lifecycle
+/// event, a `ToolStart` stream event, plugin then policy pre-checks,
+/// execution, the post hooks, the `AfterToolCall` lifecycle event, plugin
+/// notification, and a `ToolEnd` stream event. That sequence lives once, in
+/// `execute_tool_with_hooks`; this type carries the collaborators it needs.
 #[derive(Clone, Default)]
 pub struct ToolHookContext {
     hooks: Vec<Arc<dyn ToolHook>>,
@@ -883,10 +879,10 @@ mod tests {
         (ctx, seen, rx)
     }
 
-    /// Both engines must produce the same hooks and stream events for a tool
-    /// call. The legacy loop and the rx4 registry now reach the tool through
-    /// the same `execute_tool_with_hooks`; this fails if either side stops
-    /// doing so, which is how rx4 previously lost `BeforeToolCall` and the
+    /// The rx4 registry closure and a direct call must produce the same hooks
+    /// and stream events for a tool call. Both reach the tool through
+    /// `execute_tool_with_hooks`; this fails if either side stops doing so,
+    /// which is how rx4 previously lost `BeforeToolCall` and the
     /// `ToolStart`/`ToolEnd` progress events.
     #[tokio::test]
     async fn both_engines_emit_the_same_hooks_and_events() {
@@ -908,7 +904,7 @@ mod tests {
         let rx4_events = rx4_seen.lock().unwrap().clone();
         let rx4_stream_events = stream_labels(&mut rx4_stream);
 
-        // legacy: the loop calls the shared path directly.
+        // Direct: the shared path called directly.
         let (ctx, legacy_seen, mut legacy_stream) = recording_context();
         execute_tool_with_hooks(&ctx, "exec", args, Some(&tool)).await;
         let legacy_events = legacy_seen.lock().unwrap().clone();
@@ -916,11 +912,11 @@ mod tests {
 
         assert_eq!(
             rx4_events, legacy_events,
-            "the engines disagree on lifecycle hooks"
+            "the paths disagree on lifecycle hooks"
         );
         assert_eq!(
             rx4_stream_events, legacy_stream_events,
-            "the engines disagree on stream events"
+            "the paths disagree on stream events"
         );
         assert_eq!(legacy_events, vec!["before:exec", "after:exec"]);
         assert_eq!(

@@ -23,7 +23,11 @@ pub struct BuildRunnerTool {
 }
 
 impl BuildRunnerTool {
-    pub fn new(workspace: PathBuf, config: BuildRunnerConfig, policy: Arc<ExecutionPolicy>) -> Self {
+    pub fn new(
+        workspace: PathBuf,
+        config: BuildRunnerConfig,
+        policy: Arc<ExecutionPolicy>,
+    ) -> Self {
         Self {
             workspace,
             config,
@@ -96,13 +100,12 @@ impl Tool for BuildRunnerTool {
             return ExecutionPolicy::deny("Build execution is disabled by policy");
         }
 
-        let args: BuildRunnerArgs =
-            serde_json::from_str(arguments).unwrap_or(BuildRunnerArgs {
-                action: String::new(),
-                package: String::new(),
-                timeout: None,
-                max_retries: None,
-            });
+        let args: BuildRunnerArgs = serde_json::from_str(arguments).unwrap_or(BuildRunnerArgs {
+            action: String::new(),
+            package: String::new(),
+            timeout: None,
+            max_retries: None,
+        });
 
         let mut config = self.config.clone();
         if !args.package.is_empty() {
@@ -128,7 +131,11 @@ impl Tool for BuildRunnerTool {
                 if r.success {
                     ToolResult::success(r.summary())
                 } else {
-                    ToolResult::error(format!("{}\n\n--- raw output ---\n{}", r.summary(), r.raw_output))
+                    ToolResult::error(format!(
+                        "{}\n\n--- raw output ---\n{}",
+                        r.summary(),
+                        r.raw_output
+                    ))
                 }
             }
             "test" => {
@@ -136,7 +143,11 @@ impl Tool for BuildRunnerTool {
                 if r.success {
                     ToolResult::success(r.summary())
                 } else {
-                    ToolResult::error(format!("{}\n\n--- raw output ---\n{}", r.summary(), r.raw_output))
+                    ToolResult::error(format!(
+                        "{}\n\n--- raw output ---\n{}",
+                        r.summary(),
+                        r.raw_output
+                    ))
                 }
             }
             "cycle" => {
@@ -161,7 +172,10 @@ impl Tool for BuildRunnerTool {
                     ToolResult::success(build.summary())
                 }
             }
-            other => ToolResult::error(format!("Unknown action: {} (use build, test, or cycle)", other)),
+            other => ToolResult::error(format!(
+                "Unknown action: {} (use build, test, or cycle)",
+                other
+            )),
         };
 
         Ok(output)

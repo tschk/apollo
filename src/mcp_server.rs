@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-use crate::agent::loop_runner::AgentRunner;
+use crate::agent::AgentRunner;
 use crate::channels::traits::{Channel, IncomingMessage, OutgoingMessage};
 use crate::tools::traits::{Tool, ToolSpec};
 

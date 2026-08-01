@@ -7,7 +7,7 @@ Lean copies for `main` — no hosted control plane, no 8-type memory taxonomy.
 | Idea | Where |
 |------|--------|
 | Memory brief (open loops + time windows) | `src/memory/brief.rs`, KV namespace `brief` |
-| Recall gate → file + KV snippets | `src/memory/recall.rs`, `loop_runner` |
+| Recall gate → file + KV snippets | `src/memory/recall.rs`, agent loop |
 | Principal → merged history across channels | `src/memory/principal.rs`, `config.memory.principal_id` |
 | Session-end daily note | `src/memory/session_note.rs`, `plugin` lifecycle hook |
 | Channel ingress allowlist (opt-in) | `config.channel.allowed_*`, Telegram filter |

@@ -113,10 +113,7 @@ pub async fn build_state(runner: &AgentRunner, chat_id: &str) -> StateBody {
     StateBody {
         model: runner.get_model(),
         provider: runner.provider_name().to_string(),
-        engine: match runner.agent_config.engine() {
-            crate::config::AgentEngine::Rx4 => "rx4".into(),
-            crate::config::AgentEngine::Legacy => "legacy".into(),
-        },
+        engine: "rx4".into(),
         mode: mode_name(&runner.get_mode()).into(),
         cost_usd: summary.total_cost,
         total_tokens: summary.total_tokens,
@@ -417,9 +414,9 @@ async fn model_handler(
 
 /// There is no `/v1/compact`: compaction in apollo is turn-local.
 ///
-/// `AgentRunner::compact_messages` rewrites the in-flight `Vec<ChatMessage>`
-/// of a single turn when it outgrows `agent.max_context_chars`; it never
-/// touches the conversation store, and stored history is re-read as the last
+/// rx4 auto-compacts the in-flight message buffer when it exceeds
+/// `agent.auto_compact_after` estimated tokens; it never touches the
+/// conversation store, and stored history is re-read as the last
 /// `max_history_messages` rows on every turn. Compacting a chat server-side
 /// would therefore change nothing the next turn observes.
 #[derive(Debug, Serialize)]
@@ -621,7 +618,7 @@ mod tests {
         let state = StateBody {
             model: "claude-sonnet-4-5".into(),
             provider: "anthropic".into(),
-            engine: "legacy".into(),
+            engine: "rx4".into(),
             mode: "auto".into(),
             cost_usd: 0.25,
             total_tokens: 1234,

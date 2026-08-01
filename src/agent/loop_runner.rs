@@ -1,7 +1,10 @@
 //! Agent loop — the core execution engine.
 //! Processes incoming messages, calls LLM, executes tools, sends responses.
-//! Supports progress callbacks, self-healing, guardrails, compaction, and
-//! lifecycle hooks.
+//! Supports progress callbacks, lifecycle hooks, and trajectory recording.
+//!
+//! The loop itself is owned by the rx4 (rotary) harness; apollo owns everything
+//! around it — system prompt, skill injection, conversation history, memory
+//! recall, tool set, persistence, and lifecycle hooks.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,47 +14,18 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
-use crate::agent::compaction::{Compactor, ContextInfo, DefaultCompactor};
 use crate::agent::hooks::ToolHook;
-use crate::agent::mode::{
-    is_approval, is_rejection, AgentMode, NullChannel, PendingPlan, PendingPlans,
-};
+use crate::agent::mode::{AgentMode, NullChannel};
 use crate::agent::stream::{emit, AgentStreamEvent};
 use crate::channels::{Channel, Delivery, IncomingMessage, OutgoingMessage};
-use crate::cost::{CostTracker, TokenUsage};
+use crate::cost::CostTracker;
 use crate::memory::MemoryBackend;
 use crate::plugin::{HookManager, LifecycleEvent, PluginRegistry};
-use crate::providers::{ChatMessage, ChatRequest, Provider};
+use crate::providers::{ChatMessage, Provider};
 use crate::skills;
-use crate::text::{truncate_chars, truncate_chars_counted};
-use crate::tools::guardrails::{GuardrailDecision, ToolGuardrails};
+use crate::text::truncate_chars;
 use crate::tools::Tool;
 use crate::trajectory::Trajectory;
-
-/// Warn the LLM after this many identical tool calls (guardrails handle this now)
-const LOOP_WARN_THRESHOLD: usize = 5;
-/// Hard stop after this many identical consecutive tool calls (guardrails handle this now)
-const LOOP_BREAK_THRESHOLD: usize = 8;
-
-/// Agent execution state machine
-#[derive(Debug, Clone, PartialEq)]
-enum AgentState {
-    Planning,
-    Executing,
-    Summarizing,
-    Direct,
-}
-
-/// Excerpt a message for the compaction summary prompt.
-///
-/// Truncation is char-based: a byte slice would panic on multibyte content.
-fn compaction_excerpt(content: &str) -> String {
-    if content.chars().count() > 500 {
-        format!("{}...", truncate_chars(content, 500))
-    } else {
-        content.to_string()
-    }
-}
 
 pub struct AgentRunner {
     provider: Arc<dyn Provider>,
@@ -68,14 +42,8 @@ pub struct AgentRunner {
     mode: Arc<std::sync::RwLock<AgentMode>>,
     #[cfg(feature = "swarm")]
     pub swarm: Arc<std::sync::RwLock<Option<Arc<crate::swarm::SwarmCoordinator>>>>,
-    pending_plans: PendingPlans,
     hooks: Arc<std::sync::RwLock<Vec<Arc<dyn ToolHook>>>>,
     stream_sink: Arc<std::sync::RwLock<Option<crate::agent::stream::AgentStreamTx>>>,
-    // ── New integrations ──
-    /// Per-chat guardrail state
-    guardrails: Arc<RwLock<HashMap<String, ToolGuardrails>>>,
-    /// Pluggable compactor (default: DefaultCompactor)
-    compactor: Option<Arc<dyn Compactor>>,
     /// Lifecycle hook manager (from plugin system)
     hook_manager: Arc<HookManager>,
     /// Plugin registry for lifecycle events
@@ -116,11 +84,8 @@ impl AgentRunner {
             mode: Arc::new(std::sync::RwLock::new(AgentMode::default())),
             #[cfg(feature = "swarm")]
             swarm: Arc::new(std::sync::RwLock::new(None)),
-            pending_plans: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
             stream_sink: Arc::new(std::sync::RwLock::new(None)),
-            guardrails: Arc::new(RwLock::new(HashMap::new())),
-            compactor: Some(Arc::new(DefaultCompactor::new())),
             hook_manager: Arc::new(HookManager::new()),
             plugin_registry: Arc::new(RwLock::new(PluginRegistry::new())),
             trajectories: Arc::new(RwLock::new(HashMap::new())),
@@ -154,9 +119,6 @@ impl AgentRunner {
     }
 
     pub fn with_config(mut self, config: crate::config::AgentConfig) -> Self {
-        if config.engine() == crate::config::AgentEngine::Rx4 {
-            tracing::info!("agent engine: rx4 (rotary harness owns the loop)");
-        }
         self.agent_config = config;
         self
     }
@@ -168,11 +130,6 @@ impl AgentRunner {
 
     pub async fn with_plugin_registry(self, registry: PluginRegistry) -> Self {
         *self.plugin_registry.write().await = registry;
-        self
-    }
-
-    pub fn with_compactor(mut self, compactor: Arc<dyn Compactor>) -> Self {
-        self.compactor = Some(compactor);
         self
     }
 
@@ -583,14 +540,6 @@ impl AgentRunner {
             ))
             .await;
 
-        // Initialize per-chat guardrails
-        {
-            let mut gr = self.guardrails.write().await;
-            gr.entry(msg.chat_id.clone()).or_insert_with(|| {
-                ToolGuardrails::new(crate::tools::guardrails::GuardrailConfig::default())
-            });
-        }
-
         // Initialize per-chat trajectory
         {
             let mut trajs = self.trajectories.write().await;
@@ -617,35 +566,8 @@ impl AgentRunner {
             return Ok(String::new());
         }
 
-        let (effective_text, resume_plan, resume_model) = {
-            let mut plans = self.pending_plans.lock().unwrap();
-            if let Some(pending) = plans.get(&msg.chat_id) {
-                if pending.is_expired() {
-                    plans.remove(&msg.chat_id);
-                    (msg.text.clone(), None, None)
-                } else if is_approval(&msg.text) {
-                    let pending = plans.remove(&msg.chat_id).unwrap();
-                    tracing::info!("Plan approved for chat_id={}", msg.chat_id);
-                    (
-                        pending.original_message,
-                        Some(pending.plan),
-                        Some(pending.preferred_model),
-                    )
-                } else if is_rejection(&msg.text) {
-                    plans.remove(&msg.chat_id);
-                    return Ok("Plan cancelled. What would you like to do instead?".to_string());
-                } else {
-                    plans.remove(&msg.chat_id);
-                    (msg.text.clone(), None, None)
-                }
-            } else {
-                (msg.text.clone(), None, None)
-            }
-        };
-        let resuming_from_plan = resume_plan.is_some();
-
+        let effective_text = msg.text.clone();
         let mode = self.get_mode();
-        let hooks_snapshot: Vec<Arc<dyn ToolHook>> = self.hooks.read().unwrap().clone();
 
         // ── Build messages ──
 
@@ -763,8 +685,6 @@ impl AgentRunner {
         }
         messages.push(ChatMessage::user(&user_turn));
 
-        let tool_specs: Vec<crate::tools::ToolSpec> =
-            self.tools.read().await.iter().map(|t| t.spec()).collect();
         let tools_snapshot: Vec<Arc<dyn Tool>> = self.tools.read().await.iter().cloned().collect();
         let main_model = model
             .map(str::to_string)
@@ -772,560 +692,13 @@ impl AgentRunner {
 
         // ── rx4 engine ──
         // Context assembly above stays apollo's; from here rx4 owns the loop.
-        if self.agent_config.engine() == crate::config::AgentEngine::Rx4 {
-            let text = self
-                .run_via_rotary(&messages, &tools_snapshot, &main_model)
-                .await?;
-            return self.finish_execution(msg, &text, &delivery).await;
-        }
-
-        // ═══════════════════════════════════════════════════════
-        // STATE MACHINE: Planning → Executing → Summarizing
-        // ═══════════════════════════════════════════════════════
-
-        let needs_tools = if resuming_from_plan {
-            true
-        } else {
-            self.classify_request(&effective_text, &main_model).await
-        };
-        let mut state = if needs_tools {
-            AgentState::Planning
-        } else {
-            AgentState::Direct
-        };
-        tracing::info!("Initial state: {:?}", state);
-
-        let mut _plan: Option<String> = None;
-        let mut execution_model = main_model.clone();
-
-        if let Some(ref plan) = resume_plan {
-            messages.push(ChatMessage::system(format!(
-                "APPROVED EXECUTION PLAN (follow these steps):\n{}",
-                plan
-            )));
-            execution_model = resume_model.unwrap_or_else(|| main_model.clone());
-            state = AgentState::Executing;
-            tracing::info!("Resuming with approved plan, model={}", execution_model);
-        } else if state == AgentState::Planning {
-            let swarm_model_choice = if mode.is_swarm() {
-                "   - SWARM: for tasks that can be parallelized across multiple independent agents\n"
-            } else {
-                ""
-            };
-            let plan_prompt = format!(
-                "You are a planning assistant. Analyze this request and output TWO things:\n\n\
-                1. MODEL_CHOICE: Pick one execution model:\n\
-                   - SONNET: for general tasks, file ops, web, simple edits, queries\n\
-                   - OPUS: for complex coding, architecture, multi-file refactors, debugging hard bugs\n\
-                   - VIBEMANIA: for building features, creating projects, coding tasks that need autonomous agents\n\
-                {swarm_choice}\
-                2. PLAN: A brief numbered step-by-step plan.\n\
-                   - If VIBEMANIA: the plan should be a single step: delegate to vibemania/subspace with the goal\n\
-                   - If SWARM: the plan should list each independent subtask for parallel agents\n\
-                   - If SONNET/OPUS: list what tools to use and in what order\n\n\
-                Format your response EXACTLY like:\n\
-                MODEL_CHOICE: SONNET\n\
-                PLAN:\n\
-                1. step one\n\
-                2. step two\n\n\
-                Available tools: {tools}\n\n\
-                User request: {request}",
-                swarm_choice = swarm_model_choice,
-                tools = tool_specs.iter().map(|t| format!("{} ({})", t.name, t.description.chars().take(50).collect::<String>())).collect::<Vec<_>>().join(", "),
-                request = effective_text
-            );
-
-            let plan_messages = [ChatMessage::user(&plan_prompt)];
-            let plan_request = ChatRequest {
-                messages: &plan_messages,
-                tools: None,
-                model: &self.agent_config.fast_model,
-                temperature: 0.8,
-                max_tokens: Some(500),
-            };
-
-            match self.provider.chat(&plan_request).await {
-                Ok(resp) => {
-                    let p = resp.text.unwrap_or_default();
-                    tracing::info!("Plan: {}", truncate_chars(&p, 300));
-
-                    if let Some(usage) = &resp.usage {
-                        let _ = self
-                            .cost_tracker
-                            .record(
-                                &self.agent_config.fast_model,
-                                TokenUsage {
-                                    input_tokens: usage.input_tokens as usize,
-                                    output_tokens: usage.output_tokens as usize,
-                                    total_tokens: (usage.input_tokens + usage.output_tokens)
-                                        as usize,
-                                },
-                            )
-                            .await;
-                    }
-
-                    let p_upper = p.to_uppercase();
-                    if p_upper.contains("MODEL_CHOICE: OPUS")
-                        || p_upper.contains("MODEL_CHOICE:OPUS")
-                    {
-                        execution_model = self.agent_config.heavy_model.clone();
-                        tracing::info!("Planner chose OPUS for execution");
-                    } else if p_upper.contains("MODEL_CHOICE: SWARM")
-                        || p_upper.contains("MODEL_CHOICE:SWARM")
-                    {
-                        tracing::info!("Planner chose SWARM — routing to coding_swarm tool");
-                        messages.push(ChatMessage::system(
-                            "IMPORTANT: This task can be parallelized. Use the `coding_swarm` tool \
-                            to execute subtasks in parallel agents. \n\
-                            Decompose the original goal into a list of independent tasks for the swarm."
-                                .to_string(),
-                        ));
-                    } else if p_upper.contains("MODEL_CHOICE: VIBEMANIA")
-                        || p_upper.contains("MODEL_CHOICE:VIBEMANIA")
-                    {
-                        tracing::info!("Planner chose VIBEMANIA — routing to vibemania tool");
-                        messages.push(ChatMessage::system(
-                            "IMPORTANT: This is a complex coding task. Use the `vibemania` tool \
-                            to handle this autonomously. \n\
-                            Do NOT write code yourself — delegate to vibemania."
-                                .to_string(),
-                        ));
-                    }
-
-                    if mode.prefer_heavy_model() && execution_model == main_model {
-                        execution_model = self.agent_config.heavy_model.clone();
-                        tracing::info!("Coding mode: upgraded to heavy model");
-                    }
-
-                    messages.push(ChatMessage::system(format!(
-                        "EXECUTION PLAN (follow these steps):\n{}",
-                        p
-                    )));
-                    _plan = Some(p.clone());
-                    state = AgentState::Executing;
-
-                    if mode.plan_approval() {
-                        {
-                            let mut plans = self.pending_plans.lock().unwrap();
-                            plans.retain(|_, v| !v.is_expired());
-                            plans.insert(
-                                msg.chat_id.clone(),
-                                PendingPlan {
-                                    plan: p.clone(),
-                                    original_message: effective_text.clone(),
-                                    preferred_model: execution_model.clone(),
-                                    created_at: std::time::Instant::now(),
-                                },
-                            );
-                        }
-                        let plan_response = format!(
-                            "**Coding Plan**\n\n{}\n\n---\nReply **go** to execute or **cancel** to abort.",
-                            p
-                        );
-                        return delivery.deliver(&msg.chat_id, &plan_response).await;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Planning failed ({}), falling back to direct", e);
-                    state = AgentState::Direct;
-                }
-            }
-        }
-
-        // ═══════════════════════════════════════════════════════
-        // EXECUTION LOOP (with self-healing + guardrails)
-        // ═══════════════════════════════════════════════════════
-
-        let mut tool_call_history: Vec<String> = Vec::new();
-        let mut compactions_done: usize = 0;
-        // Self-healing tracking: per-tool consecutive error count for this execution
-        let mut healing_attempts_left = 3;
-
-        for round in 0..self.agent_config.max_rounds {
-            // ── Steering queue ──
-            {
-                let mut queue = self.steering_queue.lock().unwrap();
-                if !queue.is_empty() {
-                    for steer_msg in queue.drain(..) {
-                        tracing::info!(
-                            chars = steer_msg.chars().count(),
-                            "Steering message queued"
-                        );
-                        messages.push(ChatMessage::user(format!(
-                            "⚡ STEERING — new instruction from user (prioritize this): {}",
-                            steer_msg
-                        )));
-                    }
-                }
-            }
-
-            // ── Context budget check with compactor ──
-            let context_chars: usize = messages.iter().map(|m| m.content.len()).sum();
-            let max_chars = self.agent_config.max_context_chars;
-            if let Some(ref compactor) = self.compactor {
-                let info = ContextInfo {
-                    message_count: messages.len(),
-                    total_chars: context_chars,
-                    max_chars,
-                    compactions_done,
-                };
-                if compactor.should_compress(&info) {
-                    tracing::info!(
-                        "Compacting at round {} ({} chars, {} msgs)",
-                        round + 1,
-                        context_chars,
-                        messages.len()
-                    );
-                    let result = compactor.compress(&messages, Some(&effective_text)).await;
-                    if result.did_compact {
-                        messages = result.messages;
-                        compactions_done += 1;
-                    }
-                }
-            } else {
-                // Fallback: original inline compaction
-                if context_chars > max_chars {
-                    tracing::info!(
-                        "Compacting at round {} ({} chars)",
-                        round + 1,
-                        context_chars
-                    );
-                    messages = self.compact_messages(messages, &effective_text).await?;
-                    compactions_done += 1;
-                }
-            }
-
-            // ── Select model ──
-            let (model, temperature) = match state {
-                AgentState::Planning => (self.agent_config.fast_model.clone(), 0.8),
-                AgentState::Executing => (execution_model.clone(), 0.2),
-                AgentState::Summarizing => (self.agent_config.fast_model.clone(), 0.7),
-                AgentState::Direct => (main_model.clone(), 0.7),
-            };
-
-            tracing::info!(
-                "[{:?}] round {} {} msgs, ~{} chars, model={}",
-                state,
-                round + 1,
-                messages.len(),
-                messages.iter().map(|m| m.content.len()).sum::<usize>(),
-                model
-            );
-
-            // ── LLM call ──
-            let request = ChatRequest {
-                messages: &messages,
-                tools: if tool_specs.is_empty() || state == AgentState::Summarizing {
-                    None
-                } else {
-                    Some(&tool_specs)
-                },
-                model: &model,
-                temperature,
-                max_tokens: Some(8192),
-            };
-
-            let mut response = self.provider.chat(&request).await?;
-
-            // Providers without native tool calling emit calls as <tool_call>
-            // XML inside the text. Recover them so the rest of the loop treats
-            // them like native calls.
-            if !response.has_tool_calls() {
-                let (text, recovered) =
-                    crate::streaming_parser::recover_tool_calls(response.text_or_empty());
-                if !recovered.is_empty() {
-                    tracing::debug!("recovered {} XML tool call(s) from text", recovered.len());
-                    response.text = (!text.trim().is_empty()).then_some(text);
-                    response.tool_calls = recovered
-                        .into_iter()
-                        .map(|c| crate::providers::ToolCall {
-                            id: c.id,
-                            name: c.name,
-                            arguments: c.arguments,
-                        })
-                        .collect();
-                }
-            }
-
-            if let Some(usage) = &response.usage {
-                let _ = self
-                    .cost_tracker
-                    .record(
-                        &model,
-                        TokenUsage {
-                            input_tokens: usage.input_tokens as usize,
-                            output_tokens: usage.output_tokens as usize,
-                            total_tokens: (usage.input_tokens + usage.output_tokens) as usize,
-                        },
-                    )
-                    .await;
-            }
-
-            if !response.has_tool_calls() {
-                let text = response.text.unwrap_or_default();
-
-                match state {
-                    AgentState::Executing => {
-                        if round >= 3 {
-                            tracing::info!(
-                                "Execution done after {} rounds, summarizing",
-                                round + 1
-                            );
-                            state = AgentState::Summarizing;
-                            messages.push(ChatMessage::assistant(text));
-                            messages.push(ChatMessage::user(
-                                "Now provide a clean, concise final response to the user. \
-                                Summarize what you did and the results. Be brief and direct."
-                                    .to_string(),
-                            ));
-                            continue;
-                        }
-                        tracing::info!("Done after {} round(s) [{:?}]", round + 1, state);
-                        return self.finish_execution(msg, &text, &delivery).await;
-                    }
-                    AgentState::Summarizing | AgentState::Direct | AgentState::Planning => {
-                        tracing::info!("Done after {} round(s) [{:?}]", round + 1, state);
-                        return self.finish_execution(msg, &text, &delivery).await;
-                    }
-                }
-            }
-
-            // ── TOOL EXECUTION ──
-
-            // Legacy loop detection (backup for guardrails)
-            for tc in &response.tool_calls {
-                let hash = format!("{}:{}", tc.name, truncate_chars(&tc.arguments, 200));
-                tool_call_history.push(hash);
-            }
-            if tool_call_history.len() >= LOOP_BREAK_THRESHOLD {
-                let last = &tool_call_history[tool_call_history.len() - 1];
-                let consecutive = tool_call_history
-                    .iter()
-                    .rev()
-                    .take_while(|h| *h == last)
-                    .count();
-                if consecutive >= LOOP_BREAK_THRESHOLD {
-                    tracing::warn!("Loop: {} identical calls, breaking", consecutive);
-                    return Ok(format!(
-                        "Loop detected ({} identical {} calls). Stopping.",
-                        consecutive, response.tool_calls[0].name
-                    ));
-                }
-                if consecutive >= LOOP_WARN_THRESHOLD {
-                    messages.push(ChatMessage::user(
-                        "WARNING: You're repeating tool calls. Stop and answer with what you have."
-                            .to_string(),
-                    ));
-                }
-            }
-
-            if delivery.draft().is_none() {
-                let _ = channel.send_typing(&msg.chat_id).await;
-            }
-
-            // Build assistant tool_use message
-            {
-                let mut content_blocks: Vec<serde_json::Value> = Vec::new();
-                if let Some(text) = &response.text {
-                    if !text.is_empty() {
-                        content_blocks.push(serde_json::json!({
-                            "type": "text", "text": text,
-                        }));
-                    }
-                }
-                for tc in &response.tool_calls {
-                    content_blocks.push(serde_json::json!({
-                        "type": "tool_use",
-                        "id": &tc.id,
-                        "name": &tc.name,
-                        "input": serde_json::from_str::<serde_json::Value>(&tc.arguments).unwrap_or_default(),
-                    }));
-                }
-                messages.push(ChatMessage {
-                    role: "assistant_tool_use".to_string(),
-                    content: String::new(),
-                    tool_use_id: Some(serde_json::to_string(&content_blocks).unwrap_or_default()),
-                });
-            }
-
-            tracing::info!(
-                "Tools: {}",
-                response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| tc.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-
-            let mut progress_lines: Vec<String> = Vec::new();
-            let mut tool_errors: Vec<String> = Vec::new();
-
-            // One hook/event path for both engines — see
-            // `rotary_bridge::execute_tool_with_hooks`.
-            let hook_ctx = crate::agent::rotary_bridge::ToolHookContext::new(
-                hooks_snapshot.clone(),
-                Some(Arc::clone(&self.plugin_registry)),
-            )
-            .with_hook_manager(Arc::clone(&self.hook_manager))
-            .with_stream(stream.clone());
-
-            for tc in &response.tool_calls {
-                if let Some((draft, mid)) = delivery.draft() {
-                    let hint = extract_tool_hint(&tc.name, &tc.arguments);
-                    let start_line = if hint.is_empty() {
-                        format!("⏳ {}\n", tc.name)
-                    } else {
-                        format!("⏳ {}: {}\n", tc.name, hint)
-                    };
-                    progress_lines.push(start_line.clone());
-                    let _ = draft
-                        .update_draft_progress(&msg.chat_id, mid, &progress_lines.join(""))
-                        .await;
-                }
-
-                let started = std::time::Instant::now();
-
-                // ── Run tool through the shared hook/event path ──
-                let result = crate::agent::rotary_bridge::execute_tool_with_hooks(
-                    &hook_ctx,
-                    &tc.name,
-                    &tc.arguments,
-                    tools_snapshot.iter().find(|t| t.name() == tc.name),
-                )
-                .await;
-
-                // ── Guardrails ──
-                {
-                    let mut gr = self.guardrails.write().await;
-                    if let Some(g) = gr.get_mut(&msg.chat_id) {
-                        let decision =
-                            g.observe(&tc.name, &tc.arguments, &result.output, result.is_error);
-                        match decision {
-                            GuardrailDecision::Stop(reason) => {
-                                tracing::warn!("Guardrail stop: {}", reason);
-                                return self.finish_execution(msg, &reason, &delivery).await;
-                            }
-                            GuardrailDecision::Warn(warning) => {
-                                tracing::warn!("Guardrail warn: {}", warning);
-                                messages.push(ChatMessage::user(warning));
-                            }
-                            GuardrailDecision::Proceed => {}
-                        }
-                    }
-                }
-
-                let elapsed = started.elapsed().as_secs();
-
-                // ── Track trajectory ──
-                {
-                    let mut trajs = self.trajectories.write().await;
-                    if let Some(t) = trajs.get_mut(&msg.chat_id) {
-                        t.record_tool_step(
-                            response.text.clone(),
-                            tc.name.clone(),
-                            crate::redaction::redact_tool_payload(&tc.name, &tc.arguments),
-                            crate::redaction::redact_tool_payload(&tc.name, &result.output),
-                            !result.is_error,
-                        );
-                    }
-                }
-
-                if let Some((draft, mid)) = delivery.draft() {
-                    let done_line = if result.is_error {
-                        format!("❌ {} ({}s)\n", tc.name, elapsed)
-                    } else {
-                        format!("✅ {} ({}s)\n", tc.name, elapsed)
-                    };
-                    let prefix = format!("⏳ {}", tc.name);
-                    if let Some(pos) = progress_lines.iter().rposition(|l| l.starts_with(&prefix)) {
-                        progress_lines[pos] = done_line;
-                    } else {
-                        progress_lines.push(done_line);
-                    }
-                    let _ = draft
-                        .update_draft_progress(&msg.chat_id, mid, &progress_lines.join(""))
-                        .await;
-                }
-
-                // ── Self-healing: track tool errors for re-prompt ──
-                if result.is_error && automatic_retry_allowed(&tc.name, &result.output) {
-                    tool_errors.push(format!(
-                        "'{}' failed: {}",
-                        tc.name,
-                        truncate_chars(&result.output, 200)
-                    ));
-                }
-
-                let limit = self.agent_config.max_tool_result_chars;
-                let truncated_output = match truncate_chars_counted(&result.output, limit) {
-                    Some((head, dropped)) => {
-                        format!("{head}...\n⚠️ [Truncated: {dropped} chars dropped, {limit} kept]")
-                    }
-                    None => result.output.clone(),
-                };
-
-                messages.push(ChatMessage::tool_result(&tc.id, &truncated_output));
-            }
-
-            // ── Self-healing: if tools failed, re-prompt with error context ──
-            if !tool_errors.is_empty() && healing_attempts_left > 0 {
-                let error_summary = tool_errors.join("\n");
-                tracing::info!(
-                    "Self-healing: {} tool errors, {} attempts left",
-                    tool_errors.len(),
-                    healing_attempts_left
-                );
-                messages.push(ChatMessage::user(format!(
-                    "The following tool call(s) failed:\n{}\n\n\
-                    Please try a different approach. Previous steps are still valid — \
-                    don't repeat what already worked unless needed.",
-                    error_summary
-                )));
-                healing_attempts_left -= 1;
-                // Reset guardrails per-turn state for next iteration
-                {
-                    let mut gr = self.guardrails.write().await;
-                    if let Some(g) = gr.get_mut(&msg.chat_id) {
-                        g.reset();
-                    }
-                }
-                continue; // Re-prompt without incrementing the tool_call_history-based loop
-            }
-
-            if state == AgentState::Direct {
-                state = AgentState::Executing;
-            }
-        }
-
-        // ── Circuit breaker ──
-        tracing::warn!(
-            "Circuit breaker after {} rounds",
-            self.agent_config.max_rounds
-        );
-        self.persist_conversation(
-            msg,
-            &format!("Hit {} rounds.", self.agent_config.max_rounds),
-        )
-        .await?;
-
-        // Mark trajectory as unsuccessful
-        {
-            let mut trajs = self.trajectories.write().await;
-            if let Some(t) = trajs.get_mut(&msg.chat_id) {
-                t.success = false;
-            }
-        }
-
-        let circuit_msg = format!(
-            "⚠️ Hit {} rounds ({} compactions). Break into smaller tasks?",
-            self.agent_config.max_rounds, compactions_done
-        );
-        delivery.deliver(&msg.chat_id, &circuit_msg).await
+        let text = self
+            .run_via_rotary(&messages, &tools_snapshot, &main_model)
+            .await?;
+        self.finish_execution(msg, &text, &delivery).await
     }
 
-    /// Run one turn through the rx4 (rotary) harness instead of the legacy
-    /// state machine.
+    /// Run one turn through the rx4 (rotary) harness.
     ///
     /// apollo keeps ownership of everything around the loop — system prompt,
     /// skill injection, conversation history, memory recall, tool set — and
@@ -1367,6 +740,7 @@ impl AgentRunner {
             model: model.to_string(),
             workspace: self.workspace.clone(),
             max_tool_iterations: self.agent_config.max_rounds,
+            auto_compact_after: self.agent_config.auto_compact_after,
             // Both engines must run the same hooks and emit the same events.
             hook_ctx: crate::agent::rotary_bridge::ToolHookContext::new(
                 self.hooks.read().unwrap().clone(),
@@ -1376,9 +750,41 @@ impl AgentRunner {
             .with_stream(self.stream_sink()),
         });
 
-        bridge
-            .run_prompt_with_history(&prompt.content, &history)
-            .await
+        // ── Steering queue ──
+        // rx4's `messages_handle()` exposes the shared message buffer the tool
+        // loop reads at the top of every iteration, so a message pushed here
+        // while `prompt()` is running is visible to the next tool cycle. This
+        // mirrors the legacy loop's per-round steering drain.
+        let messages_handle = bridge.messages_handle();
+        let steering_queue = Arc::clone(&self.steering_queue);
+        let prompt_fut = bridge.run_prompt_with_history(&prompt.content, &history);
+        tokio::pin!(prompt_fut);
+
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut prompt_fut => {
+                    return result;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    let mut queue = steering_queue.lock().unwrap();
+                    if !queue.is_empty() {
+                        for steer_msg in queue.drain(..) {
+                            tracing::info!(
+                                chars = steer_msg.chars().count(),
+                                "Steering message queued"
+                            );
+                            messages_handle.write().push(rx4::provider::Message::user(
+                                format!(
+                                    "⚡ STEERING — new instruction from user (prioritize this): {}",
+                                    steer_msg
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Finish execution — persist, emit events, finalize draft
@@ -1438,59 +844,6 @@ impl AgentRunner {
         }
 
         Ok(delivered)
-    }
-
-    async fn classify_request(&self, text: &str, _model: &str) -> bool {
-        if self.get_mode().always_plan() {
-            return true;
-        }
-
-        let lower = text.to_lowercase();
-        let word_count = text.split_whitespace().count();
-
-        if word_count <= 5 {
-            return false;
-        }
-
-        let tool_keywords = [
-            "read ",
-            "write ",
-            "edit ",
-            "create ",
-            "build ",
-            "fix ",
-            "search ",
-            "fetch ",
-            "check ",
-            "run ",
-            "execute ",
-            "install ",
-            "deploy ",
-            "find ",
-            "list ",
-            "show me ",
-            "what's in ",
-            "look at ",
-            "file",
-            "code",
-            "commit",
-            "git ",
-            "grep",
-            "curl",
-        ];
-        for kw in &tool_keywords {
-            if lower.contains(kw) {
-                return true;
-            }
-        }
-
-        if word_count >= 15
-            && (lower.contains('?') || lower.contains("can you") || lower.contains("please"))
-        {
-            return true;
-        }
-
-        false
     }
 
     async fn persist_conversation(
@@ -1599,120 +952,6 @@ impl AgentRunner {
         }
     }
 
-    /// Compact conversation messages — fallback when no compactor is set
-    async fn compact_messages(
-        &self,
-        messages: Vec<ChatMessage>,
-        original_task: &str,
-    ) -> anyhow::Result<Vec<ChatMessage>> {
-        let info = ContextInfo {
-            message_count: messages.len(),
-            total_chars: messages.iter().map(|m| m.content.len()).sum(),
-            max_chars: self.agent_config.max_context_chars,
-            compactions_done: 0,
-        };
-        if let Some(ref compactor) = self.compactor {
-            if compactor.should_compress(&info) {
-                let result = compactor.compress(&messages, Some(original_task)).await;
-                if result.did_compact {
-                    tracing::info!(
-                        "Compactor '{}' compressed {} → {} messages",
-                        compactor.name(),
-                        messages.len(),
-                        result.messages.len()
-                    );
-                    return Ok(result.messages);
-                }
-            }
-        }
-        // Fallback: inline summarization via fast model
-        let keep_recent = 6;
-        if messages.len() <= keep_recent + 2 {
-            return Ok(messages);
-        }
-        let system_msgs: Vec<&ChatMessage> =
-            messages.iter().filter(|m| m.role == "system").collect();
-        let non_system: Vec<&ChatMessage> =
-            messages.iter().filter(|m| m.role != "system").collect();
-        if non_system.len() <= keep_recent {
-            return Ok(messages);
-        }
-        // A blind cut can land between an assistant's tool_call and its
-        // tool_result, leaving the kept tail opening with an orphan
-        // tool_result that providers reject. Walk the boundary forward until
-        // it no longer splits a pair.
-        let mut split = non_system.len() - keep_recent;
-        while split < non_system.len() && non_system[split].is_tool_result() {
-            split += 1;
-        }
-        let (old_msgs, recent_msgs) = non_system.split_at(split);
-        let mut summary_input = String::new();
-        for m in old_msgs {
-            let role_label = match m.role.as_str() {
-                "user" => "User",
-                "assistant" | "assistant_tool_use" => "Assistant",
-                "tool_result" => "Tool Result",
-                _ => &m.role,
-            };
-            let content = compaction_excerpt(&m.content);
-            summary_input.push_str(&format!("[{}]: {}\n", role_label, content));
-        }
-        let compaction_prompt = format!(
-            "Summarize this conversation concisely. The original task was: \"{}\"\n\n\
-            Focus on: what was accomplished, what tools were used, key results, and what's still pending.\n\n\
-            Conversation:\n{}",
-            original_task, summary_input
-        );
-        let compact_messages = [ChatMessage::user(&compaction_prompt)];
-        let compact_request = ChatRequest {
-            messages: &compact_messages,
-            tools: None,
-            model: &self.agent_config.fast_model,
-            temperature: 0.3,
-            max_tokens: Some(1000),
-        };
-        let summary = match self.provider.chat(&compact_request).await {
-            Ok(resp) => {
-                if let Some(usage) = &resp.usage {
-                    let _ = self
-                        .cost_tracker
-                        .record(
-                            &self.agent_config.fast_model,
-                            TokenUsage {
-                                input_tokens: usage.input_tokens as usize,
-                                output_tokens: usage.output_tokens as usize,
-                                total_tokens: (usage.input_tokens + usage.output_tokens) as usize,
-                            },
-                        )
-                        .await;
-                }
-                resp.text
-                    .unwrap_or_else(|| "Failed to summarize.".to_string())
-            }
-            Err(e) => {
-                tracing::warn!("Compaction failed: {}, falling back to truncation", e);
-                format!(
-                    "[Previous {} messages truncated to save context]",
-                    old_msgs.len()
-                )
-            }
-        };
-        let mut compacted = Vec::new();
-        for sm in &system_msgs {
-            compacted.push((*sm).clone());
-        }
-        compacted.push(ChatMessage::user(format!(
-            "[Conversation compacted — {} earlier messages summarized]\n\n{}",
-            old_msgs.len(),
-            summary
-        )));
-        compacted.push(ChatMessage::assistant(
-            "Understood, continuing from the summary.".to_string(),
-        ));
-        compacted.extend(recent_msgs.iter().map(|m| (*m).clone()));
-        Ok(compacted)
-    }
-
     // ── Trajectory access ──
 
     /// Get trajectory for a chat (for export)
@@ -1777,22 +1016,11 @@ pub(crate) fn extract_tool_hint(name: &str, arguments: &str) -> String {
     .unwrap_or_default()
 }
 
-fn automatic_retry_allowed(tool: &str, output: &str) -> bool {
-    tool != "praefectus"
-        || serde_json::from_str::<serde_json::Value>(output)
-            .ok()
-            .and_then(|value| value.get("retry_safe")?.as_bool())
-            == Some(true)
-}
-
 #[cfg(test)]
 mod retry_tests {
     use std::path::Path;
 
-    use super::{
-        automatic_retry_allowed, compaction_excerpt, trajectory_filename, truncate_chars,
-        ChatMessage,
-    };
+    use super::{trajectory_filename, truncate_chars};
 
     #[test]
     fn truncating_multibyte_tool_output_does_not_panic() {
@@ -1801,25 +1029,6 @@ mod retry_tests {
         assert_eq!(truncate_chars(&output, 200).chars().count(), 200);
         assert_eq!(truncate_chars("hi", 200), "hi");
         assert_eq!(truncate_chars("héllo", 2), "hé");
-    }
-
-    #[test]
-    fn compaction_boundary_never_orphans_a_tool_result() {
-        // The kept tail must not begin with a tool_result whose tool_call
-        // was summarized away.
-        let non_system = [
-            ChatMessage::user("a"),
-            ChatMessage::assistant("calls tool"),
-            ChatMessage::tool_result("id-1", "out"),
-            ChatMessage::assistant("done"),
-        ];
-        let keep_recent = 2;
-        let mut split = non_system.len() - keep_recent;
-        while split < non_system.len() && non_system[split].is_tool_result() {
-            split += 1;
-        }
-        assert_eq!(split, 3);
-        assert!(!non_system[split].is_tool_result());
     }
 
     #[test]
@@ -1836,36 +1045,5 @@ mod retry_tests {
         assert!(!filename.contains(".."));
         assert!(!filename.contains('/'));
         assert!(!filename.contains('\\'));
-    }
-
-    #[test]
-    fn praefectus_uncertainty_is_not_automatically_retried() {
-        assert!(!automatic_retry_allowed(
-            "praefectus",
-            r#"{"retry_safe":false}"#
-        ));
-        assert!(!automatic_retry_allowed("praefectus", "unstructured error"));
-        assert!(automatic_retry_allowed(
-            "praefectus",
-            r#"{"retry_safe":true}"#
-        ));
-        assert!(automatic_retry_allowed("shell", "failed"));
-    }
-
-    #[test]
-    fn compaction_excerpt_handles_multibyte_content() {
-        let cjk = "日".repeat(400);
-        let excerpt = compaction_excerpt(&cjk);
-        assert_eq!(excerpt, cjk);
-
-        let long = "日".repeat(600);
-        let excerpt = compaction_excerpt(&long);
-        assert_eq!(excerpt.chars().count(), 503);
-        assert!(excerpt.ends_with("..."));
-
-        let emoji = "👋".repeat(501);
-        assert_eq!(compaction_excerpt(&emoji).chars().count(), 503);
-
-        assert_eq!(compaction_excerpt("short"), "short");
     }
 }

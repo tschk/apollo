@@ -16,10 +16,10 @@ use crate::providers::defaults::default_model_for_provider;
 use crate::providers::ollama::OllamaProvider;
 use crate::providers::openai_compat::OpenAiCompatProvider;
 use crate::providers::Provider;
+use crate::tools::build_runner::BuildRunnerTool;
 use crate::tools::embeddings::{EmbeddingSearchTool, EmbeddingStatusTool, EmbeddingStoreTool};
 use crate::tools::file_ops::{FileReadTool, FileWriteTool};
 use crate::tools::shell::ShellTool;
-use crate::tools::build_runner::BuildRunnerTool;
 #[cfg(feature = "plugin-skills")]
 use crate::tools::skill_manager::SkillManagerTool;
 use crate::tools::toolsets::is_tool_enabled;

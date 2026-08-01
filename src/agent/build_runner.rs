@@ -116,10 +116,7 @@ impl BuildResult {
             }
         }
         if !self.warnings.is_empty() {
-            out.push_str(&format!(
-                "--- {} warning(s) ---\n",
-                self.warnings.len()
-            ));
+            out.push_str(&format!("--- {} warning(s) ---\n", self.warnings.len()));
             for w in &self.warnings {
                 out.push_str(&format_error(w));
                 out.push('\n');
@@ -244,7 +241,11 @@ impl BuildRunner {
                     errors: vec![CompileError {
                         severity: DiagnosticSeverity::Error,
                         code: None,
-                        message: format!("cargo {} timed out after {}s", subcommand, timeout.as_secs()),
+                        message: format!(
+                            "cargo {} timed out after {}s",
+                            subcommand,
+                            timeout.as_secs()
+                        ),
                         file: None,
                         line: None,
                         column: None,

@@ -29,8 +29,6 @@ Last updated: 2026-07-27
 
 ## Next
 
-- exercise `agent.engine = "rx4"` end to end and decide whether it becomes the
-  default loop
 - add tests for Telegram markdown conversion and long-message chunking
 - add tests for audio/sticker handling in Telegram
 - add trajectory collection toggle in config.yaml

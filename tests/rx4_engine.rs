@@ -1,11 +1,11 @@
 //! End-to-end cover for the rx4 engine.
 //!
-//! `agent.engine = "rx4"` hands the loop to the rotary harness. Everything
-//! apollo owns around that loop — the assembled context going in, the tool set,
-//! the permission hooks, the reply coming back out and being persisted — is
-//! only exercised by driving a real turn. Before this test the rx4 path had no
-//! coverage at all, which is how it silently shipped without permission hooks,
-//! lifecycle events or stream events.
+//! The rx4 (rotary) harness owns the loop. Everything apollo owns around that
+//! loop — the assembled context going in, the tool set, the permission hooks,
+//! the reply coming back out and being persisted — is only exercised by driving
+//! a real turn. Before this test the rx4 path had no coverage at all, which is
+//! how it silently shipped without permission hooks, lifecycle events or stream
+//! events.
 //!
 //! Deliberately a real `AgentRunner` over a real `SurrealMemory`, with only the
 //! provider and channel stubbed, so the assertions fail if the engine branch,
@@ -159,7 +159,6 @@ async fn harness() -> Harness {
         "test-model",
     )
     .with_config(apollo::config::AgentConfig {
-        engine: "rx4".to_string(),
         ..Default::default()
     })
     .with_workspace(dir.path().to_path_buf());
@@ -185,8 +184,8 @@ fn message(chat_id: &str, text: &str) -> IncomingMessage {
     }
 }
 
-/// The engine selector must actually route to rx4, rx4 must cycle a tool, and
-/// the final text must come back out through apollo's `finish_execution`.
+/// rx4 must actually cycle a tool, and the final text must come back out
+/// through apollo's `finish_execution`.
 #[tokio::test]
 async fn rx4_engine_runs_a_tool_and_returns_the_reply() {
     let h = harness().await;

@@ -37,53 +37,30 @@ Goals:
 > tried and measured at no gain; don't re-add it. <10ms remains out of reach,
 > so treat it as aspirational.
 
-> **rx4 migration:** apollo is migrating its built-in agent loop to the
-> `rx4` (rotary) harness engine. `rx4` is a crates.io dependency providing
-> the core agent loop, tools, providers, sessions,
-> skills, memory, guardrails, and MCP support. The bridge lives in
-> `src/agent/rotary_bridge.rs`.
+> **rx4 engine:** apollo's agent loop is owned by the `rx4` (rotary) harness
+> engine. `rx4` is a crates.io dependency providing the core agent loop, tools,
+> providers, sessions, skills, memory, guardrails, and MCP support. The bridge
+> lives in `src/agent/rotary_bridge.rs`.
 >
-> Both loops are selectable at runtime via `agent.engine`:
+> apollo owns everything around the loop: system prompt, skill injection,
+> conversation history, memory recall, tool set, persistence, and lifecycle
+> hooks. Delegation happens at the single `handle_message` chokepoint, so
+> every channel honors the setting.
 >
-> - `legacy` (default) — apollo's Planning → Executing → Summarizing state
->   machine in `loop_runner.rs`
-> - `rx4` — the rotary harness owns model calls and tool cycling
+> The legacy Planning → Executing → Summarizing state machine has been
+> removed. rx4 is the only engine.
 >
-> Under either engine apollo owns the same things around the loop: system
-> prompt, skill injection, conversation history, memory recall, tool set,
-> persistence, and lifecycle hooks. Delegation happens at the single
-> `handle_message` chokepoint, so every channel honors the setting.
->
-> **The engines are not at parity.** Choosing `rx4` today skips
-> `loop_runner.rs:784-1350` — roughly 566 lines — and you get a materially
-> different agent. Verified against rx4 0.5.0; recheck when the pin moves.
->
-> Missing under `rx4`, and worth knowing before switching:
->
-> | Legacy behaviour | Status under `rx4` |
-> |---|---|
-> | Context-budget check + `compact_messages` | **Disabled.** rx4 auto-compacts, but the bridge leaves `Agent::auto_compact_after` at `0`, which turns it off. Nothing compacts. |
-> | Loop detection / duplicate-call guardrails | **Absent.** rx4 0.5.0 exports `ToolGuardrails` but never calls it from `Agent::prompt`. |
-> | Self-healing re-prompt on tool failure | **Absent.** Same: `SelfHealingRetry` is exported, not wired. |
-> | Whole-plan approval (`PendingPlan`, approve/reject by reply) | **Absent.** rx4's `Approver` gates one tool call, not a proposed plan. |
-> | Planning → Executing → Summarizing states | Gone by design. rx4 runs one loop. |
-> | Per-state model selection (`fast_model`) | Gone. rx4 uses one model per turn. |
-> | `classify_request` tool-vs-direct routing | Gone, and unneeded — it only existed to pick a state. |
-> | Steering queue | Not drained. rx4 0.5.0 added `Agent::messages_handle()` and the bridge exposes it, but `loop_runner.rs` does not yet push into it. |
-> | Swarm routing | Not wired. rx4 prefers exposing sub-agents as a tool. |
->
-> Working identically under both: pre/post tool hooks, plugin pre-tool
-> blocking, `BeforeToolCall`/`AfterToolCall` lifecycle events, and
+> Working identically: pre/post tool hooks, plugin pre-tool blocking,
+> `BeforeToolCall`/`AfterToolCall` lifecycle events, and
 > `ToolStart`/`ToolEnd` stream events — all funnel through
 > `rotary_bridge::execute_tool_with_hooks`. Draft progress works because the
 > bridge is handed the turn's stream sink.
 >
-> Trajectory recording stays in apollo under both engines and is fed from
-> `rx4::Event` subscription; it is not a gap.
+> Trajectory recording stays in apollo and is fed from `rx4::Event`
+> subscription.
 >
-> `tests/rx4_engine.rs` drives a real turn under `engine = "rx4"`. Extend it
-> before changing the bridge — the gaps above went unnoticed for as long as
-> they did because nothing exercised the path.
+> `tests/rx4_engine.rs` drives a real turn. Extend it before changing the
+> bridge.
 
 Key extension points:
 - `src/providers/traits.rs` — AI model providers
@@ -259,13 +236,11 @@ and before this filter existed they were scored `0.0` and still returned as
 - Markdown fallback: try with parse_mode, retry without on error
 - Voice: `tokio::process::Command` for faster-whisper transcription
 
-### Loop Runner (loop_runner.rs)
-- Circuit breaker: 50 rounds max
-- Loop detection: tool guardrails (idempotent/mutating classify, failure count, warn/block)
-- Self-healing: auto re-prompt LLM with error context on tool failures
+### Agent Loop (loop_runner.rs)
+- Circuit breaker: max rounds forwarded to rx4 as `max_tool_iterations`
 - Progress channel: receiver is kept alive (not dropped)
 - History: last 20 messages loaded from the active backend, ordered ASC
-- Context compaction: pluggable compactor trait, default LLM summarizer
+- Context compaction: rx4 auto-compaction via `agent.auto_compact_after`
 - Trajectory recording: per-chat ReAct step capture for RL training
 - Lifecycle hooks: pre/post tool, session events from plugin system
 - Skill preprocessing: template vars + inline shell in SKILL.md

@@ -4,7 +4,7 @@
 //! and returns guardrail decisions.
 //!
 //! pontytail: single-threaded, in-memory history. Per-chat isolation is handled by
-//! the HashMap<String, ToolGuardrails> in loop_runner.
+//! the HashMap<String, ToolGuardrails> in the agent loop.
 
 use std::time::Instant;
 

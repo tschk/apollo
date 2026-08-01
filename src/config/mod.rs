@@ -65,39 +65,10 @@ pub struct AgentConfig {
     pub permissions: PermissionRulesConfig,
     /// Initial safety profile: `full`, `auto`, `prompt`, or `tools_only` (drives default `AgentMode`).
     pub permission_profile: String,
-    /// Agent loop implementation: `legacy` (apollo's built-in state machine)
-    /// or `rx4` (the rotary harness engine). apollo keeps ownership of context
-    /// assembly and tools either way; `rx4` hands the loop itself to rx4.
-    pub engine: String,
     /// rx4 auto-compaction threshold. `0` leaves compaction off (the bridge
     /// default); a non-zero value is forwarded to `Agent::auto_compact_after`,
     /// which rx4 interprets as an estimated-token cutoff before each prompt.
     pub auto_compact_after: usize,
-}
-
-/// Which agent loop executes a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgentEngine {
-    /// apollo's built-in Planning → Executing → Summarizing state machine.
-    #[default]
-    Legacy,
-    /// The rx4 (rotary) harness engine, via `agent::rotary_bridge`.
-    Rx4,
-}
-
-impl AgentConfig {
-    /// Parse the configured engine. Unknown values fall back to `Legacy` with
-    /// a warning rather than failing startup.
-    pub fn engine(&self) -> AgentEngine {
-        match self.engine.trim().to_ascii_lowercase().as_str() {
-            "rx4" | "rotary" => AgentEngine::Rx4,
-            "legacy" | "" => AgentEngine::Legacy,
-            other => {
-                tracing::warn!("unknown agent.engine {other:?}, using legacy");
-                AgentEngine::Legacy
-            }
-        }
-    }
 }
 
 impl Default for AgentConfig {
@@ -111,7 +82,6 @@ impl Default for AgentConfig {
             heavy_model: "claude-sonnet-4-6".to_string(),
             permissions: PermissionRulesConfig::default(),
             permission_profile: "auto".to_string(),
-            engine: "legacy".to_string(),
             auto_compact_after: 0,
         }
     }
@@ -443,7 +413,7 @@ fn assign(root: &mut serde_json::Value, key: &str, value: serde_json::Value) {
 }
 
 impl Config {
-    /// Read a dotted path (`agent.engine`, `provider.name`, `model`) out of the
+    /// Read a dotted path (`agent.max_rounds`, `provider.name`, `model`) out of the
     /// effective configuration.
     pub fn get_path(&self, key: &str) -> anyhow::Result<serde_json::Value> {
         if key.trim().is_empty() {
@@ -645,7 +615,6 @@ mod config_path_tests {
     fn get_reads_nested_and_top_level_keys() {
         let cfg = Config::default_config();
         assert_eq!(cfg.get_path("model").unwrap(), cfg.model.as_str());
-        assert_eq!(cfg.get_path("agent.engine").unwrap(), "legacy");
         assert_eq!(cfg.get_path("provider.name").unwrap(), "anthropic");
         assert_eq!(cfg.get_path("agent.max_rounds").unwrap(), 50);
     }
@@ -653,8 +622,6 @@ mod config_path_tests {
     #[test]
     fn set_updates_strings_bools_and_numbers() {
         let cfg = Config::default_config();
-        let (cfg, _) = cfg.set_path("agent.engine", "rx4").unwrap();
-        assert_eq!(cfg.agent.engine, "rx4");
         let (cfg, _) = cfg.set_path("policy.allow_shell", "false").unwrap();
         assert!(!cfg.policy.allow_shell);
         let (cfg, written) = cfg.set_path("agent.max_rounds", "12").unwrap();
@@ -679,7 +646,7 @@ mod config_path_tests {
         let cfg = Config::default_config();
         let err = cfg.set_path("agent.nope", "1").unwrap_err().to_string();
         assert!(err.contains("unknown config key `agent.nope`"), "{err}");
-        assert!(err.contains("engine"), "{err}");
+        assert!(err.contains("max_rounds"), "{err}");
 
         let err = cfg.get_path("not_a_section.x").unwrap_err().to_string();
         assert!(err.contains("unknown config key"), "{err}");
@@ -720,10 +687,10 @@ mod config_path_tests {
     fn splicing_preserves_unrelated_keys_in_the_file() {
         let mut raw: serde_json::Value =
             serde_json::from_str(r#"{"model":"m","custom":{"kept":true}}"#).unwrap();
-        Config::splice_into_raw(&mut raw, "agent.engine", serde_json::json!("rx4"));
+        Config::splice_into_raw(&mut raw, "agent.max_rounds", serde_json::json!(12));
         assert_eq!(raw["custom"]["kept"], true);
         assert_eq!(raw["model"], "m");
-        assert_eq!(raw["agent"]["engine"], "rx4");
+        assert_eq!(raw["agent"]["max_rounds"], 12);
     }
 }
 
@@ -759,33 +726,6 @@ mod permission_profile_tests {
             ]
         );
         assert!(cfg.toolsets.disabled.contains(&"browser".to_string()));
-    }
-
-    #[test]
-    fn engine_defaults_to_legacy() {
-        assert_eq!(AgentConfig::default().engine(), AgentEngine::Legacy);
-    }
-
-    #[test]
-    fn engine_parses_rx4_aliases() {
-        for value in ["rx4", "RX4", " rotary "] {
-            let cfg = AgentConfig {
-                engine: value.to_string(),
-                ..AgentConfig::default()
-            };
-            assert_eq!(cfg.engine(), AgentEngine::Rx4, "value: {value:?}");
-        }
-    }
-
-    #[test]
-    fn unknown_engine_falls_back_to_legacy() {
-        for value in ["nope", ""] {
-            let cfg = AgentConfig {
-                engine: value.to_string(),
-                ..AgentConfig::default()
-            };
-            assert_eq!(cfg.engine(), AgentEngine::Legacy, "value: {value:?}");
-        }
     }
 
     #[test]

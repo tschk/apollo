@@ -20,8 +20,8 @@ autonomous coding mode, and a plugin system with lifecycle hooks.
 - **Pluggable context compaction** — summarizer trait + default LLM-based compactor
   with configurable thresholds
 - **Self-healing retry** — auto re-prompts LLM with error context on tool failures
-- **Selectable agent loop** — `agent.engine` runs turns on apollo's built-in
-  state machine (`legacy`, default) or the rx4 rotary harness (`rx4`)
+- **rx4 rotary harness** — the agent loop is owned by the rx4 (rotary) engine;
+  apollo owns everything around it (context, tools, memory, persistence)
 - **XML tool-call recovery** — state-machine parser extracts `<tool_call>`
   blocks from the response text, so providers without native tool calling still
   work. The parser also supports incremental feeding for streaming callers
@@ -159,8 +159,7 @@ clients (the TUI, apollo-ui, curl) never send it.
 
 Initialize with `apollo init`, edit `apollo.json`. Key sections:
 
-- `agent` — max rounds, history limit, model selection, compaction thresholds,
-  and `engine` (`legacy` or `rx4`) to pick which loop executes a turn
+- `agent` — max rounds, history limit, model selection, compaction thresholds
 - `provider` — LLM backend choice + credentials
 - `channel` — messaging platform config
 - `policy` — shell/dynamic tool/plugin permission gates

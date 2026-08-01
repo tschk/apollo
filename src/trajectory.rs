@@ -107,7 +107,7 @@ impl Trajectory {
         self.steps.push(step);
     }
 
-    /// Record a ReAct tool step directly (used by loop_runner).
+    /// Record a ReAct tool step directly (used by the agent loop).
     pub fn record_tool_step(
         &mut self,
         thought: Option<String>,
