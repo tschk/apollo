@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.5.0]
+
+### Breaking
+
+- **`IrcChannel::start` now connects eagerly and returns an error** if the
+  server is unreachable. It previously spawned a task that logged a connection
+  failure and returned an apparently healthy receiver.
+- **`SlackChannel::start` now requires a channel id** and errors without one.
+  It previously polled `conversations.history` with no `channel` parameter,
+  which Slack rejects on every call, so nothing was ever received.
+- Webhook channels (Google Chat, WhatsApp, Teams) **return a bind error** from
+  `start` instead of panicking a detached task. A taken port used to kill a
+  background task while `start` returned a working-looking receiver.
+- Skill discovery additionally scans `<workspace>/plugins`,
+  `.openclaw/plugins` and `.hermes/plugins`. These load SKILL.md, which
+  supports inline shell — the same trust level as `.apollo/skills`, but a
+  wider surface than before.
+
+### Fixed
+
+- **Discord could not receive.** `start()` dropped its sender, so the bot was
+  deaf. It now polls `/channels/{id}/messages`, seeding its cursor from the
+  first response so startup does not replay history.
+- **Slack could not receive** — see above.
+- **IRC could not reply.** `send()` only logged; it now writes PRIVMSG through
+  a writer shared with the read loop.
+- **Google Chat could not send.** It used the service-account key verbatim as
+  a bearer token; it now signs an RS256 JWT assertion and exchanges it for an
+  access token, cached until a minute before expiry.
+- **Seven channels were unreachable.** `--channel` had arms only for `cli`,
+  `telegram`, `discord` and `none`, so slack, matrix, irc, signal, whatsapp,
+  googlechat and msteams compiled, passed their tests, and could not be
+  selected at all.
+- **Plugin-registered tools never reached the agent.** They were logged and
+  discarded, so a plugin could register a tool the agent could not call.
+- **Discovered plugin skills never loaded.** `discover_host_plugins` scanned
+  three plugin roots for SKILL.md and only logged what it found; skill
+  discovery scanned none of them.
+
+### Added
+
+- `Channel::send_media` — images, documents, voice, video and animations from
+  a URL or a local path (multipart upload). The default **errors**, and
+  `supports_media()` reports the truth, so a channel can never accept an
+  attachment and quietly deliver a text message with a link instead.
+  Telegram implements it; every other channel reports `false`.
+- `channels::ChannelRegistry` — `--channel` resolves by name instead of
+  through a match in `main.rs`. Parameters come from `[channel].settings` in
+  the config, falling back to `APOLLO_CHANNEL_<KEY>` in the environment.
+- `PluginContext::register_channel` — a plugin adds a channel with no feature
+  flag, no `mod.rs` entry and no core edit.
+- `channels::webhook` — one webhook receiver shared by Google Chat, WhatsApp
+  and Teams, replacing three hand-rolled copies.
+- `tests/channel_conformance.rs` covers all ten channels on four assertions
+  (receive, send shape, reply delivery, media contract), with nothing ignored.
+  `tests/plugin_channel.rs` drives the plugin channel and tool paths.
+
+### Known limitations
+
+- Channel coverage is **mock-based**. Only Telegram and CLI have been
+  exercised against a real service; the rest are verified against a local
+  mock server built from the published API shapes.
+- Discord is REST polling, not the gateway websocket: no DMs, reactions or
+  presence, and it watches only the configured channel.
+- Media is implemented for Telegram only.
+- A host plugin whose manifest declares neither a SKILL.md nor an in-process
+  registration still does nothing — `HostPluginEntry` carries no entrypoint,
+  and giving it one means executing code from a discovered directory.
+
 ## [0.4.0]
 
 ### Breaking

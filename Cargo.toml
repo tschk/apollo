@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "apollo-agent"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 description = "Local-first Rust AI agent runtime — Telegram-first, trait-driven, SurrealDB + RocksDB state layer."
 license = "MPL-2.0"
