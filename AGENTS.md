@@ -279,6 +279,57 @@ Add a case to that suite when adding a channel. It is the only thing standing
 between "compiles" and "works" — that gap is how 0.4.0 shipped advertising
 four channels that could not send or receive.
 
+### Selecting a channel
+
+`--channel <name>` resolves through `channels::ChannelRegistry`, not through a
+match in `main.rs`. Before the registry existed, only `cli`, `telegram`,
+`discord` and `none` had arms, so the other seven built-ins compiled, passed
+conformance, and were unreachable — "works" and "shipped" are separate gates
+and this one was failing silently.
+
+`cli`, `telegram` and `discord` keep bespoke arms because they carry extra
+wiring (heartbeat, telegram's draft runtime). Everything else builds from the
+registry and runs the generic loop.
+
+Channel parameters come from `[channel].settings` in the config, falling back
+to `APOLLO_CHANNEL_<KEY>` in the environment, so tokens need not be on disk:
+
+```toml
+[channel]
+kind = "slack"
+token = "xoxb-…"
+[channel.settings]
+channel_id = "C123"
+```
+
+### Adding a channel from a plugin
+
+`PluginContext::register_channel(name, builder)` inside `Plugin::on_register`
+makes a channel selectable with no feature flag, no `mod.rs` entry and no core
+edit. `PluginRegistry::register` merges those into the registry that
+`--channel` consults; `tests/plugin_channel.rs` drives that path end to end.
+
+Note the asymmetry: plugin-registered **tools** are currently logged and
+dropped in `PluginRegistry::register`, so they never reach the agent. Channels
+are wired through; tools are not. Do not assume the rest of `PluginContext`
+works because channels do.
+
+### Media
+
+`Channel::send_media` carries images, documents, voice, video and animations,
+from either a URL (the platform fetches it) or a local path (uploaded as
+multipart). The default implementation **errors**, and `supports_media()`
+reports which channels mean it — a channel must never accept an attachment and
+quietly deliver a text message with a link in it, because the caller cannot
+detect that. Telegram is the only implementation so far.
+
+### Webhook channels
+
+Google Chat, WhatsApp and Teams share `channels::webhook`. Bind through
+`webhook::spawn`, which awaits the bind and returns a `Result`; all three used
+to `.unwrap()` inside a spawned task, so a taken port panicked a detached task
+while `start()` still returned a healthy-looking receiver.
+
 ## 6) Providers
 
 | Provider | Notes |
