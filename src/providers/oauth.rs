@@ -10,8 +10,18 @@ use tokio::sync::RwLock;
 /// Public OAuth client id for the Claude CLI token endpoint.
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
-/// Anthropic OAuth token endpoint (console host, not the API host).
-const CLAUDE_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+/// Anthropic OAuth token endpoints, tried in order.
+///
+/// `platform.claude.com` is the current host and the one that answers a
+/// `grant_type` probe directly; the `console.anthropic.com` host it replaced
+/// still resolves but now sits behind a bot challenge that can answer a POST
+/// with an HTML interstitial instead of a token. Keeping it as a fallback
+/// costs one extra request only when the new host has already failed, and
+/// keeps a refresh working if the migration is not finished everywhere.
+const CLAUDE_TOKEN_URLS: &[&str] = &[
+    "https://platform.claude.com/v1/oauth/token",
+    "https://console.anthropic.com/v1/oauth/token",
+];
 
 /// Refresh this long before actual expiry so an in-flight request does not
 /// race the deadline.
@@ -43,7 +53,11 @@ pub struct OAuthTokenCache {
     refresh_token: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<i64>>,
     store: Arc<RwLock<Option<TokenStore>>>,
-    token_url: Arc<String>,
+    token_urls: Arc<Vec<String>>,
+}
+
+fn default_token_urls() -> Arc<Vec<String>> {
+    Arc::new(CLAUDE_TOKEN_URLS.iter().map(|u| u.to_string()).collect())
 }
 
 impl OAuthTokenCache {
@@ -53,15 +67,20 @@ impl OAuthTokenCache {
             refresh_token: Arc::new(RwLock::new(refresh_token)),
             expires_at: Arc::new(RwLock::new(expires_at)),
             store: Arc::new(RwLock::new(None)),
-            token_url: Arc::new(CLAUDE_TOKEN_URL.to_string()),
+            token_urls: default_token_urls(),
         }
     }
 
     /// Point the refresh at another token endpoint. Used by the tests to hit a
     /// local server instead of Anthropic.
     #[cfg(test)]
-    fn with_token_url(mut self, url: impl Into<String>) -> Self {
-        self.token_url = Arc::new(url.into());
+    fn with_token_url(self, url: impl Into<String>) -> Self {
+        self.with_token_urls(vec![url.into()])
+    }
+
+    #[cfg(test)]
+    fn with_token_urls(mut self, urls: Vec<String>) -> Self {
+        self.token_urls = Arc::new(urls);
         self
     }
 
@@ -72,7 +91,7 @@ impl OAuthTokenCache {
             refresh_token: Arc::new(RwLock::new(refresh_token)),
             expires_at: Arc::new(RwLock::new(expires_at)),
             store: Arc::new(RwLock::new(Some(store))),
-            token_url: Arc::new(CLAUDE_TOKEN_URL.to_string()),
+            token_urls: default_token_urls(),
         }
     }
 
@@ -119,7 +138,7 @@ impl OAuthTokenCache {
                 .ok_or_else(|| anyhow::anyhow!("No refresh token available"))?
         };
 
-        let body = Self::fetch_new_token(&self.token_url, &refresh_token).await?;
+        let body = Self::fetch_new_token(&self.token_urls, &refresh_token).await?;
 
         let expires_in = body.expires_in.unwrap_or(3600) * 1000; // Convert to ms
         let new_expires = chrono::Utc::now().timestamp_millis() + expires_in;
@@ -150,7 +169,30 @@ impl OAuthTokenCache {
         Ok(())
     }
 
-    async fn fetch_new_token(url: &str, refresh_token: &str) -> anyhow::Result<RefreshResponse> {
+    /// Refresh against each configured endpoint in turn, returning the first
+    /// that answers with a token. A failure on the last one is the error the
+    /// caller sees, so a genuinely rejected refresh token still reports as one.
+    async fn fetch_new_token(
+        urls: &[String],
+        refresh_token: &str,
+    ) -> anyhow::Result<RefreshResponse> {
+        let mut last: Option<anyhow::Error> = None;
+        for url in urls {
+            match Self::fetch_new_token_from(url, refresh_token).await {
+                Ok(body) => return Ok(body),
+                Err(e) => {
+                    tracing::debug!("OAuth token refresh failed against {url}: {e}");
+                    last = Some(e);
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("no OAuth token endpoint configured")))
+    }
+
+    async fn fetch_new_token_from(
+        url: &str,
+        refresh_token: &str,
+    ) -> anyhow::Result<RefreshResponse> {
         let client = crate::http::standard();
 
         let response = client
@@ -388,6 +430,28 @@ mod tests {
             Some("next-refresh")
         );
         // Still valid, so a second call must not hit the endpoint again.
+        assert_eq!(cache.get_token().await.unwrap(), "fresh");
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_dead_first_endpoint_falls_through_to_the_next() {
+        use std::sync::atomic::Ordering;
+
+        // Bound and dropped, so the port is closed and the request fails.
+        let dead = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            format!("http://{}/v1/oauth/token", l.local_addr().unwrap())
+        };
+        let (live, seen) = token_server(serde_json::json!({
+            "access_token": "fresh",
+            "expires_in": 3600,
+        }))
+        .await;
+
+        let cache = OAuthTokenCache::new("stale".to_string(), Some("refresh".to_string()), 1)
+            .with_token_urls(vec![dead, live]);
+
         assert_eq!(cache.get_token().await.unwrap(), "fresh");
         assert_eq!(seen.load(Ordering::SeqCst), 1);
     }
