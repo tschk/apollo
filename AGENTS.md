@@ -257,19 +257,27 @@ and before this filter existed they were scored `0.0` and still returned as
 |---------|--------|-------|
 | Telegram | ✅ Default | Full support (default feature) |
 | CLI | ✅ Default | Dev/testing (default feature) |
-| Discord | ❌ Incomplete | `channel-discord` — `start()` drops the sender, so nothing is ever received |
-| Slack | ❌ Incomplete | `channel-slack` — polls `conversations.history` with no `channel` param, so every poll errors |
+| Discord | ⚠️ Opt-in | `channel-discord` — REST polling of `/channels/{id}/messages`, not the gateway websocket |
+| Slack | ⚠️ Opt-in | `channel-slack` — requires `with_channel`; `start()` errors without one |
 | WhatsApp | ⚠️ Opt-in | `channel-whatsapp` feature |
 | Matrix | ⚠️ Opt-in | `channel-matrix` feature |
 | Signal | ⚠️ Opt-in | `channel-signal` feature |
-| IRC | ❌ Incomplete | `channel-irc` — `send()` only logs; the bot cannot reply |
-| Google Chat | ❌ Incomplete | `channel-googlechat` — sends the service-account key as a bearer token instead of exchanging it for one |
+| IRC | ⚠️ Opt-in | `channel-irc` feature |
+| Google Chat | ⚠️ Opt-in | `channel-googlechat` — OAuth2 service-account JWT exchange, needs a JSON key |
 | MS Teams | ⚠️ Opt-in | `channel-msteams` feature |
 
-Channels marked ❌ compile and can be enabled, but do not work. They were
-found non-functional by an audit after 0.4.0 shipped advertising them. No
-channel except Telegram and CLI has an end-to-end test, which is why this went
-unnoticed — see the conformance-test gap in section 12.
+Every channel is covered end-to-end by `tests/channel_conformance.rs`, which
+drives each implementation against a local mock server and asserts three
+things: `start()` yields a receiver that really delivers, `send()` puts a
+correctly shaped request on the wire, and the `Delivery` contract holds. The
+four channels that shipped non-functional in 0.4.0 (Discord's dropped sender,
+Slack's missing `channel` param, IRC's log-only `send()`, Google Chat's raw
+key used as a bearer token) were pinned as `#[ignore]`d tests there and are
+now fixed, with the suite green and nothing ignored.
+
+Add a case to that suite when adding a channel. It is the only thing standing
+between "compiles" and "works" — that gap is how 0.4.0 shipped advertising
+four channels that could not send or receive.
 
 ## 6) Providers
 
