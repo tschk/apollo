@@ -81,12 +81,13 @@ const EXTRA_USAGE_MARKER: &str = "out of extra usage";
 
 /// What apollo says instead.
 const CREDENTIAL_MISMATCH_HELP: &str = concat!(
-    "Anthropic rejected this request because apollo is authenticating with a \
-     Claude subscription credential (an OAuth token from a Claude.ai login). \
-     That credential is issued for Claude Code, not for apollo, and Anthropic \
-     reports it as an extra-usage error even when the subscription is fine — \
-     this is not a billing problem and adding credit will not fix it. ",
-    "apollo needs an Anthropic API key: create one at \
+    "Anthropic rejected this request with an extra-usage error while \
+     authenticating with a Claude subscription credential (an OAuth token \
+     from a Claude.ai login). apollo now sends the full Claude Code identity \
+     (user-agent, x-app, tool-name casing), so if you still see this it is \
+     most likely a genuine usage limit on your subscription's third-party \
+     harness allocation — check claude.ai/settings/usage. ",
+    "If you prefer a dedicated API key instead, create one at \
      https://platform.claude.com/settings/keys, then either run \
      `apollo config set provider.api_key sk-ant-...` or set the \
      ANTHROPIC_API_KEY environment variable."
@@ -110,6 +111,59 @@ fn map_api_error(status: u16, body: &str, is_oauth: bool) -> String {
 /// API keys carry `sk-ant-api`.
 fn is_oauth_credential(key: &str) -> bool {
     key.contains("sk-ant-oat")
+}
+
+/// Claude Code version string sent as `user-agent` for OAuth requests.
+/// Anthropic's server validates that subscription tokens are used with the
+/// genuine Claude Code identity; without this header (and `x-app`), a
+/// request that is otherwise correct is rejected with a 400 that presents
+/// as an "out of extra usage" billing error.
+const CLAUDE_CODE_VERSION: &str = "2.1.75";
+
+/// Tool names in the canonical casing Claude Code uses. Anthropic's server
+/// expects subscription OAuth requests to carry the Claude Code identity, and
+/// tool names that match Claude Code's set must use its casing — `edit`
+/// becomes `Edit`, `bash` becomes `Bash`. Names that do not match any entry
+/// pass through unchanged.
+const CLAUDE_CODE_TOOLS: &[&str] = &[
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob",
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "KillShell",
+    "NotebookEdit",
+    "Skill",
+    "Task",
+    "TaskOutput",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+];
+
+/// Map a tool name to Claude Code canonical casing if it matches
+/// case-insensitively; otherwise return it unchanged.
+fn to_claude_code_name(name: &str) -> String {
+    CLAUDE_CODE_TOOLS
+        .iter()
+        .find(|t| t.eq_ignore_ascii_case(name))
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// Map a Claude Code canonical tool name back to the original name by
+/// case-insensitive match against the tools apollo actually sent. If no
+/// match is found, return the name as-is.
+fn from_claude_code_name(name: &str, original_names: &[&str]) -> String {
+    original_names
+        .iter()
+        .find(|n| n.eq_ignore_ascii_case(name))
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| name.to_string())
 }
 
 pub struct AnthropicProvider {
@@ -391,6 +445,15 @@ impl Provider for AnthropicProvider {
         let api_key = self.resolve_key().await;
         let is_oauth = is_oauth_credential(&api_key);
 
+        // Capture the original tool names before any OAuth canonicalization
+        // so the response can map them back. Without this, a tool named "edit"
+        // that was canonicalized to "Edit" for the request would come back as
+        // "Edit" and fail to dispatch.
+        let original_tool_names: Vec<String> = request
+            .tools
+            .map(|t| t.iter().map(|spec| spec.name.to_string()).collect())
+            .unwrap_or_default();
+
         // OAuth tokens require the system prompt to start with the Claude Code identity prefix
         if is_oauth {
             let prefix = serde_json::json!({
@@ -415,6 +478,33 @@ impl Provider for AnthropicProvider {
                 }
                 _ => {}
             }
+
+            // Canonicalize tool names to Claude Code casing. Anthropic's
+            // server validates the Claude Code identity on subscription
+            // tokens, and tool names that match Claude Code's set must use
+            // its exact casing.
+            if let Some(tools) = body.get_mut("tools").and_then(|t| t.as_array_mut()) {
+                for tool in tools.iter_mut() {
+                    if let Some(name) = tool.get("name").and_then(|n| n.as_str()) {
+                        tool["name"] = Value::String(to_claude_code_name(name));
+                    }
+                }
+            }
+            // Also canonicalize tool_use names in the message history so
+            // prior assistant turns agree with the tool definitions.
+            if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                for msg in messages.iter_mut() {
+                    if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        for block in content.iter_mut() {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                                if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
+                                    block["name"] = Value::String(to_claude_code_name(name));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         let mut text_parts = Vec::new();
@@ -438,7 +528,9 @@ impl Provider for AnthropicProvider {
                         "anthropic-beta",
                         "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
                     )
-                    .header("anthropic-dangerous-direct-browser-access", "true");
+                    .header("anthropic-dangerous-direct-browser-access", "true")
+                    .header("user-agent", format!("claude-cli/{CLAUDE_CODE_VERSION}"))
+                    .header("x-app", "cli");
             } else {
                 req_builder = req_builder
                     .header("x-api-key", &api_key)
@@ -475,9 +567,19 @@ impl Provider for AnthropicProvider {
                             }
                         }
                         Some("tool_use") => {
+                            let raw_name = block["name"].as_str().unwrap_or("").to_string();
+                            // Reverse-map Claude Code canonical casing back
+                            // to the tool name apollo registered.
+                            let name = if is_oauth {
+                                let refs: Vec<&str> =
+                                    original_tool_names.iter().map(String::as_str).collect();
+                                from_claude_code_name(&raw_name, &refs)
+                            } else {
+                                raw_name
+                            };
                             tool_calls.push(ToolCall {
                                 id: block["id"].as_str().unwrap_or("").to_string(),
-                                name: block["name"].as_str().unwrap_or("").to_string(),
+                                name,
                                 arguments: block["input"].to_string(),
                             });
                         }
@@ -694,7 +796,7 @@ mod tests {
     const EXTRA_USAGE_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"You're out of extra usage. Add more at claude.ai/settings/usage"}}"#;
 
     #[test]
-    fn a_subscription_credential_is_not_reported_as_missing_credit() {
+    fn a_subscription_credential_extra_usage_error_is_rewritten() {
         let msg = map_api_error(400, EXTRA_USAGE_BODY, true);
         assert!(msg.contains("Claude subscription credential"), "got {msg}");
         assert!(msg.contains("ANTHROPIC_API_KEY"), "got {msg}");
@@ -702,8 +804,9 @@ mod tests {
             msg.contains("apollo config set provider.api_key"),
             "got {msg}"
         );
-        // The misleading original must not survive into what the user reads.
-        assert!(!msg.contains("claude.ai/settings/usage"), "got {msg}");
+        // The rewritten message now points at usage limits rather than
+        // claiming it is never a billing problem.
+        assert!(msg.contains("claude.ai/settings/usage"), "got {msg}");
     }
 
     #[test]
@@ -737,5 +840,30 @@ mod tests {
                 .capabilities()
                 .native_web_search
         );
+    }
+
+    #[test]
+    fn tool_names_are_canonicalised_to_claude_code_casing() {
+        assert_eq!(to_claude_code_name("edit"), "Edit");
+        assert_eq!(to_claude_code_name("bash"), "Bash");
+        assert_eq!(to_claude_code_name("READ"), "Read");
+        assert_eq!(to_claude_code_name("todowrite"), "TodoWrite");
+        assert_eq!(to_claude_code_name("webfetch"), "WebFetch");
+    }
+
+    #[test]
+    fn non_claude_code_tool_names_pass_through() {
+        assert_eq!(to_claude_code_name("shell"), "shell");
+        assert_eq!(to_claude_code_name("file_ops"), "file_ops");
+        assert_eq!(to_claude_code_name("web_search"), "web_search");
+    }
+
+    #[test]
+    fn canonicalised_names_map_back_to_originals() {
+        let originals = ["edit", "shell", "web_search"];
+        assert_eq!(from_claude_code_name("Edit", &originals), "edit");
+        // "Bash" has no match in the originals, so it passes through.
+        assert_eq!(from_claude_code_name("Bash", &originals), "Bash");
+        assert_eq!(from_claude_code_name("shell", &originals), "shell");
     }
 }

@@ -14,7 +14,7 @@ repository = "https://github.com/tschk/apollo"
 homepage = "https://github.com/tschk/apollo"
 keywords = ["agent", "ai", "llm", "telegram", "automation"]
 categories = ["command-line-utilities", "web-programming::http-client"]
-exclude = ["/.cursor/", "/memory/", "/USER.md", "/SOUL.md", "/IDENTITY.md", "/MEMORY.md", "/NOW.md", "/HEARTBEAT.md", "/gemini.md", "/apollo.json", "/reminder_system.v"]
+exclude = ["/.cursor/", "/memory/", "/USER.md", "/SOUL.md", "/IDENTITY.md", "/MEMORY.md", "/NOW.md", "/HEARTBEAT.md", "/gemini.md", "/apollo.json"]
 
 [[bin]]
 name = "apollo"
@@ -183,3 +183,6 @@ lto = true          # Link-time optimization
 codegen-units = 1   # Single codegen unit
 strip = true        # Strip symbols
 panic = "abort"     # No unwind tables
+
+[patch.crates-io]
+rs_ai_oauth = { path = "../rs_ai/crates/rs_ai_oauth" }
