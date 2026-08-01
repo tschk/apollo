@@ -236,6 +236,7 @@ dependencies = [
  "dotenvy",
  "ed25519-dalek",
  "futures-util",
+ "jsonwebtoken",
  "libc",
  "parking_lot",
  "praefectus",

@@ -167,22 +167,24 @@ async fn assert_send(channel: &dyn Channel, mock: &Mock, chat_id: &str, shape: &
         .await
         .unwrap_or_else(|e| panic!("{name}: send() failed: {e}"));
 
+    // Match on method as well as path: a polling channel hits its own send
+    // path with GET, and that must not be mistaken for the outbound request.
     let hit = mock
         .hits()
         .into_iter()
-        .find(|h| h.path.contains(shape.path_contains))
+        .find(|h| h.path.contains(shape.path_contains) && h.method == shape.method)
         .unwrap_or_else(|| {
             panic!(
-                "{name}: send() made no request to a path containing {:?}; saw {:?}",
+                "{name}: send() made no {} request to a path containing {:?}; saw {:?}",
+                shape.method,
                 shape.path_contains,
                 mock.hits()
                     .iter()
-                    .map(|h| h.path.clone())
+                    .map(|h| format!("{} {}", h.method, h.path))
                     .collect::<Vec<_>>()
             )
         });
 
-    assert_eq!(hit.method, shape.method, "{name}: wrong HTTP method");
     for fragment in shape.body_contains {
         assert!(
             hit.body.contains(fragment),
@@ -297,13 +299,27 @@ async fn cli_conformance() {
 
 #[cfg(feature = "channel-discord")]
 #[tokio::test]
-#[ignore = "DEFECT: DiscordChannel::start() drops the sender (src/channels/discord.rs:51), \
-            so the receiver can never deliver anything and the bot is deaf. \
-            Ignored to keep the gates green; remove the ignore when start() is implemented."]
 async fn discord_conformance() {
     use apollo::channels::discord::DiscordChannel;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let mock = Mock::start(Arc::new(|_: &str| json(r#"{"id":"1"}"#))).await;
+    // The poller seeds its cursor from the first response without emitting, so
+    // history is not replayed at startup. The message arrives on a later poll.
+    let polls = Arc::new(AtomicUsize::new(0));
+    let mock = Mock::start(Arc::new(move |path: &str| {
+        if !path.contains("/messages") {
+            return json("{}");
+        }
+        if polls.fetch_add(1, Ordering::SeqCst) == 0 {
+            json("[]")
+        } else {
+            json(
+                r#"[{"id":"10","channel_id":"C1","content":"hello",
+                     "author":{"id":"u1","username":"u","bot":false}}]"#,
+            )
+        }
+    }))
+    .await;
     let mut channel =
         DiscordChannel::new("tok".to_string(), "C1".to_string()).with_api_base(&mock.base);
 
@@ -332,10 +348,6 @@ async fn discord_conformance() {
 
 #[cfg(feature = "channel-slack")]
 #[tokio::test]
-#[ignore = "DEFECT: SlackChannel::start() polls conversations.history without the required \
-            `channel` parameter (src/channels/slack.rs:130), so Slack rejects the call and \
-            no message is ever received. Ignored to keep the gates green; remove the ignore \
-            when the poller passes a channel."]
 async fn slack_conformance() {
     use apollo::channels::slack::SlackChannel;
 
@@ -390,16 +402,29 @@ async fn slack_conformance() {
 
 #[cfg(feature = "channel-googlechat")]
 #[tokio::test]
-#[ignore = "DEFECT: GoogleChatChannel::send() sends the raw service-account key as a bearer \
-            token (src/channels/googlechat.rs:~107) instead of exchanging it for an OAuth2 \
-            access token, so every send is rejected. Ignored to keep the gates green; remove \
-            the ignore when a token exchange is implemented."]
 async fn googlechat_conformance() {
     use apollo::channels::googlechat::GoogleChatChannel;
 
-    let mock = Mock::start(Arc::new(|_: &str| json("{}"))).await;
+    // Throwaway RSA key generated for this test only — it signs nothing real
+    // and guards no account.
+    const TEST_KEY: &str = include_str!("fixtures/googlechat_test_key.pem");
+
+    let mock = Mock::start(Arc::new(|path: &str| {
+        if path.ends_with("/token") {
+            json(r#"{"access_token":"issued-token","expires_in":3600}"#)
+        } else {
+            json("{}")
+        }
+    }))
+    .await;
     let port = free_port();
-    let mut channel = GoogleChatChannel::new("SERVICE_ACCOUNT_KEY")
+    let service_account = serde_json::json!({
+        "client_email": "bot@apollo.iam.gserviceaccount.com",
+        "private_key": TEST_KEY,
+        "token_uri": format!("{}/token", mock.base),
+    })
+    .to_string();
+    let mut channel = GoogleChatChannel::new(service_account)
         .with_api_base(&mock.base)
         .with_bind_addr(SocketAddr::from(([127, 0, 0, 1], port)));
 
@@ -427,9 +452,17 @@ async fn googlechat_conformance() {
         .await
         .unwrap();
     let hit = mock.wait_for("/messages").await;
+    assert_eq!(
+        hit.auth.as_deref(),
+        Some("Bearer issued-token"),
+        "googlechat: send() must use the exchanged OAuth2 token, not the key itself"
+    );
     assert!(
-        hit.auth.as_deref() != Some("Bearer SERVICE_ACCOUNT_KEY"),
-        "googlechat: service-account key sent verbatim as a bearer token"
+        !mock.hits().iter().any(|h| h
+            .auth
+            .as_deref()
+            .is_some_and(|a| a.contains("BEGIN PRIVATE KEY"))),
+        "googlechat: service-account key leaked into an Authorization header"
     );
 
     assert_reply_delivery_contract(&channel).await;
@@ -440,9 +473,6 @@ async fn googlechat_conformance() {
 
 #[cfg(feature = "channel-irc")]
 #[tokio::test]
-#[ignore = "DEFECT: IrcChannel::send() only logs the message (src/channels/irc.rs:~129) — \
-            it holds no writer handle, so the bot can receive but never reply. Ignored to \
-            keep the gates green; remove the ignore when send() writes PRIVMSG."]
 async fn irc_conformance() {
     use apollo::channels::irc::IrcChannel;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

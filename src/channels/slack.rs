@@ -50,6 +50,11 @@ impl Channel for SlackChannel {
         let (tx, rx) = mpsc::channel(32);
         let bot_token = self.bot_token.clone();
         let api_base = self.api_base.clone();
+        let Some(channel_id) = self.channel_id.clone() else {
+            anyhow::bail!(
+                "Slack channel requires a channel id — conversations.history cannot be polled without one"
+            );
+        };
 
         // Poll Slack conversations.history for new messages
         tokio::spawn(async move {
@@ -62,7 +67,7 @@ impl Channel for SlackChannel {
                 let resp = client
                     .get(format!("{}/conversations.history", api_base))
                     .header("Authorization", format!("Bearer {}", bot_token))
-                    .query(&[("limit", "5")])
+                    .query(&[("channel", channel_id.as_str()), ("limit", "5")])
                     .send()
                     .await;
 
@@ -92,7 +97,10 @@ impl Channel for SlackChannel {
                                         .unwrap_or("unknown")
                                         .to_string(),
                                     sender_name: None,
-                                    chat_id: msg["channel"].as_str().unwrap_or("").to_string(),
+                                    chat_id: msg["channel"]
+                                        .as_str()
+                                        .unwrap_or(channel_id.as_str())
+                                        .to_string(),
                                     text,
                                     is_group: true,
                                     reply_to: msg["thread_ts"].as_str().map(|s| s.to_string()),

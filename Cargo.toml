@@ -58,7 +58,7 @@ channel-whatsapp = []
 channel-signal = []
 channel-matrix = []
 channel-irc = []
-channel-googlechat = []
+channel-googlechat = ["dep:jsonwebtoken"]
 channel-msteams = []
 
 # Providers — pick what you need
@@ -162,6 +162,7 @@ dirs = "6.0"
 praefectus = { version = "0.8.0", optional = true }
 ed25519-dalek = { version = "2.1", features = ["rand_core"], optional = true }
 zkr = { version = "0.4.1", optional = true }
+jsonwebtoken = { version = "9", optional = true, default-features = false, features = ["use_pem"] }
 rs_ai = { version = "0.2", optional = true }
 rs_ai_core = { version = "0.2", optional = true }
 rs_ai_providers = { version = "0.2", optional = true, features = ["chatgpt", "gemini", "openai-compatible", "xai", "cloudflare"] }

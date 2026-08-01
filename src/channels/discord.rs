@@ -52,11 +52,73 @@ impl Channel for DiscordChannel {
     }
 
     async fn start(&mut self) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
-        let (_tx, rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(100);
+        let bot_token = self.bot_token.clone();
+        let channel_id = self.channel_id.clone();
+        let api_base = self.api_base.clone();
 
-        // For Discord, we'd normally set up a websocket gateway
-        // For now, return empty receiver (webhook-based would be easier)
-        // User can POST to /webhook/{channel} via gateway
+        tokio::spawn(async move {
+            let client = crate::http::shared();
+            let url = format!("{}/channels/{}/messages", api_base, channel_id);
+            // Seeded by the first poll so startup does not replay history.
+            let mut after: Option<String> = None;
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                let mut req = client
+                    .get(&url)
+                    .header("Authorization", format!("Bot {}", bot_token))
+                    .query(&[("limit", "50")]);
+                if let Some(after) = &after {
+                    req = req.query(&[("after", after.as_str())]);
+                }
+
+                let Ok(resp) = req.send().await else { continue };
+                let Ok(data) = resp.json::<serde_json::Value>().await else {
+                    continue;
+                };
+                let Some(messages) = data.as_array() else {
+                    continue;
+                };
+
+                // Discord returns newest first; oldest first is the delivery order.
+                for msg in messages.iter().rev() {
+                    let Some(id) = msg["id"].as_str() else {
+                        continue;
+                    };
+                    after = Some(id.to_string());
+
+                    if msg["author"]["bot"].as_bool().unwrap_or(false) {
+                        continue;
+                    }
+                    let text = msg["content"].as_str().unwrap_or("").to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+
+                    let incoming = IncomingMessage {
+                        id: id.to_string(),
+                        sender_id: msg["author"]["id"].as_str().unwrap_or("").to_string(),
+                        sender_name: msg["author"]["username"].as_str().map(|s| s.to_string()),
+                        chat_id: msg["channel_id"]
+                            .as_str()
+                            .unwrap_or(&channel_id)
+                            .to_string(),
+                        text,
+                        is_group: true,
+                        reply_to: msg["referenced_message"]["id"]
+                            .as_str()
+                            .map(|s| s.to_string()),
+                        timestamp: chrono::Utc::now(),
+                    };
+
+                    if tx.send(incoming).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
 
         Ok(rx)
     }
