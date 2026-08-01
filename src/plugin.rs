@@ -171,6 +171,8 @@ pub struct PluginContext {
     pub tools: Vec<Arc<dyn crate::tools::Tool>>,
     /// Hook manager for lifecycle hooks
     pub hooks: HookManager,
+    /// Channels registered by plugins, keyed by the name `--channel` selects.
+    pub channels: Vec<(String, crate::channels::ChannelBuilder)>,
 }
 
 impl PluginContext {
@@ -181,6 +183,23 @@ impl PluginContext {
     /// Register a tool that the agent can call
     pub fn register_tool(&mut self, tool: Arc<dyn crate::tools::Tool>) {
         self.tools.push(tool);
+    }
+
+    /// Register a channel the user can select with `--channel <name>`.
+    ///
+    /// This is the whole integration: no feature flag, no `mod.rs` entry, no
+    /// arm in the `serve` match. The builder receives the same
+    /// `[channel].settings` a built-in would.
+    pub fn register_channel<F>(&mut self, name: impl Into<String>, builder: F)
+    where
+        F: Fn(
+                &crate::channels::ChannelSettings,
+            ) -> anyhow::Result<Box<dyn crate::channels::Channel>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.channels.push((name.into(), Arc::new(builder)));
     }
 
     /// Register a lifecycle hook
@@ -205,6 +224,7 @@ impl PluginContext {
 pub struct PluginRegistry {
     plugins: HashMap<String, Arc<dyn Plugin>>,
     hooks: HookManager,
+    channels: crate::channels::ChannelRegistry,
 }
 
 impl PluginRegistry {
@@ -212,7 +232,14 @@ impl PluginRegistry {
         Self {
             plugins: HashMap::new(),
             hooks: HookManager::new(),
+            channels: crate::channels::ChannelRegistry::with_builtins(),
         }
+    }
+
+    /// Every channel that can be selected by name — built-ins plus whatever
+    /// plugins registered during `on_register`.
+    pub fn channels(&self) -> &crate::channels::ChannelRegistry {
+        &self.channels
     }
 
     /// Log discovered OpenClaw/Hermes plugins from workspace (host-agnostic).
@@ -236,6 +263,11 @@ impl PluginRegistry {
         // Register any tools the plugin exposed during on_register
         for tool in ctx.tools {
             tracing::info!("[plugin] '{}' registered tool: {}", name, tool.name());
+        }
+        // Merge channels so `--channel <name>` can reach them.
+        for (channel_name, builder) in ctx.channels {
+            tracing::info!("[plugin] '{}' registered channel: {}", name, channel_name);
+            self.channels.register_builder(channel_name, builder);
         }
         // Merge hooks
         self.hooks.lifecycle_hooks.extend(ctx.hooks.lifecycle_hooks);

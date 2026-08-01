@@ -3,7 +3,14 @@
 
 pub mod formatting;
 pub mod http_inject;
+pub mod registry;
 pub mod traits;
+#[cfg(any(
+    feature = "channel-googlechat",
+    feature = "channel-msteams",
+    feature = "channel-whatsapp"
+))]
+pub mod webhook;
 
 // Core channels (always available or feature-gated)
 #[cfg(feature = "channel-cli")]
@@ -27,4 +34,8 @@ pub mod telegram;
 #[cfg(feature = "channel-whatsapp")]
 pub mod whatsapp;
 
-pub use traits::{Channel, Delivery, DraftChannel, IncomingMessage, OutgoingMessage};
+pub use registry::{ChannelBuilder, ChannelRegistry, ChannelSettings};
+pub use traits::{
+    Channel, Delivery, DraftChannel, IncomingMessage, MediaKind, MediaSource, OutgoingMedia,
+    OutgoingMessage,
+};

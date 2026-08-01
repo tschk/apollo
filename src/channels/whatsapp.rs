@@ -72,91 +72,29 @@ impl Channel for WhatsAppChannel {
         let _access_token = self.access_token.clone();
         let bind_addr = self.bind_addr;
 
-        tokio::spawn(async move {
-            use axum::{
-                extract::Query,
-                routing::{get, post},
-                Json, Router,
-            };
+        use axum::{extract::Query, routing::get, Router};
 
-            let tx_clone = tx.clone();
-            let verify = verify_token.clone();
-
-            let app = Router::new()
-                .route(
-                    "/webhook",
-                    get(
-                        move |Query(params): Query<std::collections::HashMap<String, String>>| {
-                            let v = verify.clone();
-                            async move {
-                                // Webhook verification
-                                if params.get("hub.verify_token").map(|t| t.as_str()) == Some(&v) {
-                                    params.get("hub.challenge").cloned().unwrap_or_default()
-                                } else {
-                                    "Forbidden".to_string()
-                                }
-                            }
-                        },
-                    ),
-                )
-                .route(
-                    "/webhook",
-                    post(move |Json(body): Json<Value>| {
-                        let tx = tx_clone.clone();
-                        async move {
-                            // Parse incoming WhatsApp message
-                            if let Some(entries) = body["entry"].as_array() {
-                                for entry in entries {
-                                    if let Some(changes) = entry["changes"].as_array() {
-                                        for change in changes {
-                                            if let Some(messages) =
-                                                change["value"]["messages"].as_array()
-                                            {
-                                                for msg in messages {
-                                                    let text = msg["text"]["body"]
-                                                        .as_str()
-                                                        .unwrap_or("")
-                                                        .to_string();
-                                                    if text.is_empty() {
-                                                        continue;
-                                                    }
-
-                                                    let incoming = IncomingMessage {
-                                                        id: msg["id"]
-                                                            .as_str()
-                                                            .unwrap_or("")
-                                                            .to_string(),
-                                                        sender_id: msg["from"]
-                                                            .as_str()
-                                                            .unwrap_or("")
-                                                            .to_string(),
-                                                        sender_name: None,
-                                                        chat_id: msg["from"]
-                                                            .as_str()
-                                                            .unwrap_or("")
-                                                            .to_string(),
-                                                        text,
-                                                        is_group: false,
-                                                        reply_to: None,
-                                                        timestamp: chrono::Utc::now(),
-                                                    };
-
-                                                    let _ = tx.send(incoming).await;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            "OK"
+        let verify = verify_token.clone();
+        // Meta verifies ownership with a GET challenge before it will POST
+        // anything, so this route is merged alongside the shared JSON one.
+        let verification = Router::new().route(
+            "/webhook",
+            get(
+                move |Query(params): Query<std::collections::HashMap<String, String>>| {
+                    let v = verify.clone();
+                    async move {
+                        if params.get("hub.verify_token").map(|t| t.as_str()) == Some(&v) {
+                            params.get("hub.challenge").cloned().unwrap_or_default()
+                        } else {
+                            "Forbidden".to_string()
                         }
-                    }),
-                );
+                    }
+                },
+            ),
+        );
 
-            let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
-            axum::serve(listener, app).await.unwrap();
-        });
-
+        let app = verification.merge(super::webhook::json_route("/webhook", parse_webhook, tx));
+        super::webhook::spawn(bind_addr, app).await?;
         Ok(rx)
     }
 
@@ -195,4 +133,41 @@ impl Channel for WhatsAppChannel {
     async fn stop(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+/// Meta nests messages three levels deep and can batch several per delivery,
+/// so one payload yields zero or more messages.
+fn parse_webhook(body: &Value) -> Vec<IncomingMessage> {
+    let mut out = Vec::new();
+    let Some(entries) = body["entry"].as_array() else {
+        return out;
+    };
+    for entry in entries {
+        let Some(changes) = entry["changes"].as_array() else {
+            continue;
+        };
+        for change in changes {
+            let Some(messages) = change["value"]["messages"].as_array() else {
+                continue;
+            };
+            for msg in messages {
+                let text = msg["text"]["body"].as_str().unwrap_or("").to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                let from = msg["from"].as_str().unwrap_or("").to_string();
+                out.push(IncomingMessage {
+                    id: msg["id"].as_str().unwrap_or("").to_string(),
+                    sender_id: from.clone(),
+                    sender_name: None,
+                    chat_id: from,
+                    text,
+                    is_group: false,
+                    reply_to: None,
+                    timestamp: chrono::Utc::now(),
+                });
+            }
+        }
+    }
+    out
 }

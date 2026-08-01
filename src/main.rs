@@ -684,9 +684,13 @@ async fn main() -> anyhow::Result<()> {
                 runner = runner.with_zkr(zkr_store.clone(), cfg.zkr.clone());
             }
 
+            // Built-ins plus any channel a plugin registered. Taken before the
+            // registry moves into the runner, so `--channel` can reach it.
+            let channel_registry;
             {
                 let mut host_reg = apollo::plugin::PluginRegistry::new();
                 host_reg.ingest_host_plugins(&workspace, &cfg.plugin_layer.host_plugin_roots);
+                channel_registry = host_reg.channels().clone();
                 runner = runner.with_plugin_registry(host_reg).await;
             }
 
@@ -858,11 +862,30 @@ async fn main() -> anyhow::Result<()> {
                         // in if `apollo serve` ever needs to outlive an attached client.
                         std::future::pending::<()>().await;
                     }
+                    // Everything else comes from the registry, so a channel is
+                    // reachable as soon as it is registered — including one a
+                    // plugin added. The arms above stay because they carry
+                    // extra wiring (heartbeat, telegram's draft runtime) that
+                    // the generic path does not.
                     other => {
-                        anyhow::bail!(
-                            "Unknown channel: {} (supported: cli, telegram, discord, none)",
-                            other
+                        let settings = apollo::channels::ChannelSettings::new(
+                            cfg.channel.token.clone(),
+                            cfg.channel.settings.clone(),
                         );
+                        let mut ch = channel_registry.build(other, &settings)?;
+
+                        println!("apollo — {} via {}", cfg.model, ch.name());
+                        println!("   Listening for messages...");
+
+                        if let Some((cron_rx, cron_shutdown, cron_sched)) = cron_runtime.take() {
+                            let (_extra_tx, extra_rx) = tokio::sync::mpsc::channel(1);
+                            runner_arc
+                                .run_with_runtime_rx(ch.as_mut(), extra_rx, cron_rx, cron_sched)
+                                .await?;
+                            cron_shutdown.notify_waiters();
+                        } else {
+                            runner_arc.run(ch.as_mut()).await?;
+                        }
                     }
                 }
                 Ok::<(), anyhow::Error>(())

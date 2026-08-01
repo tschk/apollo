@@ -131,12 +131,12 @@ impl GoogleChatChannel {
     }
 }
 
-fn parse_webhook_message(body: &Value) -> Option<IncomingMessage> {
+fn parse_webhook_message(body: &Value) -> Vec<IncomingMessage> {
     if body["type"].as_str() == Some("MESSAGE") {
         let msg = &body["message"];
         let text = msg["text"].as_str().unwrap_or("").to_string();
         if !text.is_empty() {
-            return Some(IncomingMessage {
+            return vec![IncomingMessage {
                 id: msg["name"].as_str().unwrap_or("").to_string(),
                 sender_id: body["user"]["name"].as_str().unwrap_or("").to_string(),
                 sender_name: body["user"]["displayName"].as_str().map(|s| s.to_string()),
@@ -145,10 +145,10 @@ fn parse_webhook_message(body: &Value) -> Option<IncomingMessage> {
                 is_group: body["space"]["type"].as_str() == Some("ROOM"),
                 reply_to: None,
                 timestamp: chrono::Utc::now(),
-            });
+            }];
         }
     }
-    None
+    Vec::new()
 }
 
 #[async_trait]
@@ -159,30 +159,14 @@ impl Channel for GoogleChatChannel {
 
     async fn start(&mut self) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
         let (tx, rx) = mpsc::channel(32);
-        // Google Chat uses webhooks/pub-sub — webhook receiver needed
-        let _key = self.service_account_key.clone();
-        let bind_addr = self.bind_addr;
-
-        tokio::spawn(async move {
-            use axum::{routing::post, Json, Router};
-
-            let app = Router::new().route(
-                "/googlechat/webhook",
-                post(move |Json(body): Json<Value>| {
-                    let tx = tx.clone();
-                    async move {
-                        if let Some(incoming) = parse_webhook_message(&body) {
-                            let _ = tx.send(incoming).await;
-                        }
-                        "{}"
-                    }
-                }),
-            );
-
-            let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
-            axum::serve(listener, app).await.unwrap();
-        });
-
+        // Google Chat pushes over a webhook rather than offering a poll.
+        super::webhook::serve_json(
+            self.bind_addr,
+            "/googlechat/webhook",
+            parse_webhook_message,
+            tx,
+        )
+        .await?;
         Ok(rx)
     }
 

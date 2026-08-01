@@ -51,50 +51,7 @@ impl Channel for TeamsChannel {
     async fn start(&mut self) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
         let (tx, rx) = mpsc::channel(32);
         let _app_id = self.app_id.clone();
-        let bind_addr = self.bind_addr;
-
-        tokio::spawn(async move {
-            use axum::{routing::post, Json, Router};
-
-            let app = Router::new().route(
-                "/api/messages",
-                post(move |Json(body): Json<Value>| {
-                    let tx = tx.clone();
-                    async move {
-                        if body["type"].as_str() == Some("message") {
-                            let text = body["text"].as_str().unwrap_or("").to_string();
-                            if !text.is_empty() {
-                                let incoming = IncomingMessage {
-                                    id: body["id"].as_str().unwrap_or("").to_string(),
-                                    sender_id: body["from"]["id"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    sender_name: body["from"]["name"]
-                                        .as_str()
-                                        .map(|s| s.to_string()),
-                                    chat_id: body["conversation"]["id"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    text,
-                                    is_group: body["conversation"]["conversationType"].as_str()
-                                        == Some("groupChat"),
-                                    reply_to: None,
-                                    timestamp: chrono::Utc::now(),
-                                };
-                                let _ = tx.send(incoming).await;
-                            }
-                        }
-                        axum::http::StatusCode::OK
-                    }
-                }),
-            );
-
-            let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
-            axum::serve(listener, app).await.unwrap();
-        });
-
+        super::webhook::serve_json(self.bind_addr, "/api/messages", parse_activity, tx).await?;
         Ok(rx)
     }
 
@@ -137,4 +94,29 @@ impl Channel for TeamsChannel {
     async fn stop(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+/// Bot Framework activity → apollo message. Only `message` activities carry
+/// user text; the rest (typing, conversationUpdate) are ignored.
+fn parse_activity(body: &Value) -> Vec<IncomingMessage> {
+    if body["type"].as_str() != Some("message") {
+        return Vec::new();
+    }
+    let text = body["text"].as_str().unwrap_or("").to_string();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    vec![IncomingMessage {
+        id: body["id"].as_str().unwrap_or("").to_string(),
+        sender_id: body["from"]["id"].as_str().unwrap_or("").to_string(),
+        sender_name: body["from"]["name"].as_str().map(|s| s.to_string()),
+        chat_id: body["conversation"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        text,
+        is_group: body["conversation"]["conversationType"].as_str() == Some("groupChat"),
+        reply_to: None,
+        timestamp: chrono::Utc::now(),
+    }]
 }

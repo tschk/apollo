@@ -146,6 +146,11 @@ pub struct ChannelConfig {
     pub allowed_chat_ids: Vec<String>,
     /// When non-empty, only these sender user IDs may send inbound messages.
     pub allowed_sender_ids: Vec<String>,
+    /// Free-form per-channel settings (`channel_id`, `space`, `server`, `nick`,
+    /// …). Kept untyped so a channel — including one registered by a plugin —
+    /// can take the parameters it needs without a config schema change.
+    #[serde(default)]
+    pub settings: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -557,6 +562,7 @@ impl Default for ChannelConfig {
             token: None,
             allowed_chat_ids: Vec::new(),
             allowed_sender_ids: Vec::new(),
+            settings: std::collections::HashMap::new(),
         }
     }
 }

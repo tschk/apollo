@@ -10,7 +10,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::formatting::{chunk_outgoing_text, format_outgoing_text, FormatTarget};
-use super::traits::{Channel, IncomingMessage, OutgoingMessage};
+use super::traits::{
+    Channel, IncomingMessage, MediaKind, MediaSource, OutgoingMedia, OutgoingMessage,
+};
 use crate::memory::MemoryBackend;
 
 /// Telegram message length limit
@@ -522,6 +524,71 @@ impl Channel for TelegramChannel {
         } else {
             Ok(None)
         }
+    }
+
+    fn supports_media(&self) -> bool {
+        true
+    }
+
+    async fn send_media(&self, media: OutgoingMedia) -> anyhow::Result<Option<String>> {
+        let chat_id = media.chat_id.parse::<i64>()?;
+        let field = media.kind.field();
+        let method = match media.kind {
+            MediaKind::Image => "sendPhoto",
+            MediaKind::Document => "sendDocument",
+            MediaKind::Voice => "sendVoice",
+            MediaKind::Video => "sendVideo",
+            MediaKind::Animation => "sendAnimation",
+        };
+
+        let request = match &media.source {
+            // Telegram fetches a remote URL itself, so this stays a JSON call.
+            MediaSource::Url(url) => {
+                let mut body = serde_json::json!({ "chat_id": chat_id, field: url });
+                if let Some(caption) = &media.caption {
+                    body["caption"] = serde_json::Value::String(caption.clone());
+                }
+                if let Some(reply_to) = &media.reply_to {
+                    if let Ok(id) = reply_to.parse::<i64>() {
+                        body["reply_to_message_id"] = serde_json::json!(id);
+                    }
+                }
+                self.client.post(self.api_url(method)).json(&body)
+            }
+            // Local files have to be uploaded as multipart.
+            MediaSource::Path(path) => {
+                let bytes = tokio::fs::read(path).await.map_err(|e| {
+                    anyhow::anyhow!("cannot read attachment {}: {e}", path.display())
+                })?;
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "upload".to_string());
+
+                let mut form = reqwest::multipart::Form::new()
+                    .text("chat_id", chat_id.to_string())
+                    .part(
+                        field.to_string(),
+                        reqwest::multipart::Part::bytes(bytes).file_name(name),
+                    );
+                if let Some(caption) = &media.caption {
+                    form = form.text("caption", caption.clone());
+                }
+                if let Some(reply_to) = &media.reply_to {
+                    form = form.text("reply_to_message_id", reply_to.clone());
+                }
+                self.client.post(self.api_url(method)).multipart(form)
+            }
+        };
+
+        let resp = request.send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Telegram {method} failed: {}", resp.status());
+        }
+        let body = resp.json::<serde_json::Value>().await?;
+        Ok(body["result"]["message_id"]
+            .as_i64()
+            .map(|id| id.to_string()))
     }
 
     async fn send_typing(&self, chat_id: &str) -> anyhow::Result<()> {

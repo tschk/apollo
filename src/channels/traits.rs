@@ -1,6 +1,8 @@
 //! Core Channel trait — messaging interface.
 //! Inspired by ZeroClaw's channel abstraction + NanoClaw's group isolation.
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -26,6 +28,78 @@ pub struct OutgoingMessage {
     pub reply_to: Option<String>,
 }
 
+/// What kind of attachment is being sent. Channels map this onto their own
+/// endpoint or MIME handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    Document,
+    Voice,
+    Video,
+    Animation,
+}
+
+impl MediaKind {
+    /// The field name most upload APIs expect for this kind of attachment.
+    pub fn field(self) -> &'static str {
+        match self {
+            MediaKind::Image => "photo",
+            MediaKind::Document => "document",
+            MediaKind::Voice => "voice",
+            MediaKind::Video => "video",
+            MediaKind::Animation => "animation",
+        }
+    }
+}
+
+/// Where the bytes come from. A remote URL is handed to the platform to fetch;
+/// a local path is uploaded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MediaSource {
+    Url(String),
+    Path(std::path::PathBuf),
+}
+
+/// An outgoing attachment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutgoingMedia {
+    pub chat_id: String,
+    pub kind: MediaKind,
+    pub source: MediaSource,
+    pub caption: Option<String>,
+    pub reply_to: Option<String>,
+}
+
+impl OutgoingMedia {
+    /// An image from a URL — the common case for provider-generated pictures.
+    pub fn image_url(chat_id: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            chat_id: chat_id.into(),
+            kind: MediaKind::Image,
+            source: MediaSource::Url(url.into()),
+            caption: None,
+            reply_to: None,
+        }
+    }
+
+    /// A file on disk — the common case for locally rendered audio or images.
+    pub fn file(chat_id: impl Into<String>, kind: MediaKind, path: impl Into<PathBuf>) -> Self {
+        Self {
+            chat_id: chat_id.into(),
+            kind,
+            source: MediaSource::Path(path.into()),
+            caption: None,
+            reply_to: None,
+        }
+    }
+
+    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+}
+
 /// The core Channel trait.
 /// Implement for each messaging platform (Telegram, Discord, CLI, WebSocket, etc.)
 #[async_trait]
@@ -42,6 +116,21 @@ pub trait Channel: Send + Sync {
     /// Send a typing indicator (or equivalent) to the user.
     async fn send_typing(&self, _chat_id: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// Send an attachment.
+    ///
+    /// The default errors rather than silently degrading to a text message
+    /// with a URL in it: a caller that asked for a picture and got a link back
+    /// has been lied to. Channels that can carry media override this.
+    async fn send_media(&self, media: OutgoingMedia) -> anyhow::Result<Option<String>> {
+        anyhow::bail!("{} cannot send {:?} attachments", self.name(), media.kind)
+    }
+
+    /// Whether `send_media` will do anything for this channel. Callers that can
+    /// fall back to text should check this instead of sending and catching.
+    fn supports_media(&self) -> bool {
+        false
     }
 
     /// Edit a previously sent message if the channel supports it.

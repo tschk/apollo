@@ -9,6 +9,8 @@
 //! 3. The reply-delivery contract holds: a channel that does not implement
 //!    `DraftChannel` must leave `Delivery` in the `Return` arm, so the agent
 //!    loop hands the reply back to the caller instead of dropping it.
+//! 4. The media contract holds: `supports_media()` and `send_media()` agree,
+//!    so a channel never accepts an attachment it cannot deliver.
 //!
 //! Tests that are `#[ignore]`d are pinning a *known defect*, not a flaky test.
 //! Do not relax the assertion to make one pass — fix the channel.
@@ -19,7 +21,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use apollo::channels::{Channel, Delivery, IncomingMessage, OutgoingMessage};
+use apollo::channels::{Channel, Delivery, IncomingMessage, OutgoingMedia, OutgoingMessage};
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use tokio::sync::mpsc::Receiver;
@@ -201,6 +203,25 @@ async fn assert_send(channel: &dyn Channel, mock: &Mock, chat_id: &str, shape: &
     }
 }
 
+/// Assertion 4 — the media contract.
+///
+/// A channel either carries attachments or says so. What it must never do is
+/// accept `send_media` and quietly deliver a text message with a URL in it,
+/// which is what a caller asking for a picture would never detect.
+async fn assert_media_contract(channel: &dyn Channel) {
+    let name = channel.name().to_string();
+    if channel.supports_media() {
+        return;
+    }
+    let result = channel
+        .send_media(OutgoingMedia::image_url("conformance", "http://x/y.png"))
+        .await;
+    assert!(
+        result.is_err(),
+        "{name}: supports_media() is false but send_media() reported success"
+    );
+}
+
 /// Assertion 1 — `start()` gives a receiver that really delivers.
 async fn assert_receives(name: &str, rx: &mut Receiver<IncomingMessage>) -> IncomingMessage {
     match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
@@ -270,6 +291,46 @@ async fn telegram_conformance() {
     .await;
 
     assert_reply_delivery_contract(&channel).await;
+    assert_media_contract(&channel).await;
+
+    // Telegram is the one channel that really carries media, so it gets the
+    // positive case: a URL attachment goes to sendPhoto as JSON, and a local
+    // file is uploaded as multipart.
+    assert!(channel.supports_media());
+    channel
+        .send_media(
+            OutgoingMedia::image_url("42", "https://example.invalid/cat.png").with_caption("a cat"),
+        )
+        .await
+        .expect("telegram send_media(url) failed");
+    let hit = mock.wait_for("/sendPhoto").await;
+    assert!(hit.body.contains("cat.png"), "body was {:?}", hit.body);
+    assert!(
+        hit.body.contains("a cat"),
+        "caption missing: {:?}",
+        hit.body
+    );
+
+    let dir = std::env::temp_dir().join("apollo-conformance-media");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("note.ogg");
+    std::fs::write(&file, b"RIFFvoice").unwrap();
+    channel
+        .send_media(OutgoingMedia::file(
+            "42",
+            apollo::channels::MediaKind::Voice,
+            &file,
+        ))
+        .await
+        .expect("telegram send_media(path) failed");
+    let hit = mock.wait_for("/sendVoice").await;
+    assert!(
+        hit.body.contains("note.ogg") && hit.body.contains("RIFFvoice"),
+        "voice upload was not multipart with the file bytes: {:?}",
+        hit.body
+    );
+    let _ = std::fs::remove_file(&file);
+
     channel.stop().await.unwrap();
 }
 
@@ -292,6 +353,7 @@ async fn cli_conformance() {
         .await
         .unwrap();
     assert_reply_delivery_contract(&channel).await;
+    assert_media_contract(&channel).await;
     channel.stop().await.unwrap();
 }
 
@@ -341,6 +403,7 @@ async fn discord_conformance() {
     .await;
 
     assert_reply_delivery_contract(&channel).await;
+    assert_media_contract(&channel).await;
     channel.stop().await.unwrap();
 }
 
@@ -395,6 +458,7 @@ async fn slack_conformance() {
     .await;
 
     assert_reply_delivery_contract(&channel).await;
+    assert_media_contract(&channel).await;
     channel.stop().await.unwrap();
 }
 
@@ -466,6 +530,7 @@ async fn googlechat_conformance() {
     );
 
     assert_reply_delivery_contract(&channel).await;
+    assert_media_contract(&channel).await;
     channel.stop().await.unwrap();
 }
 
@@ -525,6 +590,7 @@ async fn irc_conformance() {
     );
 
     assert_reply_delivery_contract(&channel).await;
+    assert_media_contract(&channel).await;
     channel.stop().await.unwrap();
 }
 
@@ -568,6 +634,7 @@ async fn matrix_conformance() {
     .await;
 
     assert_reply_delivery_contract(&channel).await;
+    assert_media_contract(&channel).await;
     channel.stop().await.unwrap();
 }
 
@@ -609,6 +676,7 @@ async fn signal_conformance() {
     .await;
 
     assert_reply_delivery_contract(&channel).await;
+    assert_media_contract(&channel).await;
     channel.stop().await.unwrap();
 }
 
@@ -653,6 +721,7 @@ async fn whatsapp_conformance() {
     .await;
 
     assert_reply_delivery_contract(&channel).await;
+    assert_media_contract(&channel).await;
     channel.stop().await.unwrap();
 }
 
@@ -707,5 +776,6 @@ async fn msteams_conformance() {
     .await;
 
     assert_reply_delivery_contract(&channel).await;
+    assert_media_contract(&channel).await;
     channel.stop().await.unwrap();
 }
