@@ -74,6 +74,38 @@ fn web_search_tool_type(model: &str) -> &'static str {
     }
 }
 
+/// What Anthropic says when a subscription OAuth credential is used outside
+/// the product it was issued for. The wording is about API credit, which is
+/// not what has gone wrong.
+const EXTRA_USAGE_MARKER: &str = "out of extra usage";
+
+/// What apollo says instead.
+const CREDENTIAL_MISMATCH_HELP: &str = concat!(
+    "Anthropic rejected this request because apollo is authenticating with a \
+     Claude subscription credential (an OAuth token from a Claude.ai login). \
+     That credential is issued for Claude Code, not for apollo, and Anthropic \
+     reports it as an extra-usage error even when the subscription is fine — \
+     this is not a billing problem and adding credit will not fix it. ",
+    "apollo needs an Anthropic API key: create one at \
+     https://platform.claude.com/settings/keys, then either run \
+     `apollo config set provider.api_key sk-ant-...` or set the \
+     ANTHROPIC_API_KEY environment variable."
+);
+
+/// Rewrite the credit-shaped error into the credential-shaped one it actually
+/// is. Anything else is returned verbatim — a real out-of-credit error on an
+/// API key still has to read as one.
+fn map_api_error(status: u16, body: &str, is_oauth: bool) -> String {
+    if is_oauth && status == 400 && body.contains(EXTRA_USAGE_MARKER) {
+        return CREDENTIAL_MISMATCH_HELP.to_string();
+    }
+    format!(
+        "Anthropic API error {}: {}",
+        status,
+        truncate_chars(body, 200)
+    )
+}
+
 /// Claude subscription OAuth access tokens carry the `sk-ant-oat` prefix;
 /// API keys carry `sk-ant-api`.
 fn is_oauth_credential(key: &str) -> bool {
@@ -134,16 +166,21 @@ impl AnthropicProvider {
         }
 
         // Try loading from Claude.dev OAuth credentials
-        if let Ok(cache) = super::oauth::OAuthTokenCache::from_credentials_file() {
-            let (token, _, _) = super::oauth::load_oauth_token_from_file()?;
-            let mut provider = Self::new(token);
-            provider.oauth = Some(cache);
-            return Ok(provider);
+        match super::oauth::OAuthTokenCache::from_credentials_file() {
+            Ok(cache) => {
+                let (token, _, _) = super::oauth::load_oauth_token_from_file()?;
+                let mut provider = Self::new(token);
+                provider.oauth = Some(cache);
+                Ok(provider)
+            }
+            // The credential loader knows why it could not produce a usable
+            // token — a missing file reads very differently from a dead one, so
+            // pass its reason through instead of replacing it with a generic
+            // "no key found".
+            Err(e) => Err(anyhow::anyhow!(
+                "No ANTHROPIC_API_KEY found, and no usable Claude OAuth credential: {e}"
+            )),
         }
-
-        Err(anyhow::anyhow!(
-            "No ANTHROPIC_API_KEY found. Set env var or install Claude for Desktop with OAuth token."
-        ))
     }
 
     /// Resolve the credential for a request, refreshing an expired OAuth token
@@ -413,11 +450,7 @@ impl Provider for AnthropicProvider {
             if !resp.status().is_success() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                anyhow::bail!(
-                    "Anthropic API error {}: {}",
-                    status,
-                    truncate_chars(&text, 200)
-                );
+                anyhow::bail!(map_api_error(status.as_u16(), &text, is_oauth));
             }
 
             // Capture response headers for rate limit tracking
@@ -656,6 +689,43 @@ mod tests {
         );
         // Partial text still comes back rather than an error or nothing.
         assert!(r.text.unwrap_or_default().starts_with("part0 "));
+    }
+
+    const EXTRA_USAGE_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"You're out of extra usage. Add more at claude.ai/settings/usage"}}"#;
+
+    #[test]
+    fn a_subscription_credential_is_not_reported_as_missing_credit() {
+        let msg = map_api_error(400, EXTRA_USAGE_BODY, true);
+        assert!(msg.contains("Claude subscription credential"), "got {msg}");
+        assert!(msg.contains("ANTHROPIC_API_KEY"), "got {msg}");
+        assert!(
+            msg.contains("apollo config set provider.api_key"),
+            "got {msg}"
+        );
+        // The misleading original must not survive into what the user reads.
+        assert!(!msg.contains("claude.ai/settings/usage"), "got {msg}");
+    }
+
+    #[test]
+    fn the_same_error_on_an_api_key_is_left_alone() {
+        // An API key really can run out of credit; that message is accurate.
+        let msg = map_api_error(400, EXTRA_USAGE_BODY, false);
+        assert!(msg.starts_with("Anthropic API error 400"), "got {msg}");
+        assert!(msg.contains("out of extra usage"), "got {msg}");
+    }
+
+    #[test]
+    fn other_oauth_errors_are_left_alone() {
+        let msg = map_api_error(401, r#"{"error":{"message":"invalid bearer"}}"#, true);
+        assert!(msg.starts_with("Anthropic API error 401"), "got {msg}");
+        assert!(msg.contains("invalid bearer"), "got {msg}");
+    }
+
+    #[test]
+    fn oauth_credentials_are_recognised_by_prefix() {
+        assert!(is_oauth_credential("sk-ant-oat01-abc"));
+        assert!(!is_oauth_credential("sk-ant-api03-abc"));
+        assert!(!is_oauth_credential(""));
     }
 
     #[test]
