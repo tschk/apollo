@@ -9,6 +9,7 @@
 //!   group:messaging — message (Telegram send/edit/delete)
 
 pub mod brief;
+pub mod build_runner;
 #[cfg(feature = "plugin-browser")]
 pub mod browser;
 pub mod child_proc;
@@ -60,6 +61,7 @@ pub mod zkr;
 pub use brief::BriefTool;
 #[cfg(feature = "swarm")]
 pub use coding_swarm::CodingSwarmTool;
+pub use build_runner::BuildRunnerTool;
 pub use config_tool::ConfigTool;
 pub use cron_tool::CronTool;
 pub use sleep_tool::SleepTool;

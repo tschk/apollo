@@ -8,7 +8,7 @@ pub fn toolset_for_tool(name: &str) -> &'static str {
     match name {
         // Delegating a task to the worker runs commands on this machine, so it
         // belongs with `exec` rather than in the "misc" catch-all.
-        "exec" | "telekinesis" => "runtime",
+        "exec" | "telekinesis" | "build_runner" => "runtime",
         "Read" | "Write" | "Edit" => "fs",
         "web_search" | "web_fetch" | "browser" => "web",
         "memory_search" | "memory_get" | "session_search" | "brain_search" | "brain_query"

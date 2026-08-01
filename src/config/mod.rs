@@ -69,6 +69,10 @@ pub struct AgentConfig {
     /// or `rx4` (the rotary harness engine). apollo keeps ownership of context
     /// assembly and tools either way; `rx4` hands the loop itself to rx4.
     pub engine: String,
+    /// rx4 auto-compaction threshold. `0` leaves compaction off (the bridge
+    /// default); a non-zero value is forwarded to `Agent::auto_compact_after`,
+    /// which rx4 interprets as an estimated-token cutoff before each prompt.
+    pub auto_compact_after: usize,
 }
 
 /// Which agent loop executes a turn.
@@ -108,6 +112,7 @@ impl Default for AgentConfig {
             permissions: PermissionRulesConfig::default(),
             permission_profile: "auto".to_string(),
             engine: "legacy".to_string(),
+            auto_compact_after: 0,
         }
     }
 }

@@ -403,6 +403,9 @@ pub struct RotaryBridgeConfig {
     pub model: String,
     pub workspace: std::path::PathBuf,
     pub max_tool_iterations: usize,
+    /// rx4 auto-compaction threshold. `0` leaves compaction off; a non-zero
+    /// value is forwarded to `Agent::auto_compact_after`.
+    pub auto_compact_after: usize,
     /// Pre/post tool hooks, so rx4 enforces the same permissions as the
     /// legacy loop.
     pub hook_ctx: ToolHookContext,
@@ -437,6 +440,10 @@ impl RotaryAgentBridge {
         agent.set_provider(rx4_provider);
         agent.set_workspace_root(&config.workspace);
         agent.max_tool_iterations = config.max_tool_iterations;
+        // rx4 leaves `auto_compact_after` at `0` by default, which disables
+        // compaction. Forward the configured threshold so a non-zero value
+        // turns rx4's auto-compact on.
+        agent.auto_compact_after = config.auto_compact_after;
 
         // apollo, not rx4, is the authorization authority here.
         //

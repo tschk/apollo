@@ -2,10 +2,10 @@
 //! Receives messages, uses tools, responds via channels.
 //! Inspired by HiClaw's Manager/Worker pattern.
 //!
-//! The core agent loop can run via either:
-//! - `AgentRunner` — apollo's built-in loop (default, legacy)
-//! - `RotaryAgentBridge` — delegates to rx4 (rotary) agent harness engine
+//! The loop itself is owned by the rx4 (rotary) harness via
+//! `RotaryAgentBridge`; apollo owns everything around it.
 
+pub mod build_runner;
 pub mod compaction;
 pub mod hooks;
 pub mod loop_runner;
@@ -15,7 +15,8 @@ pub mod stream;
 pub mod streaming;
 
 pub use loop_runner::AgentRunner;
-pub use mode::{agent_mode_from_permission_profile, AgentMode, NullChannel, PendingPlan};
+pub use mode::{agent_mode_from_permission_profile, AgentMode, NullChannel};
+pub use build_runner::{BuildRunner, BuildRunnerConfig, BuildResult, CompileError, DiagnosticSeverity};
 pub use rotary_bridge::{
     build_rx4_skill_engine, chat_message_to_rx4, register_apollo_tools, rx4_message_to_chat,
     RotaryAgentBridge, RotaryBridgeConfig, RotaryProviderAdapter, ToolHookContext,

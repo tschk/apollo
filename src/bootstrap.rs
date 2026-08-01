@@ -19,6 +19,7 @@ use crate::providers::Provider;
 use crate::tools::embeddings::{EmbeddingSearchTool, EmbeddingStatusTool, EmbeddingStoreTool};
 use crate::tools::file_ops::{FileReadTool, FileWriteTool};
 use crate::tools::shell::ShellTool;
+use crate::tools::build_runner::BuildRunnerTool;
 #[cfg(feature = "plugin-skills")]
 use crate::tools::skill_manager::SkillManagerTool;
 use crate::tools::toolsets::is_tool_enabled;
@@ -238,6 +239,10 @@ pub fn build_base_tools(
         Arc::new(MemoryGetTool::new(workspace.to_path_buf())),
         Arc::new(SessionSearchTool::new(Arc::clone(&memory))),
         Arc::new(crate::tools::doctor::DoctorTool::new()),
+        Arc::new(BuildRunnerTool::with_default_config(
+            workspace.to_path_buf(),
+            Arc::clone(&policy),
+        )),
         Arc::new(crate::tools::session::ListModelsTool::new()),
         Arc::new(crate::tools::dynamic::CreateToolTool::new(Arc::clone(
             &policy,
