@@ -107,6 +107,25 @@ enum Commands {
         json: bool,
     },
 
+    /// Verify a channel against its real service (send, receive, media)
+    ChannelCheck {
+        /// Configuration file path
+        #[arg(short, long, default_value = "apollo.json")]
+        config: String,
+
+        /// Channel name, as `--channel` takes it
+        #[arg(long)]
+        channel: String,
+
+        /// Seconds to wait for the echoed message before giving up
+        #[arg(long, default_value_t = 45)]
+        wait: u64,
+
+        /// Also upload a small attachment if the channel supports media
+        #[arg(long, default_value_t = false)]
+        media: bool,
+    },
+
     /// Run a focused security/config audit
     Audit {
         /// Configuration file path
@@ -689,7 +708,11 @@ async fn main() -> anyhow::Result<()> {
             let channel_registry;
             {
                 let mut host_reg = apollo::plugin::PluginRegistry::new();
-                host_reg.ingest_host_plugins(&workspace, &cfg.plugin_layer.host_plugin_roots);
+                host_reg.ingest_host_plugins_trusting(
+                    &workspace,
+                    &cfg.plugin_layer.host_plugin_roots,
+                    &cfg.plugin_layer.trusted_host_plugins,
+                );
                 channel_registry = host_reg.channels().clone();
                 runner = runner.with_plugin_registry(host_reg).await;
             }
@@ -930,6 +953,41 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("{}", render_doctor_report(&report));
+            }
+        }
+
+        Commands::ChannelCheck {
+            config,
+            channel,
+            wait,
+            media,
+        } => {
+            let cfg = load_config(&config);
+            let registry = apollo::channels::ChannelRegistry::with_builtins();
+            let settings = apollo::channels::ChannelSettings::new(
+                cfg.channel.token.clone(),
+                cfg.channel.settings.clone(),
+            );
+            let mut ch = registry.build(&channel, &settings)?;
+
+            println!("channel-check: {channel}");
+            let steps = apollo::channel_check::run(
+                ch.as_mut(),
+                &settings,
+                &apollo::channel_check::CheckOptions {
+                    chat_id: None,
+                    wait: std::time::Duration::from_secs(wait),
+                    media,
+                },
+            )
+            .await;
+
+            let failed = steps.iter().filter(|s| !s.ok).count();
+            if failed == 0 {
+                println!("\n{channel}: verified against the real service");
+            } else {
+                println!("\n{channel}: {failed} step(s) failed");
+                std::process::exit(1);
             }
         }
 
@@ -1262,7 +1320,11 @@ async fn main() -> anyhow::Result<()> {
 
             {
                 let mut host_reg = apollo::plugin::PluginRegistry::new();
-                host_reg.ingest_host_plugins(&workspace, &cfg.plugin_layer.host_plugin_roots);
+                host_reg.ingest_host_plugins_trusting(
+                    &workspace,
+                    &cfg.plugin_layer.host_plugin_roots,
+                    &cfg.plugin_layer.trusted_host_plugins,
+                );
                 runner = runner.with_plugin_registry(host_reg).await;
             }
 

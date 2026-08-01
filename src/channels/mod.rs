@@ -3,6 +3,7 @@
 
 pub mod formatting;
 pub mod http_inject;
+pub mod media;
 pub mod registry;
 pub mod traits;
 #[cfg(any(
@@ -17,6 +18,8 @@ pub mod webhook;
 pub mod cli;
 #[cfg(feature = "channel-discord")]
 pub mod discord;
+#[cfg(feature = "channel-discord")]
+pub mod discord_gateway;
 #[cfg(feature = "channel-googlechat")]
 pub mod googlechat;
 #[cfg(feature = "channel-irc")]

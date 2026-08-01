@@ -268,6 +268,21 @@ impl PluginRegistry {
     /// in-process registration still does nothing — see `docs/` before adding
     /// an execution model for those.
     pub fn ingest_host_plugins(&mut self, workspace: &std::path::Path, extra: &[PathBuf]) {
+        self.ingest_host_plugins_trusting(workspace, extra, &[]);
+    }
+
+    /// As `ingest_host_plugins`, additionally building the manifest-declared
+    /// tools of plugins named in `trusted`.
+    ///
+    /// Trust is per plugin id and defaults to empty, because discovery finds a
+    /// directory — it does not vouch for it. See `plugin_exec` for what a
+    /// trusted plugin is still not allowed to do.
+    pub fn ingest_host_plugins_trusting(
+        &mut self,
+        workspace: &std::path::Path,
+        extra: &[PathBuf],
+        trusted: &[String],
+    ) {
         let found = crate::plugin_hosts::discover_host_plugins(workspace, extra);
         for p in &found {
             tracing::info!(
@@ -276,6 +291,15 @@ impl PluginRegistry {
                 p.name.as_deref().unwrap_or("?"),
                 p.path
             );
+            for tool in crate::plugin_exec::HostPluginToolAdapter::build(p, trusted) {
+                let tool: Arc<dyn crate::tools::Tool> = Arc::new(tool);
+                tracing::info!(
+                    "[plugin-host] {} contributed trusted tool: {}",
+                    p.id,
+                    tool.name()
+                );
+                self.tools.push(tool);
+            }
         }
         self.host_plugins.extend(found);
     }

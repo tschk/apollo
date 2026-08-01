@@ -18,6 +18,25 @@ pub struct HostPluginEntry {
     pub path: PathBuf,
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Executables the manifest declares. Discovering these does **not** make
+    /// them runnable — see `plugin_layer.trusted_host_plugins`.
+    #[serde(default)]
+    pub tools: Vec<HostPluginTool>,
+}
+
+/// A command a host plugin manifest offers as an agent tool.
+///
+/// `command` is executed directly, never through a shell, and its JSON
+/// arguments arrive on stdin rather than in argv, so a crafted argument cannot
+/// become another flag or another command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostPluginTool {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 pub fn discover_host_plugins(workspace: &Path, extra_roots: &[PathBuf]) -> Vec<HostPluginEntry> {
@@ -73,6 +92,8 @@ fn entry_from_skill(path: &Path) -> HostPluginEntry {
         path: path.to_path_buf(),
         name,
         description,
+        // A SKILL.md is instructions, not an executable.
+        tools: Vec::new(),
     }
 }
 
@@ -104,6 +125,8 @@ struct HermesFile {
     id: String,
     name: Option<String>,
     description: Option<String>,
+    #[serde(default)]
+    tools: Vec<HostPluginTool>,
 }
 
 fn entry_from_hermes(path: &Path) -> anyhow::Result<HostPluginEntry> {
@@ -115,6 +138,7 @@ fn entry_from_hermes(path: &Path) -> anyhow::Result<HostPluginEntry> {
         path: path.to_path_buf(),
         name: m.name,
         description: m.description,
+        tools: m.tools,
     })
 }
 

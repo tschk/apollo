@@ -291,3 +291,70 @@ async fn plugin_tool_reaches_the_agent_tool_list() {
         "plugin tool never reached the agent; agent has {names:?}"
     );
 }
+
+// ───────────────────────── host plugin execution ─────────────────────────
+
+/// Writes a plugin.json declaring a `cat` tool, and returns the workspace.
+fn workspace_with_executable_plugin() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = dir.path().join("plugins/runner");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("plugin.json"),
+        serde_json::json!({
+            "id": "runner",
+            "name": "runner",
+            "tools": [{
+                "name": "echoer",
+                "description": "echoes stdin",
+                "command": "cat",
+                "args": []
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn a_discovered_plugin_executes_nothing_by_default() {
+    let dir = workspace_with_executable_plugin();
+    let mut registry = PluginRegistry::new();
+
+    // The normal path: discovery, no trust list.
+    registry.ingest_host_plugins(dir.path(), &[]);
+
+    assert_eq!(registry.host_plugins().len(), 1, "plugin should be found");
+    assert!(
+        registry.tools().is_empty(),
+        "a merely-discovered plugin must not contribute an executable tool"
+    );
+}
+
+#[tokio::test]
+async fn trusting_a_different_plugin_does_not_grant_execution() {
+    let dir = workspace_with_executable_plugin();
+    let mut registry = PluginRegistry::new();
+    registry.ingest_host_plugins_trusting(dir.path(), &[], &["hermes:something-else".to_string()]);
+    assert!(
+        registry.tools().is_empty(),
+        "trust must be per plugin id, not a global switch"
+    );
+}
+
+#[tokio::test]
+async fn a_trusted_plugin_contributes_a_working_tool() {
+    let dir = workspace_with_executable_plugin();
+    let mut registry = PluginRegistry::new();
+    registry.ingest_host_plugins_trusting(dir.path(), &[], &["hermes:runner".to_string()]);
+
+    let tools = registry.tools();
+    assert_eq!(tools.len(), 1, "trusted plugin tool was not built");
+    assert_eq!(tools[0].name(), "echoer");
+
+    // And it really runs, with the arguments arriving on stdin.
+    let result = tools[0].execute(r#"{"hello":"world"}"#).await.unwrap();
+    assert!(!result.is_error, "{}", result.output);
+    assert!(result.output.contains("hello"), "{}", result.output);
+}

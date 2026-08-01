@@ -91,10 +91,18 @@ impl ChannelRegistry {
 
         #[cfg(feature = "channel-discord")]
         reg.register("discord", |s| {
-            Ok(Box::new(super::discord::DiscordChannel::new(
-                s.token()?,
-                s.require("channel_id")?,
-            )))
+            use super::discord::Transport;
+            let mut ch = super::discord::DiscordChannel::new(s.token()?, s.require("channel_id")?);
+            // Gateway is the default; polling is the escape hatch for a bot
+            // without the privileged MESSAGE_CONTENT intent.
+            ch = match s.get("transport").as_deref() {
+                None | Some("gateway") => ch.with_transport(Transport::Gateway),
+                Some("polling") => ch.with_transport(Transport::Polling),
+                Some(other) => anyhow::bail!(
+                    "discord transport `{other}` is not valid (use `gateway` or `polling`)"
+                ),
+            };
+            Ok(Box::new(ch))
         });
 
         #[cfg(feature = "channel-slack")]

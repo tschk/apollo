@@ -172,6 +172,11 @@ pub struct PluginLayerConfig {
     /// Extra directories to scan for OpenClaw SKILL.md and Hermes plugin.json
     #[serde(default)]
     pub host_plugin_roots: Vec<PathBuf>,
+    /// Host plugin ids (`hermes:foo`) whose manifest-declared commands may be
+    /// executed. Empty by default: discovering a plugin grants it nothing,
+    /// because a discovered directory is not a trusted one.
+    #[serde(default)]
+    pub trusted_host_plugins: Vec<String>,
     pub hook_events: Vec<String>,
     pub allow_core_fallback: bool,
     pub layered_overrides: Vec<String>,
@@ -589,6 +594,9 @@ impl Default for PluginLayerConfig {
             enabled: true,
             manifest_path: default_manifest_path(),
             host_plugin_roots: Vec::new(),
+            // Deny-by-default: a discovered plugin executes nothing until it
+            // is named here.
+            trusted_host_plugins: Vec::new(),
             hook_events: vec![
                 "before_message".to_string(),
                 "after_message".to_string(),

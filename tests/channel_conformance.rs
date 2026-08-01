@@ -382,8 +382,12 @@ async fn discord_conformance() {
         }
     }))
     .await;
-    let mut channel =
-        DiscordChannel::new("tok".to_string(), "C1".to_string()).with_api_base(&mock.base);
+    // Pinned to polling: the gateway is the default transport and has its own
+    // test below, but polling stays supported for bots without the privileged
+    // MESSAGE_CONTENT intent, so it keeps its coverage.
+    let mut channel = DiscordChannel::new("tok".to_string(), "C1".to_string())
+        .with_api_base(&mock.base)
+        .with_transport(apollo::channels::discord::Transport::Polling);
 
     let mut rx = channel.start().await.unwrap();
     let msg = assert_receives("discord", &mut rx).await;
@@ -778,4 +782,194 @@ async fn msteams_conformance() {
     assert_reply_delivery_contract(&channel).await;
     assert_media_contract(&channel).await;
     channel.stop().await.unwrap();
+}
+
+// ───────────────────────── discord gateway ─────────────────────────
+
+/// A mock Discord gateway: HELLO, then a MESSAGE_CREATE once the client
+/// identifies. Asserts the client really identifies rather than assuming it.
+#[cfg(feature = "channel-discord")]
+async fn mock_gateway(dispatch: serde_json::Value) -> (String, Arc<Mutex<Vec<String>>>) {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::any(move |ws: WebSocketUpgrade| {
+            let recorded = Arc::clone(&recorded);
+            let dispatch = dispatch.clone();
+            async move {
+                ws.on_upgrade(move |mut socket| async move {
+                    let hello = serde_json::json!({
+                        "op": 10, "d": {"heartbeat_interval": 45000}
+                    });
+                    if socket
+                        .send(Message::Text(hello.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    while let Some(Ok(msg)) = socket.recv().await {
+                        if let Message::Text(text) = msg {
+                            let is_identify = serde_json::from_str::<serde_json::Value>(&text)
+                                .map(|v| v["op"].as_u64() == Some(2))
+                                .unwrap_or(false);
+                            recorded.lock().unwrap().push(text.to_string());
+                            if is_identify {
+                                let _ = socket
+                                    .send(Message::Text(dispatch.to_string().into()))
+                                    .await;
+                            }
+                        }
+                    }
+                })
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("ws://{addr}/"), seen)
+}
+
+#[cfg(feature = "channel-discord")]
+#[tokio::test]
+async fn discord_gateway_receives_and_identifies() {
+    use apollo::channels::discord::{DiscordChannel, Transport};
+
+    let (url, seen) = mock_gateway(serde_json::json!({
+        "op": 0, "s": 1, "t": "MESSAGE_CREATE",
+        "d": {
+            "id": "10", "channel_id": "C1", "content": "hello from gateway",
+            "author": {"id": "u1", "username": "u"}
+        }
+    }))
+    .await;
+
+    let mut channel = DiscordChannel::new("tok".to_string(), "C1".to_string())
+        .with_transport(Transport::Gateway)
+        .with_gateway_url(&url);
+
+    let mut rx = channel.start().await.unwrap();
+    let msg = assert_receives("discord-gateway", &mut rx).await;
+    assert_eq!(msg.text, "hello from gateway");
+    assert_eq!(msg.chat_id, "C1");
+    assert!(!msg.is_group, "no guild_id means a DM");
+
+    // The IDENTIFY has to carry the token and the privileged content intent,
+    // or a real gateway either rejects it or delivers empty messages.
+    let identify: serde_json::Value = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+        .find(|v| v["op"].as_u64() == Some(2))
+        .expect("client never sent IDENTIFY");
+    assert_eq!(identify["d"]["token"].as_str(), Some("tok"));
+    let intents = identify["d"]["intents"].as_u64().unwrap();
+    assert_eq!(
+        intents & (1 << 15),
+        1 << 15,
+        "MESSAGE_CONTENT intent missing"
+    );
+
+    channel.stop().await.unwrap();
+}
+
+// ───────────────────────── media uploads ─────────────────────────
+
+#[cfg(feature = "channel-discord")]
+#[tokio::test]
+async fn discord_uploads_media_as_multipart() {
+    use apollo::channels::discord::{DiscordChannel, Transport};
+    use apollo::channels::MediaKind;
+
+    let mock = Mock::start(Arc::new(|_: &str| json(r#"{"id":"99"}"#))).await;
+    let channel = DiscordChannel::new("tok".to_string(), "C1".to_string())
+        .with_api_base(&mock.base)
+        .with_transport(Transport::Polling);
+
+    let dir = std::env::temp_dir().join("apollo-discord-media");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("chart.png");
+    std::fs::write(&file, b"PNGDATA").unwrap();
+
+    let id = channel
+        .send_media(OutgoingMedia::file("C1", MediaKind::Image, &file).with_caption("the chart"))
+        .await
+        .expect("discord send_media failed");
+    assert_eq!(id.as_deref(), Some("99"));
+
+    let hit = mock.wait_for("/channels/C1/messages").await;
+    assert_eq!(hit.method, "POST");
+    assert!(hit.body.contains("chart.png"), "{:?}", hit.body);
+    assert!(hit.body.contains("PNGDATA"), "file bytes missing");
+    assert!(hit.body.contains("payload_json"), "{:?}", hit.body);
+    assert!(hit.body.contains("the chart"), "caption missing");
+    let _ = std::fs::remove_file(&file);
+}
+
+#[cfg(feature = "channel-slack")]
+#[tokio::test]
+async fn slack_uploads_media_through_the_external_flow() {
+    use apollo::channels::slack::SlackChannel;
+    use apollo::channels::MediaKind;
+
+    // The upload URL Slack hands back must point at this same mock, and the
+    // mock's address is only known after it binds — so the responder reads it
+    // from a cell filled in immediately after start.
+    let base_cell: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let responder_base = Arc::clone(&base_cell);
+    let mock = Mock::start(Arc::new(move |path: &str| {
+        if path.contains("files.getUploadURLExternal") {
+            let base = responder_base.lock().unwrap().clone();
+            json(&format!(
+                r#"{{"ok":true,"upload_url":"{base}/upload","file_id":"F1"}}"#
+            ))
+        } else {
+            json(r#"{"ok":true}"#)
+        }
+    }))
+    .await;
+    *base_cell.lock().unwrap() = mock.base.clone();
+
+    let channel = SlackChannel::new("tok")
+        .with_channel("C1")
+        .with_api_base(&mock.base);
+
+    let dir = std::env::temp_dir().join("apollo-slack-media");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notes.txt");
+    std::fs::write(&file, b"SLACKBYTES").unwrap();
+
+    let id = channel
+        .send_media(OutgoingMedia::file("C1", MediaKind::Document, &file).with_caption("see notes"))
+        .await
+        .expect("slack send_media failed");
+    assert_eq!(id.as_deref(), Some("F1"));
+
+    // All three steps must have happened, in the deprecated-API-free order.
+    let reserve = mock.wait_for("files.getUploadURLExternal").await;
+    assert!(
+        reserve.query.contains("filename=notes.txt"),
+        "{:?}",
+        reserve.query
+    );
+    assert!(reserve.query.contains("length=10"), "{:?}", reserve.query);
+
+    let upload = mock.wait_for("/upload").await;
+    assert!(upload.body.contains("SLACKBYTES"), "bytes never uploaded");
+
+    let complete = mock.wait_for("files.completeUploadExternal").await;
+    assert!(complete.body.contains("\"F1\""), "{:?}", complete.body);
+    assert!(complete.body.contains("C1"), "{:?}", complete.body);
+    assert!(complete.body.contains("see notes"), "{:?}", complete.body);
+
+    let _ = std::fs::remove_file(&file);
 }
