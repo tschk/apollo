@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use apollo::agent::hooks::PermissionHook;
 use apollo::agent::{agent_mode_from_permission_profile, AgentRunner};
 use apollo::autonomous::{AutonomousConfig, AutonomousLoop};
+use apollo::autoresearch::{AutoresearchConfig, AutoresearchLoop};
 use apollo::bootstrap::{
     build_base_tools, build_embedding_provider, build_memory_backend, build_provider, load_config,
     require_config_file,
@@ -284,6 +285,29 @@ enum Commands {
         resume: bool,
     },
 
+    /// Run bounded metric-driven experiments and keep only improvements
+    Autoresearch {
+        /// Configuration file path
+        #[arg(short, long, default_value = "apollo.json")]
+        config: String,
+
+        /// Workspace directory
+        #[arg(short, long)]
+        workspace: Option<PathBuf>,
+
+        /// Autoresearch specification (TOML)
+        #[arg(long, default_value = ".apollo/autoresearch.toml")]
+        spec: PathBuf,
+
+        /// Continue from the persisted ledger
+        #[arg(long, default_value_t = false)]
+        resume: bool,
+
+        /// Override the spec's iteration limit
+        #[arg(long)]
+        iterations: Option<usize>,
+    },
+
     /// Swarm commands (multi-agent coordination)
     Swarm {
         #[command(subcommand)]
@@ -535,6 +559,116 @@ enum SwarmAction {
 
     /// Show scheduler status
     Status,
+}
+
+/// Build the same unattended runner used by autonomous and autoresearch modes.
+fn configure_restricted_automation(cfg: &mut Config) {
+    // Autoresearch only needs local code execution and filesystem edits. Keep
+    // all conversational memory disabled as well: tool filtering alone does
+    // not prevent history, personal-context, or ZKR recall from being added to
+    // the model prompt by AgentRunner.
+    cfg.toolsets.enabled = vec!["runtime".into(), "fs".into()];
+    cfg.toolsets.disabled = vec![
+        "web".into(),
+        "browser".into(),
+        "memory".into(),
+        "sessions".into(),
+        "messaging".into(),
+        "advanced".into(),
+        "desktop".into(),
+        "media".into(),
+        "skills".into(),
+    ];
+    cfg.memory.inject_context = false;
+    cfg.memory.principal_id = None;
+    cfg.zkr.enabled = false;
+    cfg.zkr.auto_capture = false;
+    cfg.zkr.inject_recall = false;
+    cfg.zkr.self_improve = false;
+}
+
+async fn build_automation_agent(
+    config_path: &str,
+    workspace: &Path,
+    restricted: bool,
+) -> anyhow::Result<(Arc<AgentRunner>, Config)> {
+    let mut cfg = apollo::bootstrap::load_config_workspace(config_path, Some(workspace));
+    if restricted {
+        configure_restricted_automation(&mut cfg);
+    }
+    let provider = build_provider(&cfg);
+    let policy = Arc::new(ExecutionPolicy::from_config(&cfg.policy));
+    let memory = build_memory_backend(workspace, &cfg).await?;
+    let embedding_provider = build_embedding_provider(&cfg)?;
+    let system_prompt = prompt::build_system_prompt(workspace).await;
+    let discovered_skills = if restricted {
+        Vec::new()
+    } else {
+        skills::discover_skills_for_workspace(Some(workspace))
+    };
+
+    #[cfg(feature = "zkr-memory")]
+    let zkr_store = apollo::bootstrap::build_zkr_store(workspace, &cfg)
+        .ok()
+        .flatten();
+    #[cfg(feature = "zkr-memory")]
+    let mut tools = build_base_tools(
+        workspace,
+        Arc::clone(&policy),
+        memory.clone(),
+        embedding_provider,
+        Arc::clone(&provider),
+        &cfg,
+        zkr_store.clone(),
+    );
+    #[cfg(not(feature = "zkr-memory"))]
+    let mut tools = build_base_tools(
+        workspace,
+        Arc::clone(&policy),
+        memory.clone(),
+        embedding_provider,
+        Arc::clone(&provider),
+        &cfg,
+    );
+
+    if !restricted {
+        for tool in apollo::tools::dynamic::DynamicTool::load_all(Arc::clone(&policy)) {
+            tools.push(Arc::new(tool));
+        }
+    }
+
+    let mut runner = AgentRunner::new(provider, tools, memory, &system_prompt, cfg.model.clone())
+        .with_config(cfg.agent.clone())
+        .with_mode(agent_mode_from_permission_profile(
+            &cfg.agent.permission_profile,
+        ))
+        .with_workspace(workspace.to_path_buf())
+        .with_memory_enabled(!restricted)
+        .with_memory_ideas(cfg.memory.clone())
+        .with_group_chat(cfg.group_chat.clone())
+        .with_skills(discovered_skills)
+        .await;
+    #[cfg(feature = "zkr-memory")]
+    {
+        runner = runner.with_zkr(zkr_store, cfg.zkr.clone());
+    }
+
+    if !restricted {
+        let mut host_reg = apollo::plugin::PluginRegistry::new();
+        host_reg.ingest_host_plugins_trusting(
+            workspace,
+            &cfg.plugin_layer.host_plugin_roots,
+            &cfg.plugin_layer.trusted_host_plugins,
+        );
+        runner = runner.with_plugin_registry(host_reg).await;
+    }
+
+    let runner = Arc::new(runner);
+    runner.add_hook(Arc::new(PermissionHook::new(
+        cfg.agent.permissions.deny.clone(),
+        cfg.agent.permissions.allow.clone(),
+    )));
+    Ok((runner, cfg))
 }
 
 #[tokio::main]
@@ -1252,6 +1386,40 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 anyhow::bail!("Cron scheduler requires SurrealDB backend");
             }
+        }
+
+        Commands::Autoresearch {
+            config,
+            workspace,
+            spec,
+            resume,
+            iterations,
+        } => {
+            let workspace = workspace.unwrap_or_else(|| load_config(&config).workspace.clone());
+            let spec_path = if spec.is_absolute() {
+                spec
+            } else {
+                workspace.join(spec)
+            };
+            let mut autoresearch_config = AutoresearchConfig::load(&spec_path)?;
+            if let Some(iterations) = iterations {
+                autoresearch_config.max_iterations = iterations;
+            }
+            let (runner, _cfg) = build_automation_agent(&config, &workspace, true).await?;
+            println!(
+                "apollo v{} — autoresearch (objective: {})",
+                env!("CARGO_PKG_VERSION"),
+                autoresearch_config.objective
+            );
+            println!("   Workspace: {}", workspace.display());
+            let ledger = AutoresearchLoop::new(autoresearch_config, workspace)
+                .run(runner, resume)
+                .await?;
+            println!(
+                "   Best metric: {} ({} records)",
+                ledger.best_metric,
+                ledger.records.len()
+            );
         }
 
         Commands::Autonomous {
@@ -2093,6 +2261,7 @@ fn config_path_for_cli(cli: &Cli) -> Option<String> {
         | Some(Commands::SelfUpdate { config, .. })
         | Some(Commands::Mcp { config, .. })
         | Some(Commands::Autonomous { config, .. })
+        | Some(Commands::Autoresearch { config, .. })
         | Some(Commands::Serve { config, .. })
         | Some(Commands::Tui { config, .. }) => Some(config.clone()),
         Some(_) => None,
@@ -2121,7 +2290,23 @@ fn init_tracing(cfg: &apollo::config::ObservabilityConfig) -> anyhow::Result<()>
 
 #[cfg(test)]
 mod autostart_tests {
-    use super::{launchd_plist, systemd_unit, validate_autostart_config_path};
+    use super::{
+        configure_restricted_automation, launchd_plist, systemd_unit,
+        validate_autostart_config_path,
+    };
+    use apollo::config::Config;
+
+    #[test]
+    fn restricted_automation_disables_ambient_memory() {
+        let mut config = Config::default();
+        configure_restricted_automation(&mut config);
+        assert!(!config.memory.inject_context);
+        assert!(config.memory.principal_id.is_none());
+        assert!(!config.zkr.enabled);
+        assert!(!config.zkr.inject_recall);
+        assert!(!config.zkr.self_improve);
+        assert!(!config.zkr.auto_capture);
+    }
 
     /// A path with a space is ordinary on macOS, so it must be accepted and
     /// escaped rather than refused.

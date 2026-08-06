@@ -23,6 +23,7 @@ use rx4::provider::{
 
 use crate::agent::hooks::{run_post_hooks, run_pre_hooks, HookDecision, ToolHook};
 use crate::agent::stream::{emit, AgentStreamEvent, AgentStreamTx};
+use crate::cost::{ContextSnapshot, CostTracker, TokenUsage};
 use crate::plugin::{HookManager, LifecycleEvent, PluginRegistry};
 use crate::providers::{ChatMessage, ChatRequest, Provider as UnthinkclawProvider};
 use crate::tools::{Tool as UnthinkclawTool, ToolResult as UnthinkclawToolResult, ToolSpec};
@@ -214,16 +215,21 @@ pub struct RotaryProviderAdapter {
     inner: Arc<dyn UnthinkclawProvider>,
     id: String,
     name: String,
+    cost_tracker: Option<Arc<CostTracker>>,
 }
 
 impl RotaryProviderAdapter {
-    pub fn new(provider: Arc<dyn UnthinkclawProvider>) -> Self {
+    pub fn new(
+        provider: Arc<dyn UnthinkclawProvider>,
+        cost_tracker: Option<Arc<CostTracker>>,
+    ) -> Self {
         let id = provider.name().to_string();
         let name = format!("apollo-{}", provider.name());
         Self {
             inner: provider,
             id,
             name,
+            cost_tracker,
         }
     }
 }
@@ -300,11 +306,52 @@ impl Rx4Provider for RotaryProviderAdapter {
             max_tokens: Some(8192),
         };
 
+        if let Some(tracker) = &self.cost_tracker {
+            let system_chars = system
+                .as_ref()
+                .map(|value| value.chars().count())
+                .unwrap_or(0);
+            let history_chars = messages
+                .iter()
+                .map(|message| message.content.chars().count())
+                .sum::<usize>();
+            let tool_chars = tools
+                .iter()
+                .map(|tool| {
+                    serde_json::to_string(tool)
+                        .unwrap_or_default()
+                        .chars()
+                        .count()
+                })
+                .sum::<usize>();
+            tracker
+                .record_context(ContextSnapshot {
+                    system_chars,
+                    history_chars,
+                    tool_chars,
+                    estimated_input_tokens: (system_chars + history_chars + tool_chars).div_ceil(4),
+                })
+                .await;
+        }
+
         let response = self
             .inner
             .chat(&request)
             .await
             .map_err(|e| Rx4ProviderError::Api(e.to_string()))?;
+
+        if let (Some(tracker), Some(usage)) = (&self.cost_tracker, response.usage.as_ref()) {
+            let _ = tracker
+                .record(
+                    model,
+                    TokenUsage {
+                        input_tokens: usage.input_tokens as usize,
+                        output_tokens: usage.output_tokens as usize,
+                        total_tokens: usage.input_tokens as usize + usage.output_tokens as usize,
+                    },
+                )
+                .await;
+        }
 
         // Build a stream that emits the response as events
         let text = response.text.unwrap_or_default();
@@ -402,6 +449,8 @@ pub struct RotaryBridgeConfig {
     /// rx4 auto-compaction threshold. `0` leaves compaction off; a non-zero
     /// value is forwarded to `Agent::auto_compact_after`.
     pub auto_compact_after: usize,
+    /// Optional tracker used for provider usage and context-shape telemetry.
+    pub cost_tracker: Option<Arc<CostTracker>>,
     /// Pre/post tool hooks, so rx4 enforces the same permissions as the
     /// legacy loop.
     pub hook_ctx: ToolHookContext,
@@ -428,7 +477,10 @@ pub struct RotaryAgentBridge {
 impl RotaryAgentBridge {
     /// Build a new bridge from the given configuration.
     pub fn new(config: RotaryBridgeConfig) -> Self {
-        let rx4_provider = Arc::new(RotaryProviderAdapter::new(config.provider));
+        let rx4_provider = Arc::new(RotaryProviderAdapter::new(
+            config.provider,
+            config.cost_tracker,
+        ));
 
         let mut agent = rx4::Agent::new();
         agent.set_model(&config.model);
