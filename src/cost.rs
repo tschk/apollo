@@ -40,6 +40,26 @@ pub struct CostRecord {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// Estimated input shape for one provider request. These counts are based on
+/// characters because providers do not expose tokenizers uniformly; they are
+/// intended for comparing Apollo configurations, not billing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextSnapshot {
+    pub system_chars: usize,
+    pub history_chars: usize,
+    pub tool_chars: usize,
+    pub estimated_input_tokens: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextSummary {
+    pub request_count: usize,
+    pub system_chars: usize,
+    pub history_chars: usize,
+    pub tool_chars: usize,
+    pub estimated_input_tokens: usize,
+}
+
 /// Claude API rate limit status (from response headers)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitStatus {
@@ -55,6 +75,7 @@ pub struct RateLimitStatus {
 /// Cost tracker (in-memory + persistent accounting hooks)
 pub struct CostTracker {
     costs: Arc<RwLock<Vec<CostRecord>>>,
+    contexts: Arc<RwLock<Vec<ContextSnapshot>>>,
     models: Arc<RwLock<Vec<ModelCost>>>,
     rate_limit_status: Arc<RwLock<Option<RateLimitStatus>>>,
 }
@@ -96,6 +117,7 @@ impl CostTracker {
 
         Self {
             costs: Arc::new(RwLock::new(Vec::new())),
+            contexts: Arc::new(RwLock::new(Vec::new())),
             models: Arc::new(RwLock::new(models)),
             rate_limit_status: Arc::new(RwLock::new(None)),
         }
@@ -129,6 +151,26 @@ impl CostTracker {
         Ok(())
     }
 
+    /// Record the estimated shape of a provider request for harness telemetry.
+    pub async fn record_context(&self, snapshot: ContextSnapshot) {
+        self.contexts.write().await.push(snapshot);
+    }
+
+    /// Aggregate prompt-shape telemetry since this tracker was created.
+    pub async fn context_summary(&self) -> ContextSummary {
+        let contexts = self.contexts.read().await;
+        ContextSummary {
+            request_count: contexts.len(),
+            system_chars: contexts.iter().map(|item| item.system_chars).sum(),
+            history_chars: contexts.iter().map(|item| item.history_chars).sum(),
+            tool_chars: contexts.iter().map(|item| item.tool_chars).sum(),
+            estimated_input_tokens: contexts
+                .iter()
+                .map(|item| item.estimated_input_tokens)
+                .sum(),
+        }
+    }
+
     /// Get cost summary
     pub async fn summary(&self) -> CostSummary {
         let costs = self.costs.read().await;
@@ -143,11 +185,13 @@ impl CostTracker {
             *by_model.entry(cost.model.clone()).or_insert(0.0) += cost.cost_usd;
         }
 
+        let context = self.context_summary().await;
         CostSummary {
             total_cost,
             total_tokens,
             by_model,
             call_count: costs.len(),
+            context,
         }
     }
 
@@ -210,6 +254,7 @@ pub struct CostSummary {
     pub total_tokens: usize,
     pub by_model: std::collections::HashMap<String, f64>,
     pub call_count: usize,
+    pub context: ContextSummary,
 }
 
 #[cfg(test)]
@@ -312,5 +357,22 @@ mod tests {
             status.tokens_reset,
             Some("2023-11-20T12:00:00Z".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn context_telemetry_aggregates_request_shape() {
+        let tracker = CostTracker::new();
+        tracker
+            .record_context(ContextSnapshot {
+                system_chars: 40,
+                history_chars: 80,
+                tool_chars: 20,
+                estimated_input_tokens: 35,
+            })
+            .await;
+        let summary = tracker.context_summary().await;
+        assert_eq!(summary.request_count, 1);
+        assert_eq!(summary.estimated_input_tokens, 35);
+        assert_eq!(summary.system_chars, 40);
     }
 }

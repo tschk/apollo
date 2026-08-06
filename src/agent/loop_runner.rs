@@ -757,6 +757,7 @@ impl AgentRunner {
             workspace: self.workspace.clone(),
             max_tool_iterations: self.agent_config.max_rounds,
             auto_compact_after: self.agent_config.auto_compact_after,
+            cost_tracker: Some(Arc::clone(&self.cost_tracker)),
             // Both engines must run the same hooks and emit the same events.
             hook_ctx: crate::agent::rotary_bridge::ToolHookContext::new(
                 self.hooks.read().unwrap().clone(),

@@ -16,6 +16,7 @@
 pub mod agent;
 pub mod agent_http;
 pub mod autonomous;
+pub mod autoresearch;
 pub mod bootstrap;
 pub mod channel_check;
 pub mod channels;
