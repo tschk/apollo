@@ -75,7 +75,7 @@ pub struct RateLimitStatus {
 /// Cost tracker (in-memory + persistent accounting hooks)
 pub struct CostTracker {
     costs: Arc<RwLock<Vec<CostRecord>>>,
-    contexts: Arc<RwLock<Vec<ContextSnapshot>>>,
+    contexts: Arc<RwLock<ContextSummary>>,
     models: Arc<RwLock<Vec<ModelCost>>>,
     rate_limit_status: Arc<RwLock<Option<RateLimitStatus>>>,
 }
@@ -117,7 +117,7 @@ impl CostTracker {
 
         Self {
             costs: Arc::new(RwLock::new(Vec::new())),
-            contexts: Arc::new(RwLock::new(Vec::new())),
+            contexts: Arc::new(RwLock::new(ContextSummary::default())),
             models: Arc::new(RwLock::new(models)),
             rate_limit_status: Arc::new(RwLock::new(None)),
         }
@@ -153,22 +153,17 @@ impl CostTracker {
 
     /// Record the estimated shape of a provider request for harness telemetry.
     pub async fn record_context(&self, snapshot: ContextSnapshot) {
-        self.contexts.write().await.push(snapshot);
+        let mut summary = self.contexts.write().await;
+        summary.request_count += 1;
+        summary.system_chars += snapshot.system_chars;
+        summary.history_chars += snapshot.history_chars;
+        summary.tool_chars += snapshot.tool_chars;
+        summary.estimated_input_tokens += snapshot.estimated_input_tokens;
     }
 
     /// Aggregate prompt-shape telemetry since this tracker was created.
     pub async fn context_summary(&self) -> ContextSummary {
-        let contexts = self.contexts.read().await;
-        ContextSummary {
-            request_count: contexts.len(),
-            system_chars: contexts.iter().map(|item| item.system_chars).sum(),
-            history_chars: contexts.iter().map(|item| item.history_chars).sum(),
-            tool_chars: contexts.iter().map(|item| item.tool_chars).sum(),
-            estimated_input_tokens: contexts
-                .iter()
-                .map(|item| item.estimated_input_tokens)
-                .sum(),
-        }
+        self.contexts.read().await.clone()
     }
 
     /// Get cost summary
@@ -374,5 +369,18 @@ mod tests {
         assert_eq!(summary.request_count, 1);
         assert_eq!(summary.estimated_input_tokens, 35);
         assert_eq!(summary.system_chars, 40);
+
+        tracker
+            .record_context(ContextSnapshot {
+                system_chars: 2,
+                history_chars: 3,
+                tool_chars: 4,
+                estimated_input_tokens: 5,
+            })
+            .await;
+        let summary = tracker.context_summary().await;
+        assert_eq!(summary.request_count, 2);
+        assert_eq!(summary.system_chars, 42);
+        assert_eq!(summary.estimated_input_tokens, 40);
     }
 }

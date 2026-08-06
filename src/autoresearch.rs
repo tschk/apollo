@@ -6,12 +6,14 @@
 //! durable ledger.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::agent::NullChannel;
 use crate::channels::IncomingMessage;
@@ -143,16 +145,28 @@ pub struct AutoresearchLedger {
     pub direction: String,
     pub best_metric: f64,
     pub best_commit: String,
+    /// Branch on which this experiment started and accepted commits land.
+    #[serde(default)]
+    pub branch: String,
+    /// Stable chat id so a fresh run cannot inherit another run's history.
+    #[serde(default)]
+    pub chat_id: String,
+    /// Hash of the metric/validation definition used to produce this ledger.
+    #[serde(default)]
+    pub spec_fingerprint: String,
     pub records: Vec<ExperimentRecord>,
 }
 
 impl AutoresearchLedger {
-    fn new(config: &AutoresearchConfig, baseline: f64, commit: String) -> Self {
+    fn new(config: &AutoresearchConfig, baseline: f64, commit: String, branch: String) -> Self {
         Self {
             objective: config.objective.clone(),
             direction: config.direction.trim().to_ascii_lowercase(),
             best_metric: baseline,
             best_commit: commit,
+            branch,
+            chat_id: format!("autoresearch-{}", uuid::Uuid::new_v4()),
+            spec_fingerprint: spec_fingerprint(config),
             records: vec![ExperimentRecord {
                 iteration: 0,
                 hypothesis: "Initial measurement".to_string(),
@@ -189,27 +203,67 @@ impl AutoresearchLoop {
         let ledger_path = self.config.ledger_path(&self.workspace);
         ensure_ledger_path_safe(&self.workspace, &ledger_path).await?;
         ensure_clean_workspace(&self.workspace).await?;
+        let branch = git_branch(&self.workspace).await?;
+        if branch.is_empty() {
+            bail!("autoresearch requires a named branch; detached HEAD is not supported");
+        }
 
         let mut ledger = if resume {
-            load_ledger(&ledger_path).await?
+            let ledger = load_ledger(&ledger_path).await?;
+            if ledger.objective != self.config.objective
+                || ledger.direction != self.config.direction.trim().to_ascii_lowercase()
+            {
+                bail!("autoresearch ledger does not match the current spec; use a new ledger path");
+            }
+            if ledger.spec_fingerprint != spec_fingerprint(&self.config) {
+                bail!(
+                    "autoresearch ledger uses a different metric definition; use a new ledger path"
+                );
+            }
+            if ledger.branch.is_empty() || ledger.branch != branch {
+                bail!(
+                    "autoresearch ledger belongs to branch `{}`, current branch is `{}`",
+                    if ledger.branch.is_empty() {
+                        "<unknown>"
+                    } else {
+                        &ledger.branch
+                    },
+                    branch
+                );
+            }
+            let head = git_rev(&self.workspace).await?;
+            if ledger.best_commit.is_empty() || ledger.best_commit != head {
+                bail!(
+                    "autoresearch ledger best commit {} does not match workspace HEAD {}; restore the recorded commit or use a new ledger path",
+                    if ledger.best_commit.is_empty() { "<unknown>" } else { &ledger.best_commit },
+                    head
+                );
+            }
+            if ledger.chat_id.is_empty() {
+                bail!("autoresearch ledger has no run identity; use a new ledger path");
+            }
+            ledger
         } else {
             let commit = git_rev(&self.workspace).await?;
+            if !run_with_budget(
+                started,
+                self.config.max_duration_secs,
+                run_validation(&self.config, &self.workspace),
+            )
+            .await?
+            {
+                bail!("autoresearch baseline validation failed");
+            }
             let baseline = run_with_budget(
                 started,
                 self.config.max_duration_secs,
                 measure_metric(&self.config, &self.workspace),
             )
             .await?;
-            let ledger = AutoresearchLedger::new(&self.config, baseline, commit);
+            let ledger = AutoresearchLedger::new(&self.config, baseline, commit, branch.clone());
             save_ledger(&ledger_path, &ledger).await?;
             ledger
         };
-
-        if ledger.objective != self.config.objective
-            || ledger.direction != self.config.direction.trim().to_ascii_lowercase()
-        {
-            bail!("autoresearch ledger does not match the current spec; use a new ledger path");
-        }
 
         let start = ledger
             .records
@@ -227,6 +281,17 @@ impl AutoresearchLoop {
                 break;
             }
             let checkpoint = git_rev(&self.workspace).await?;
+            if checkpoint != ledger.best_commit {
+                bail!(
+                    "autoresearch workspace HEAD {} does not match ledger best commit {}",
+                    checkpoint,
+                    ledger.best_commit
+                );
+            }
+            if git_branch(&self.workspace).await? != ledger.branch {
+                bail!("autoresearch branch changed while the run was in progress");
+            }
+            let ignored_state = capture_ignored_state(&self.workspace).await?;
             let previous_best = ledger.best_metric;
             let prompt = format!(
                 "You are running one bounded autoresearch iteration.\n\n\
@@ -249,7 +314,7 @@ impl AutoresearchLoop {
                 id: uuid::Uuid::new_v4().to_string(),
                 sender_id: "autoresearch".to_string(),
                 sender_name: Some("Autoresearch".to_string()),
-                chat_id: "autoresearch".to_string(),
+                chat_id: ledger.chat_id.clone(),
                 text: prompt,
                 is_group: false,
                 reply_to: None,
@@ -269,6 +334,12 @@ impl AutoresearchLoop {
                 }
             };
             let result = run_with_budget(started, self.config.max_duration_secs, turn).await;
+
+            // The agent may edit files, but it must not move the experiment's
+            // branch or checkpoint. Verify before running trusted commands so
+            // a rejection can never reset an unrelated branch.
+            ensure_experiment_state(&self.workspace, &ledger.branch, &checkpoint).await?;
+            restore_ignored_state(&self.workspace, &ignored_state).await?;
 
             let hypothesis = result
                 .as_ref()
@@ -318,12 +389,44 @@ impl AutoresearchLoop {
                 }
             };
 
+            // Validation and metric commands are trusted shell, but they are
+            // still not allowed to move the branch or checkpoint. Their
+            // ignored-file side effects are also discarded before deciding.
+            ensure_experiment_state(&self.workspace, &ledger.branch, &checkpoint).await?;
+            restore_ignored_state(&self.workspace, &ignored_state).await?;
+
             let delta_percent = metric.map(|value| percent_delta(previous_best, value));
             let accepted = decision == ExperimentDecision::Accepted;
             let commit = if accepted {
-                Some(commit_experiment(&self.workspace, iteration).await?)
+                match run_with_budget(
+                    started,
+                    self.config.max_duration_secs,
+                    commit_experiment(
+                        &self.workspace,
+                        iteration,
+                        started,
+                        self.config.max_duration_secs,
+                    ),
+                )
+                .await
+                {
+                    Ok(commit) => Some(commit),
+                    Err(error) => {
+                        // A timed-out hook may have left git add's index
+                        // changes behind. Reset only if the branch and HEAD
+                        // are still the checkpoint we verified above.
+                        let current_branch = git_branch(&self.workspace).await?;
+                        let current_head = git_rev(&self.workspace).await?;
+                        if current_branch == ledger.branch && current_head == checkpoint {
+                            restore_checkpoint(&self.workspace, &checkpoint).await?;
+                            restore_ignored_state(&self.workspace, &ignored_state).await?;
+                        }
+                        bail!("autoresearch acceptance commit failed: {error}");
+                    }
+                }
             } else {
                 restore_checkpoint(&self.workspace, &checkpoint).await?;
+                restore_ignored_state(&self.workspace, &ignored_state).await?;
                 None
             };
 
@@ -359,6 +462,197 @@ async fn load_ledger(path: &Path) -> anyhow::Result<AutoresearchLedger> {
         .await
         .with_context(|| format!("reading autoresearch ledger {}", path.display()))?;
     Ok(toml::from_str(&content)?)
+}
+
+#[derive(Serialize)]
+struct ExperimentDefinition<'a> {
+    objective: &'a str,
+    metric_command: &'a str,
+    direction: &'a str,
+    validation_command: &'a str,
+    validation_retries: usize,
+    command_timeout_secs: u64,
+    samples: usize,
+    min_improvement_percent: f64,
+    max_iterations: usize,
+    max_duration_secs: u64,
+    model: &'a str,
+}
+
+fn spec_fingerprint(config: &AutoresearchConfig) -> String {
+    let direction = config.direction.trim().to_ascii_lowercase();
+    let definition = ExperimentDefinition {
+        objective: &config.objective,
+        metric_command: &config.metric_command,
+        direction: &direction,
+        validation_command: &config.validation_command,
+        validation_retries: config.validation_retries,
+        command_timeout_secs: config.command_timeout_secs,
+        samples: config.samples,
+        min_improvement_percent: config.min_improvement_percent,
+        max_iterations: config.max_iterations,
+        max_duration_secs: config.max_duration_secs,
+        model: &config.model,
+    };
+    let encoded = serde_json::to_vec(&definition).expect("experiment definition is serializable");
+    format!("{:x}", Sha256::digest(encoded))
+}
+
+#[derive(Debug)]
+struct IgnoredFile {
+    relative: PathBuf,
+    contents: Option<Vec<u8>>,
+    symlink_target: Option<PathBuf>,
+    #[cfg(unix)]
+    mode: u32,
+}
+
+#[derive(Debug)]
+struct IgnoredWorkspaceState {
+    files: Vec<IgnoredFile>,
+}
+
+async fn ignored_paths(workspace: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let output = git_command(
+        workspace,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+    )
+    .await?;
+    output
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        // Build output can contain millions of files and is deliberately
+        // treated as disposable process state rather than experiment input.
+        // The source/configuration files that can affect an experiment are
+        // still snapshotted and restored below.
+        .filter(|path| {
+            !matches!(
+                Path::new(path).components().next(),
+                Some(std::path::Component::Normal(component)) if component == "target"
+            )
+        })
+        .map(|path| {
+            let relative = PathBuf::from(path);
+            validate_workspace_relative_path(&relative)?;
+            Ok(relative)
+        })
+        .collect()
+}
+
+fn validate_workspace_relative_path(path: &Path) -> anyhow::Result<()> {
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!(
+            "git returned an unsafe workspace-relative path: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+async fn capture_ignored_state(workspace: &Path) -> anyhow::Result<IgnoredWorkspaceState> {
+    let mut files = Vec::new();
+    for relative in ignored_paths(workspace).await? {
+        let path = workspace.join(&relative);
+        let metadata = tokio::fs::symlink_metadata(&path)
+            .await
+            .with_context(|| format!("reading ignored path metadata: {}", path.display()))?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            files.push(IgnoredFile {
+                relative,
+                contents: None,
+                symlink_target: Some(tokio::fs::read_link(&path).await?),
+                #[cfg(unix)]
+                mode: 0,
+            });
+        } else if file_type.is_file() {
+            files.push(IgnoredFile {
+                relative,
+                contents: Some(tokio::fs::read(&path).await?),
+                symlink_target: None,
+                #[cfg(unix)]
+                mode: {
+                    use std::os::unix::fs::PermissionsExt;
+                    metadata.permissions().mode()
+                },
+            });
+        }
+    }
+    Ok(IgnoredWorkspaceState { files })
+}
+
+async fn remove_workspace_path(path: &Path) -> anyhow::Result<()> {
+    let Ok(metadata) = tokio::fs::symlink_metadata(path).await else {
+        return Ok(());
+    };
+    if metadata.file_type().is_dir() {
+        tokio::fs::remove_dir_all(path).await?;
+    } else {
+        tokio::fs::remove_file(path).await?;
+    }
+    Ok(())
+}
+
+async fn restore_ignored_state(
+    workspace: &Path,
+    state: &IgnoredWorkspaceState,
+) -> anyhow::Result<()> {
+    // Restore tracked/untracked files separately; git clean intentionally does
+    // not touch ignored files, which is exactly where autoresearch configs,
+    // generated artifacts, and local credentials commonly live.
+    git_command(workspace, &["clean", "-fd"]).await?;
+
+    let baseline: HashSet<&Path> = state
+        .files
+        .iter()
+        .map(|file| file.relative.as_path())
+        .collect();
+    for relative in ignored_paths(workspace).await? {
+        if !baseline.contains(relative.as_path()) {
+            remove_workspace_path(&workspace.join(relative)).await?;
+        }
+    }
+
+    for file in &state.files {
+        let path = workspace.join(&file.relative);
+        if let Some(target) = &file.symlink_target {
+            remove_workspace_path(&path).await?;
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, &path)?;
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_file(target, &path)?;
+        } else if let Some(contents) = &file.contents {
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await {
+                if !metadata.file_type().is_file() {
+                    remove_workspace_path(&path).await?;
+                }
+            }
+            tokio::fs::write(&path, contents).await?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(file.mode))
+                    .await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn run_with_budget<T, F>(
@@ -424,22 +718,69 @@ async fn git_rev(workspace: &Path) -> anyhow::Result<String> {
         .to_string())
 }
 
-async fn commit_experiment(workspace: &Path, iteration: usize) -> anyhow::Result<String> {
-    git_command(workspace, &["add", "-A"]).await?;
-    let status = git_command(workspace, &["status", "--porcelain"]).await?;
+async fn git_branch(workspace: &Path) -> anyhow::Result<String> {
+    Ok(git_command(workspace, &["branch", "--show-current"])
+        .await?
+        .trim()
+        .to_string())
+}
+
+async fn ensure_experiment_state(
+    workspace: &Path,
+    expected_branch: &str,
+    expected_head: &str,
+) -> anyhow::Result<()> {
+    let branch = git_branch(workspace).await?;
+    if branch != expected_branch {
+        bail!(
+            "autoresearch agent moved from branch `{expected_branch}` to `{branch}`; refusing to reset"
+        );
+    }
+    let head = git_rev(workspace).await?;
+    if head != expected_head {
+        bail!(
+            "autoresearch agent moved HEAD from `{expected_head}` to `{head}`; refusing to reset"
+        );
+    }
+    Ok(())
+}
+
+async fn commit_experiment(
+    workspace: &Path,
+    iteration: usize,
+    started: Instant,
+    max_duration_secs: u64,
+) -> anyhow::Result<String> {
+    git_command_with_budget(workspace, &["add", "-A"], started, max_duration_secs).await?;
+    let status = git_command_with_budget(
+        workspace,
+        &["status", "--porcelain"],
+        started,
+        max_duration_secs,
+    )
+    .await?;
     if status.trim().is_empty() {
         bail!("experiment iteration {iteration} made no changes");
     }
-    git_command(
+    git_command_with_budget(
         workspace,
         &[
             "commit",
             "-m",
             &format!("autoresearch: iteration {iteration}"),
         ],
+        started,
+        max_duration_secs,
     )
     .await?;
-    git_rev(workspace).await
+    git_command_with_budget(
+        workspace,
+        &["rev-parse", "HEAD"],
+        started,
+        max_duration_secs,
+    )
+    .await
+    .map(|commit| commit.trim().to_string())
 }
 
 async fn restore_checkpoint(workspace: &Path, checkpoint: &str) -> anyhow::Result<()> {
@@ -451,12 +792,35 @@ async fn restore_checkpoint(workspace: &Path, checkpoint: &str) -> anyhow::Resul
 }
 
 async fn git_command(workspace: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(workspace)
-        .output()
-        .await
-        .with_context(|| format!("running git {}", args.join(" ")))?;
+    git_command_with_timeout(workspace, args, None).await
+}
+
+async fn git_command_with_budget(
+    workspace: &Path,
+    args: &[&str],
+    started: Instant,
+    max_duration_secs: u64,
+) -> anyhow::Result<String> {
+    let timeout = if max_duration_secs == 0 {
+        None
+    } else {
+        let remaining = Duration::from_secs(max_duration_secs).saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            bail!("autoresearch wall-clock budget exhausted");
+        }
+        Some(remaining)
+    };
+    git_command_with_timeout(workspace, args, timeout).await
+}
+
+async fn git_command_with_timeout(
+    workspace: &Path,
+    args: &[&str],
+    timeout: Option<Duration>,
+) -> anyhow::Result<String> {
+    let mut command = tokio::process::Command::new("git");
+    command.args(args).current_dir(workspace);
+    let output = run_process(&mut command, timeout, &format!("git {}", args.join(" "))).await?;
     if !output.status.success() {
         bail!(
             "git {} failed: {}",
@@ -523,17 +887,64 @@ async fn run_shell(
     workspace: &Path,
     timeout_secs: u64,
 ) -> anyhow::Result<std::process::Output> {
-    let child = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(workspace)
+    let mut process = tokio::process::Command::new("sh");
+    process.arg("-c").arg(command).current_dir(workspace);
+    run_process(
+        &mut process,
+        Some(Duration::from_secs(timeout_secs)),
+        "autoresearch shell command",
+    )
+    .await
+}
+
+fn configure_process_group(command: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    {
+        // A separate process group lets timeout cleanup terminate descendants
+        // spawned by `sh -c`, such as cargo/compiler children.
+        command.process_group(0);
+    }
+}
+
+fn terminate_process_group(pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        // SAFETY: pid is the process-group leader created by this command.
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+async fn run_process(
+    command: &mut tokio::process::Command,
+    timeout: Option<Duration>,
+    label: &str,
+) -> anyhow::Result<std::process::Output> {
+    configure_process_group(command);
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = command
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("starting autoresearch command: {command}"))?;
-    tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-        .await
-        .with_context(|| format!("command timed out after {timeout_secs}s"))?
-        .with_context(|| format!("waiting for autoresearch command: {command}"))
+        .with_context(|| format!("starting {label}"))?;
+    let pid = child.id();
+    let output = if let Some(timeout) = timeout {
+        match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(result) => result.with_context(|| format!("waiting for {label}"))?,
+            Err(_) => {
+                terminate_process_group(pid);
+                bail!("{label} timed out");
+            }
+        }
+    } else {
+        child
+            .wait_with_output()
+            .await
+            .with_context(|| format!("waiting for {label}"))?
+    };
+    Ok(output)
 }
 
 fn parse_metric(output: &str) -> anyhow::Result<f64> {
@@ -601,12 +1012,104 @@ mod tests {
         assert!(!is_better(&strict, 100.0, 100.0));
     }
 
+    #[test]
+    fn experiment_definition_fingerprint_changes_when_metric_changes() {
+        let config = AutoresearchConfig {
+            objective: "startup".into(),
+            metric_command: "./measure-a".into(),
+            ..AutoresearchConfig::default()
+        };
+        let mut changed = config.clone();
+        changed.metric_command = "./measure-b".into();
+        assert_ne!(spec_fingerprint(&config), spec_fingerprint(&changed));
+    }
+
+    #[test]
+    fn new_ledger_is_bound_to_branch_and_has_a_unique_run_id() {
+        let config = AutoresearchConfig {
+            objective: "startup".into(),
+            metric_command: "./measure".into(),
+            ..AutoresearchConfig::default()
+        };
+        let first = AutoresearchLedger::new(&config, 10.0, "abc".into(), "feature/x".into());
+        let second = AutoresearchLedger::new(&config, 10.0, "abc".into(), "feature/x".into());
+        assert_eq!(first.branch, "feature/x");
+        assert_eq!(first.spec_fingerprint, spec_fingerprint(&config));
+        assert_ne!(first.chat_id, second.chat_id);
+    }
+
     #[tokio::test]
     async fn command_timeout_is_enforced() {
         let error = run_shell("sleep 5", Path::new("."), 1)
             .await
             .expect_err("long-running metric should time out");
         assert!(error.to_string().contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_timeout_terminates_shell_descendants() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("descendant-finished");
+        let command = format!(
+            "sleep 2; touch {}",
+            shlex::try_quote(&marker.to_string_lossy()).unwrap()
+        );
+        run_shell(&command, directory.path(), 1)
+            .await
+            .expect_err("command should time out");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!marker.exists(), "timed-out descendant survived");
+    }
+
+    #[tokio::test]
+    async fn ignored_state_restores_existing_files_and_removes_new_files() {
+        let directory = tempfile::tempdir().unwrap();
+        git_command(directory.path(), &["init", "-q"])
+            .await
+            .unwrap();
+        tokio::fs::write(directory.path().join(".gitignore"), ".env\nnew-*\n")
+            .await
+            .unwrap();
+        git_command(directory.path(), &["add", ".gitignore"])
+            .await
+            .unwrap();
+        git_command(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=Autoresearch Test",
+                "-c",
+                "user.email=autoresearch@example.invalid",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(directory.path().join(".env"), "before\n")
+            .await
+            .unwrap();
+
+        let state = capture_ignored_state(directory.path()).await.unwrap();
+        tokio::fs::write(directory.path().join(".env"), "candidate\n")
+            .await
+            .unwrap();
+        tokio::fs::write(directory.path().join("new-output"), "candidate\n")
+            .await
+            .unwrap();
+        restore_ignored_state(directory.path(), &state)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(directory.path().join(".env"))
+                .await
+                .unwrap(),
+            "before\n"
+        );
+        assert!(!directory.path().join("new-output").exists());
     }
 
     #[tokio::test]

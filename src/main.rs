@@ -562,6 +562,31 @@ enum SwarmAction {
 }
 
 /// Build the same unattended runner used by autonomous and autoresearch modes.
+fn configure_restricted_automation(cfg: &mut Config) {
+    // Autoresearch only needs local code execution and filesystem edits. Keep
+    // all conversational memory disabled as well: tool filtering alone does
+    // not prevent history, personal-context, or ZKR recall from being added to
+    // the model prompt by AgentRunner.
+    cfg.toolsets.enabled = vec!["runtime".into(), "fs".into()];
+    cfg.toolsets.disabled = vec![
+        "web".into(),
+        "browser".into(),
+        "memory".into(),
+        "sessions".into(),
+        "messaging".into(),
+        "advanced".into(),
+        "desktop".into(),
+        "media".into(),
+        "skills".into(),
+    ];
+    cfg.memory.inject_context = false;
+    cfg.memory.principal_id = None;
+    cfg.zkr.enabled = false;
+    cfg.zkr.auto_capture = false;
+    cfg.zkr.inject_recall = false;
+    cfg.zkr.self_improve = false;
+}
+
 async fn build_automation_agent(
     config_path: &str,
     workspace: &Path,
@@ -569,22 +594,7 @@ async fn build_automation_agent(
 ) -> anyhow::Result<(Arc<AgentRunner>, Config)> {
     let mut cfg = apollo::bootstrap::load_config_workspace(config_path, Some(workspace));
     if restricted {
-        // Autoresearch only needs local code execution and filesystem edits.
-        // Keep network, messaging, memory, MCP, and plugin capabilities out of
-        // the model's ambient tool catalog; this mirrors capability-oriented
-        // agent designs where access is introduced deliberately.
-        cfg.toolsets.enabled = vec!["runtime".into(), "fs".into()];
-        cfg.toolsets.disabled = vec![
-            "web".into(),
-            "browser".into(),
-            "memory".into(),
-            "sessions".into(),
-            "messaging".into(),
-            "advanced".into(),
-            "desktop".into(),
-            "media".into(),
-            "skills".into(),
-        ];
+        configure_restricted_automation(&mut cfg);
     }
     let provider = build_provider(&cfg);
     let policy = Arc::new(ExecutionPolicy::from_config(&cfg.policy));
@@ -633,6 +643,7 @@ async fn build_automation_agent(
             &cfg.agent.permission_profile,
         ))
         .with_workspace(workspace.to_path_buf())
+        .with_memory_enabled(!restricted)
         .with_memory_ideas(cfg.memory.clone())
         .with_group_chat(cfg.group_chat.clone())
         .with_skills(discovered_skills)
@@ -2279,7 +2290,23 @@ fn init_tracing(cfg: &apollo::config::ObservabilityConfig) -> anyhow::Result<()>
 
 #[cfg(test)]
 mod autostart_tests {
-    use super::{launchd_plist, systemd_unit, validate_autostart_config_path};
+    use super::{
+        configure_restricted_automation, launchd_plist, systemd_unit,
+        validate_autostart_config_path,
+    };
+    use apollo::config::Config;
+
+    #[test]
+    fn restricted_automation_disables_ambient_memory() {
+        let mut config = Config::default();
+        configure_restricted_automation(&mut config);
+        assert!(!config.memory.inject_context);
+        assert!(config.memory.principal_id.is_none());
+        assert!(!config.zkr.enabled);
+        assert!(!config.zkr.inject_recall);
+        assert!(!config.zkr.self_improve);
+        assert!(!config.zkr.auto_capture);
+    }
 
     /// A path with a space is ordinary on macOS, so it must be accepted and
     /// escaped rather than refused.

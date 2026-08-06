@@ -50,6 +50,8 @@ pub struct AgentRunner {
     plugin_registry: Arc<RwLock<PluginRegistry>>,
     /// Current trajectory being recorded (per chat)
     trajectories: Arc<RwLock<HashMap<String, Trajectory>>>,
+    /// Whether this runner may read or persist conversational memory.
+    memory_enabled: bool,
     memory_ideas: crate::config::MemoryIdeasConfig,
     group_chat: crate::config::GroupChatConfig,
     #[cfg(feature = "zkr-memory")]
@@ -89,6 +91,7 @@ impl AgentRunner {
             hook_manager: Arc::new(HookManager::new()),
             plugin_registry: Arc::new(RwLock::new(PluginRegistry::new())),
             trajectories: Arc::new(RwLock::new(HashMap::new())),
+            memory_enabled: true,
             memory_ideas: crate::config::MemoryIdeasConfig::default(),
             group_chat: crate::config::GroupChatConfig::default(),
             #[cfg(feature = "zkr-memory")]
@@ -177,6 +180,15 @@ impl AgentRunner {
 
     pub fn with_memory_ideas(mut self, cfg: crate::config::MemoryIdeasConfig) -> Self {
         self.memory_ideas = cfg;
+        self
+    }
+
+    /// Enable or disable conversational memory for this runner.
+    ///
+    /// Restricted automation uses this to keep prior conversations and
+    /// experiment output out of the model context and persistent stores.
+    pub fn with_memory_enabled(mut self, enabled: bool) -> Self {
+        self.memory_enabled = enabled;
         self
     }
 
@@ -589,7 +601,7 @@ impl AgentRunner {
 
         let base_prompt = self.system_prompt.read().await.clone();
         #[cfg(feature = "zkr-memory")]
-        let system_prompt = if self.zkr_config.self_improve {
+        let system_prompt = if self.memory_enabled && self.zkr_config.self_improve {
             if let Some(store) = &self.zkr {
                 match store.augment_prompt(&effective_text, &base_prompt).await {
                     Ok(augmented) => augmented,
@@ -644,7 +656,7 @@ impl AgentRunner {
                 }
             }
         }
-        if msg.is_group {
+        if self.memory_enabled && msg.is_group {
             if let Some(group_memory) = self.load_group_memory(&msg.chat_id).await? {
                 if !group_memory.trim().is_empty() {
                     messages.push(ChatMessage::system(crate::context::group_memory_prompt(
@@ -655,23 +667,25 @@ impl AgentRunner {
             }
         }
 
-        let history = crate::memory::context_inject::merged_history(
-            &self.memory,
-            &msg.chat_id,
-            self.memory_ideas.principal_id.as_deref(),
-            self.agent_config.max_history_messages,
-        )
-        .await?;
-        for (role, content) in history {
-            match role.as_str() {
-                "user" => messages.push(ChatMessage::user(&content)),
-                "assistant" => messages.push(ChatMessage::assistant(&content)),
-                _ => {}
+        if self.memory_enabled {
+            let history = crate::memory::context_inject::merged_history(
+                &self.memory,
+                &msg.chat_id,
+                self.memory_ideas.principal_id.as_deref(),
+                self.agent_config.max_history_messages,
+            )
+            .await?;
+            for (role, content) in history {
+                match role.as_str() {
+                    "user" => messages.push(ChatMessage::user(&content)),
+                    "assistant" => messages.push(ChatMessage::assistant(&content)),
+                    _ => {}
+                }
             }
         }
 
         let mut user_turn = effective_text.clone();
-        if self.memory_ideas.inject_context {
+        if self.memory_enabled && self.memory_ideas.inject_context {
             let blocks = crate::memory::context_inject::personal_context_blocks(
                 &self.memory,
                 crate::memory::context_inject::InjectConfig {
@@ -687,7 +701,7 @@ impl AgentRunner {
             }
         }
         #[cfg(feature = "zkr-memory")]
-        if self.zkr_config.inject_recall {
+        if self.memory_enabled && self.zkr_config.inject_recall {
             if let Some(store) = &self.zkr {
                 match store
                     .context(&effective_text, self.zkr_config.recall_limit)
@@ -811,7 +825,9 @@ impl AgentRunner {
         text: &str,
         delivery: &Delivery<'_>,
     ) -> anyhow::Result<String> {
-        self.persist_conversation(msg, text).await?;
+        if self.memory_enabled {
+            self.persist_conversation(msg, text).await?;
+        }
 
         // Mark trajectory as successful, record final response
         {
@@ -830,11 +846,16 @@ impl AgentRunner {
                 text.to_string(),
             ))
             .await;
-        if let Some(ws) = &self.session_note_workspace {
-            let preview: String = text.chars().take(200).collect();
-            if !preview.is_empty() {
-                let _ =
-                    crate::memory::session_note::append_session_note(ws, &msg.chat_id, &preview);
+        if self.memory_enabled {
+            if let Some(ws) = &self.session_note_workspace {
+                let preview: String = text.chars().take(200).collect();
+                if !preview.is_empty() {
+                    let _ = crate::memory::session_note::append_session_note(
+                        ws,
+                        &msg.chat_id,
+                        &preview,
+                    );
+                }
             }
         }
 
@@ -852,7 +873,7 @@ impl AgentRunner {
         let delivered = delivery.deliver(&msg.chat_id, text).await?;
 
         #[cfg(feature = "zkr-memory")]
-        if self.zkr_config.self_improve {
+        if self.memory_enabled && self.zkr_config.self_improve {
             if let Some(store) = &self.zkr {
                 let _ = store
                     .record_reflection(&msg.text, "agent turn", text, "completed")
