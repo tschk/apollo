@@ -105,6 +105,12 @@ impl Tool for ClaudeUsageTool {
                 format_tokens(summary.total_tokens)
             ));
             output.push(format!("API calls: {}", summary.call_count));
+            if !summary.pricing_complete {
+                output.push(format!(
+                    "⚠️ Cost is incomplete: {} call(s) have no configured model price.",
+                    summary.unpriced_call_count
+                ));
+            }
 
             if !summary.by_model.is_empty() {
                 output.push(String::new());

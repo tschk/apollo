@@ -600,7 +600,11 @@ async fn build_automation_agent(
     let policy = Arc::new(ExecutionPolicy::from_config(&cfg.policy));
     let memory = build_memory_backend(workspace, &cfg).await?;
     let embedding_provider = build_embedding_provider(&cfg)?;
-    let system_prompt = prompt::build_system_prompt(workspace).await;
+    let system_prompt = if restricted {
+        prompt::build_restricted_system_prompt(workspace).await
+    } else {
+        prompt::build_system_prompt(workspace).await
+    };
     let discovered_skills = if restricted {
         Vec::new()
     } else {

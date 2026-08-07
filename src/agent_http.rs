@@ -39,6 +39,10 @@ pub struct StateBody {
     pub engine: String,
     pub mode: String,
     pub cost_usd: f64,
+    /// False means the displayed cost excludes calls whose model price is
+    /// unknown.
+    pub pricing_complete: bool,
+    pub unpriced_call_count: usize,
     pub total_tokens: usize,
     pub call_count: usize,
     /// Input tokens of the most recent model call — what the agent actually
@@ -116,6 +120,8 @@ pub async fn build_state(runner: &AgentRunner, chat_id: &str) -> StateBody {
         engine: "rx4".into(),
         mode: mode_name(&runner.get_mode()).into(),
         cost_usd: summary.total_cost,
+        pricing_complete: summary.pricing_complete,
+        unpriced_call_count: summary.unpriced_call_count,
         total_tokens: summary.total_tokens,
         call_count: summary.call_count,
         context_tokens,
@@ -621,6 +627,8 @@ mod tests {
             engine: "rx4".into(),
             mode: "auto".into(),
             cost_usd: 0.25,
+            pricing_complete: true,
+            unpriced_call_count: 0,
             total_tokens: 1234,
             call_count: 3,
             context_tokens: 8000,
@@ -636,6 +644,8 @@ mod tests {
             "engine",
             "mode",
             "cost_usd",
+            "pricing_complete",
+            "unpriced_call_count",
             "total_tokens",
             "call_count",
             "context_tokens",
