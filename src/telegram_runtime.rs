@@ -347,6 +347,14 @@ async fn handle_command(
                     .collect::<Vec<_>>()
                     .join("\n")
             };
+            let pricing_note = if summary.pricing_complete {
+                "".to_string()
+            } else {
+                format!(
+                    "\n⚠️ Cost incomplete: {} call(s) have no configured model price.",
+                    summary.unpriced_call_count
+                )
+            };
 
             let _ = tg
                 .send_message(&format!(
@@ -354,8 +362,12 @@ async fn handle_command(
                     Total: ${:.4}\n\
                     Tokens: {}\n\
                     Calls: {}\n\n\
-                    By model:\n{}",
-                    summary.total_cost, summary.total_tokens, summary.call_count, model_breakdown,
+                    By model:\n{}{}",
+                    summary.total_cost,
+                    summary.total_tokens,
+                    summary.call_count,
+                    model_breakdown,
+                    pricing_note,
                 ))
                 .await;
             Ok(true)

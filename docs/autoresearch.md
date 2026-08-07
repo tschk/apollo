@@ -33,8 +33,17 @@ specification copied from an untrusted source. The workspace must be clean at
 startup. Rejected iterations are restored to their checkpoint; ignored
 configuration/state files are restored to their pre-iteration contents, and
 untracked files created by that iteration are removed. Build output under
-`target/` is treated as disposable process state. Run autoresearch in a
-dedicated worktree when experimenting with valuable local files.
+`target/`, dependency trees, and other volatile build roots are treated as
+disposable process state. The remaining ignored snapshot is disk-backed and
+bounded to 16 MiB per file and 64 MiB total. Run autoresearch in a dedicated
+worktree when experimenting with valuable local files.
+
+Baseline validation and metric commands must not modify tracked files, change
+the branch, or move `HEAD`; the run aborts and restores the baseline if they
+do. The controller scrubs secret-bearing environment variables from its
+subprocesses and makes its acceptance commit with repository hooks disabled.
+The restricted experiment agent receives repository instructions but not
+`USER.md` or `MEMORY.md`.
 
 If `ledger_path` is inside the workspace, it must be Git-ignored; an external
 ledger path is also supported. This keeps the durable ledger from becoming an

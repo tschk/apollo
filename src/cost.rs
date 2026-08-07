@@ -37,7 +37,14 @@ pub struct CostRecord {
     pub input_tokens: usize,
     pub output_tokens: usize,
     pub cost_usd: f64,
+    /// False means usage was recorded but no configured price was available.
+    #[serde(default = "default_pricing_known")]
+    pub pricing_known: bool,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+fn default_pricing_known() -> bool {
+    true
 }
 
 /// Estimated input shape for one provider request. These counts are based on
@@ -126,17 +133,15 @@ impl CostTracker {
     /// Record a cost from an LLM call
     pub async fn record(&self, model: &str, usage: TokenUsage) -> anyhow::Result<()> {
         let models = self.models.read().await;
-        let model_cost = models
-            .iter()
-            .find(|m| m.model == model)
-            .cloned()
-            .unwrap_or_else(|| ModelCost {
-                model: model.to_string(),
-                input_cost_per_1m: 0.0,
-                output_cost_per_1m: 0.0,
-            });
+        let model_cost = models.iter().find(|m| m.model == model).cloned();
 
-        let cost_usd = usage.calculate_cost(&model_cost);
+        let (cost_usd, pricing_known) = match model_cost {
+            Some(model_cost) => (usage.calculate_cost(&model_cost), true),
+            None => {
+                tracing::warn!(model, "recording usage without a configured model price");
+                (0.0, false)
+            }
+        };
 
         let record = CostRecord {
             id: uuid::Uuid::new_v4().to_string(),
@@ -144,6 +149,7 @@ impl CostTracker {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             cost_usd,
+            pricing_known,
             timestamp: chrono::Utc::now(),
         };
 
@@ -176,8 +182,12 @@ impl CostTracker {
         let total_tokens: usize = costs.iter().map(|c| c.input_tokens + c.output_tokens).sum();
 
         let mut by_model: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let mut unpriced_models = std::collections::BTreeSet::new();
         for cost in costs.iter() {
             *by_model.entry(cost.model.clone()).or_insert(0.0) += cost.cost_usd;
+            if !cost.pricing_known {
+                unpriced_models.insert(cost.model.clone());
+            }
         }
 
         let context = self.context_summary().await;
@@ -186,6 +196,9 @@ impl CostTracker {
             total_tokens,
             by_model,
             call_count: costs.len(),
+            unpriced_call_count: costs.iter().filter(|cost| !cost.pricing_known).count(),
+            unpriced_models: unpriced_models.into_iter().collect(),
+            pricing_complete: costs.iter().all(|cost| cost.pricing_known),
             context,
         }
     }
@@ -249,7 +262,20 @@ pub struct CostSummary {
     pub total_tokens: usize,
     pub by_model: std::collections::HashMap<String, f64>,
     pub call_count: usize,
+    /// Calls whose token usage was recorded without a known price.
+    #[serde(default)]
+    pub unpriced_call_count: usize,
+    #[serde(default)]
+    pub unpriced_models: Vec<String>,
+    /// False means `total_cost` excludes one or more calls with unknown
+    /// pricing; it must not be presented as a complete bill.
+    #[serde(default = "default_pricing_complete")]
+    pub pricing_complete: bool,
     pub context: ContextSummary,
+}
+
+fn default_pricing_complete() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -293,6 +319,28 @@ mod tests {
         let summary = tracker.summary().await;
         assert_eq!(summary.call_count, 1);
         assert!(summary.total_cost > 0.0);
+    }
+
+    #[tokio::test]
+    async fn unknown_model_usage_is_reported_as_unpriced() {
+        let tracker = CostTracker::new();
+        tracker
+            .record(
+                "future-model",
+                TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    total_tokens: 150,
+                },
+            )
+            .await
+            .unwrap();
+
+        let summary = tracker.summary().await;
+        assert_eq!(summary.unpriced_call_count, 1);
+        assert_eq!(summary.unpriced_models, vec!["future-model"]);
+        assert!(!summary.pricing_complete);
+        assert_eq!(summary.total_cost, 0.0);
     }
 
     #[tokio::test]

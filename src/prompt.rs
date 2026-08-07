@@ -17,9 +17,27 @@ const PROMPT_FILES: [(&str, &str, usize); 6] = [
     ("MEMORY.md", "## Long-Term Memory", 8_000),
 ];
 
+// Automation may need repository instructions, but personal profile and
+// long-term-memory files must never become ambient provider context.
+const RESTRICTED_PROMPT_FILES: [(&str, &str, usize); 4] = [
+    ("IDENTITY.md", "## Identity", 12_000),
+    ("SOUL.md", "## Personality & Tone", 12_000),
+    ("AGENTS.md", "## Workspace Rules", 16_000),
+    ("TOOLS.md", "## Tool Notes", 12_000),
+];
+
 /// Build the system prompt from workspace context files
 pub async fn build_system_prompt(workspace: &Path) -> String {
-    let body = load_workspace_sections(workspace, &PROMPT_FILES).await;
+    build_system_prompt_from_files(workspace, &PROMPT_FILES).await
+}
+
+/// Build an automation prompt without personal or long-term-memory files.
+pub async fn build_restricted_system_prompt(workspace: &Path) -> String {
+    build_system_prompt_from_files(workspace, &RESTRICTED_PROMPT_FILES).await
+}
+
+async fn build_system_prompt_from_files(workspace: &Path, files: &[(&str, &str, usize)]) -> String {
+    let body = load_workspace_sections(workspace, files).await;
     let mut prompt = if body.is_empty() {
         DEFAULT_PROMPT.to_string()
     } else {
@@ -64,5 +82,24 @@ mod tests {
         let prompt = build_system_prompt(&PathBuf::from("/nonexistent")).await;
         assert!(prompt.contains(DEFAULT_PROMPT));
         assert!(prompt.contains("Routing guidance"));
+    }
+
+    #[tokio::test]
+    async fn restricted_prompt_excludes_personal_files() {
+        let directory = tempfile::tempdir().unwrap();
+        tokio::fs::write(directory.path().join("USER.md"), "private user data")
+            .await
+            .unwrap();
+        tokio::fs::write(directory.path().join("MEMORY.md"), "private memory")
+            .await
+            .unwrap();
+        tokio::fs::write(directory.path().join("AGENTS.md"), "repository rules")
+            .await
+            .unwrap();
+
+        let prompt = build_restricted_system_prompt(directory.path()).await;
+        assert!(prompt.contains("repository rules"));
+        assert!(!prompt.contains("private user data"));
+        assert!(!prompt.contains("private memory"));
     }
 }

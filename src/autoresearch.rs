@@ -18,6 +18,12 @@ use sha2::{Digest, Sha256};
 use crate::agent::NullChannel;
 use crate::channels::IncomingMessage;
 
+const WALL_CLOCK_BUDGET_EXHAUSTED: &str = "autoresearch wall-clock budget exhausted";
+const MAX_IGNORED_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_IGNORED_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+const VOLATILE_IGNORED_ROOTS: &[&str] =
+    &["target", "node_modules", ".venv", "vendor", "dist", "build"];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoresearchConfig {
@@ -245,21 +251,44 @@ impl AutoresearchLoop {
             ledger
         } else {
             let commit = git_rev(&self.workspace).await?;
-            if !run_with_budget(
-                started,
-                self.config.max_duration_secs,
-                run_validation(&self.config, &self.workspace),
-            )
-            .await?
-            {
-                bail!("autoresearch baseline validation failed");
+            let baseline_ignored_state = capture_ignored_state(&self.workspace).await?;
+            let baseline_result = async {
+                if !run_validation(
+                    &self.config,
+                    &self.workspace,
+                    started,
+                    self.config.max_duration_secs,
+                )
+                .await?
+                {
+                    bail!("autoresearch baseline validation failed");
+                }
+                ensure_tracked_state_unchanged(&self.workspace, &branch, &commit).await?;
+                let baseline = measure_metric(
+                    &self.config,
+                    &self.workspace,
+                    started,
+                    self.config.max_duration_secs,
+                )
+                .await?;
+                ensure_tracked_state_unchanged(&self.workspace, &branch, &commit).await?;
+                Ok::<_, anyhow::Error>(baseline)
             }
-            let baseline = run_with_budget(
-                started,
-                self.config.max_duration_secs,
-                measure_metric(&self.config, &self.workspace),
-            )
-            .await?;
+            .await;
+            let baseline = match baseline_result {
+                Ok(baseline) => baseline,
+                Err(error) => {
+                    restore_baseline_state(
+                        &self.workspace,
+                        &branch,
+                        &commit,
+                        &baseline_ignored_state,
+                    )
+                    .await
+                    .with_context(|| format!("baseline cleanup failed after: {error}"))?;
+                    return Err(error);
+                }
+            };
             let ledger = AutoresearchLedger::new(&self.config, baseline, commit, branch.clone());
             save_ledger(&ledger_path, &ledger).await?;
             ledger
@@ -340,6 +369,7 @@ impl AutoresearchLoop {
             // a rejection can never reset an unrelated branch.
             ensure_experiment_state(&self.workspace, &ledger.branch, &checkpoint).await?;
             restore_ignored_state(&self.workspace, &ignored_state).await?;
+            let candidate_status = git_status(&self.workspace).await?;
 
             let hypothesis = result
                 .as_ref()
@@ -353,39 +383,52 @@ impl AutoresearchLoop {
                     format!("agent error: {error}"),
                 ),
                 Ok(_) => {
-                    let evaluation =
-                        run_with_budget(started, self.config.max_duration_secs, async {
-                            if !run_validation(&self.config, &self.workspace).await? {
-                                return Ok((
-                                    ExperimentDecision::Rejected,
-                                    None,
-                                    "validation failed".to_string(),
-                                ));
-                            }
-                            match measure_metric(&self.config, &self.workspace).await {
-                                Ok(value) if is_better(&self.config, value, previous_best) => Ok((
-                                    ExperimentDecision::Accepted,
-                                    Some(value),
-                                    "metric improved".to_string(),
-                                )),
-                                Ok(value) => Ok((
-                                    ExperimentDecision::Rejected,
-                                    Some(value),
-                                    "metric did not improve".to_string(),
-                                )),
-                                Err(error) => {
-                                    Ok((ExperimentDecision::Failed, None, error.to_string()))
-                                }
-                            }
-                        })
-                        .await;
-                    evaluation.unwrap_or_else(|error| {
-                        (
+                    let evaluation = async {
+                        if !run_validation(
+                            &self.config,
+                            &self.workspace,
+                            started,
+                            self.config.max_duration_secs,
+                        )
+                        .await?
+                        {
+                            return Ok((
+                                ExperimentDecision::Rejected,
+                                None,
+                                "validation failed".to_string(),
+                            ));
+                        }
+                        match measure_metric(
+                            &self.config,
+                            &self.workspace,
+                            started,
+                            self.config.max_duration_secs,
+                        )
+                        .await
+                        {
+                            Ok(value) if is_better(&self.config, value, previous_best) => Ok((
+                                ExperimentDecision::Accepted,
+                                Some(value),
+                                "metric improved".to_string(),
+                            )),
+                            Ok(value) => Ok((
+                                ExperimentDecision::Rejected,
+                                Some(value),
+                                "metric did not improve".to_string(),
+                            )),
+                            Err(error) => Ok((ExperimentDecision::Failed, None, error.to_string())),
+                        }
+                    }
+                    .await;
+                    match evaluation {
+                        Err(error) if is_budget_error(&error) => return Err(error),
+                        Ok(result) => result,
+                        Err(error) => (
                             ExperimentDecision::Failed,
                             None,
                             format!("evaluation error: {error}"),
-                        )
-                    })
+                        ),
+                    }
                 }
             };
 
@@ -393,20 +436,18 @@ impl AutoresearchLoop {
             // still not allowed to move the branch or checkpoint. Their
             // ignored-file side effects are also discarded before deciding.
             ensure_experiment_state(&self.workspace, &ledger.branch, &checkpoint).await?;
+            ensure_status_unchanged(&self.workspace, &candidate_status, "validation or metric")
+                .await?;
             restore_ignored_state(&self.workspace, &ignored_state).await?;
 
             let delta_percent = metric.map(|value| percent_delta(previous_best, value));
             let accepted = decision == ExperimentDecision::Accepted;
             let commit = if accepted {
-                match run_with_budget(
+                match commit_experiment(
+                    &self.workspace,
+                    iteration,
                     started,
                     self.config.max_duration_secs,
-                    commit_experiment(
-                        &self.workspace,
-                        iteration,
-                        started,
-                        self.config.max_duration_secs,
-                    ),
                 )
                 .await
                 {
@@ -501,7 +542,7 @@ fn spec_fingerprint(config: &AutoresearchConfig) -> String {
 #[derive(Debug)]
 struct IgnoredFile {
     relative: PathBuf,
-    contents: Option<Vec<u8>>,
+    backup_relative: Option<PathBuf>,
     symlink_target: Option<PathBuf>,
     #[cfg(unix)]
     mode: u32,
@@ -509,7 +550,25 @@ struct IgnoredFile {
 
 #[derive(Debug)]
 struct IgnoredWorkspaceState {
+    backup_dir: PathBuf,
     files: Vec<IgnoredFile>,
+}
+
+impl Drop for IgnoredWorkspaceState {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.backup_dir);
+    }
+}
+
+fn is_volatile_ignored_path(path: &Path) -> bool {
+    path.components().next().is_some_and(|component| {
+        let std::path::Component::Normal(root) = component else {
+            return false;
+        };
+        VOLATILE_IGNORED_ROOTS
+            .iter()
+            .any(|candidate| root == *candidate)
+    })
 }
 
 async fn ignored_paths(workspace: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -521,6 +580,20 @@ async fn ignored_paths(workspace: &Path) -> anyhow::Result<Vec<PathBuf>> {
             "--ignored",
             "--exclude-standard",
             "-z",
+            "--",
+            ".",
+            ":(exclude)target",
+            ":(exclude)target/**",
+            ":(exclude)node_modules",
+            ":(exclude)node_modules/**",
+            ":(exclude).venv",
+            ":(exclude).venv/**",
+            ":(exclude)vendor",
+            ":(exclude)vendor/**",
+            ":(exclude)dist",
+            ":(exclude)dist/**",
+            ":(exclude)build",
+            ":(exclude)build/**",
         ],
     )
     .await?;
@@ -531,12 +604,7 @@ async fn ignored_paths(workspace: &Path) -> anyhow::Result<Vec<PathBuf>> {
         // treated as disposable process state rather than experiment input.
         // The source/configuration files that can affect an experiment are
         // still snapshotted and restored below.
-        .filter(|path| {
-            !matches!(
-                Path::new(path).components().next(),
-                Some(std::path::Component::Normal(component)) if component == "target"
-            )
-        })
+        .filter(|path| !is_volatile_ignored_path(Path::new(path)))
         .map(|path| {
             let relative = PathBuf::from(path);
             validate_workspace_relative_path(&relative)?;
@@ -560,35 +628,75 @@ fn validate_workspace_relative_path(path: &Path) -> anyhow::Result<()> {
 }
 
 async fn capture_ignored_state(workspace: &Path) -> anyhow::Result<IgnoredWorkspaceState> {
-    let mut files = Vec::new();
-    for relative in ignored_paths(workspace).await? {
-        let path = workspace.join(&relative);
-        let metadata = tokio::fs::symlink_metadata(&path)
-            .await
-            .with_context(|| format!("reading ignored path metadata: {}", path.display()))?;
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() {
-            files.push(IgnoredFile {
-                relative,
-                contents: None,
-                symlink_target: Some(tokio::fs::read_link(&path).await?),
-                #[cfg(unix)]
-                mode: 0,
-            });
-        } else if file_type.is_file() {
-            files.push(IgnoredFile {
-                relative,
-                contents: Some(tokio::fs::read(&path).await?),
-                symlink_target: None,
-                #[cfg(unix)]
-                mode: {
-                    use std::os::unix::fs::PermissionsExt;
-                    metadata.permissions().mode()
-                },
-            });
+    let backup_dir = std::env::temp_dir().join(format!(
+        "apollo-autoresearch-ignored-{}",
+        uuid::Uuid::new_v4()
+    ));
+    tokio::fs::create_dir_all(&backup_dir).await?;
+    let result = async {
+        let mut files = Vec::new();
+        let mut total_bytes = 0u64;
+        for relative in ignored_paths(workspace).await? {
+            let path = workspace.join(&relative);
+            let metadata = tokio::fs::symlink_metadata(&path)
+                .await
+                .with_context(|| format!("reading ignored path metadata: {}", path.display()))?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                files.push(IgnoredFile {
+                    relative,
+                    backup_relative: None,
+                    symlink_target: Some(tokio::fs::read_link(&path).await?),
+                    #[cfg(unix)]
+                    mode: 0,
+                });
+            } else if file_type.is_file() {
+                let size = metadata.len();
+                if size > MAX_IGNORED_FILE_BYTES {
+                    bail!(
+                        "ignored file {} is {} bytes; autoresearch refuses to snapshot files larger than {} bytes",
+                        path.display(),
+                        size,
+                        MAX_IGNORED_FILE_BYTES
+                    );
+                }
+                total_bytes = total_bytes.saturating_add(size);
+                if total_bytes > MAX_IGNORED_SNAPSHOT_BYTES {
+                    bail!(
+                        "ignored workspace state exceeds the {} byte autoresearch snapshot limit; use a dedicated workspace or exclude dependency/data trees",
+                        MAX_IGNORED_SNAPSHOT_BYTES
+                    );
+                }
+                let backup_relative = relative.clone();
+                let backup_path = backup_dir.join(&backup_relative);
+                if let Some(parent) = backup_path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                tokio::fs::copy(&path, &backup_path).await?;
+                files.push(IgnoredFile {
+                    relative,
+                    backup_relative: Some(backup_relative),
+                    symlink_target: None,
+                    #[cfg(unix)]
+                    mode: {
+                        use std::os::unix::fs::PermissionsExt;
+                        metadata.permissions().mode()
+                    },
+                });
+            }
         }
+        Ok::<_, anyhow::Error>(IgnoredWorkspaceState {
+            backup_dir: backup_dir.clone(),
+            files,
+        })
     }
-    Ok(IgnoredWorkspaceState { files })
+    .await;
+    if result.is_err() {
+        // The state object owns this directory only after successful capture.
+        // Clean partial snapshots on an early size, metadata, or copy error.
+        let _ = tokio::fs::remove_dir_all(&backup_dir).await;
+    }
+    result
 }
 
 async fn remove_workspace_path(path: &Path) -> anyhow::Result<()> {
@@ -634,7 +742,7 @@ async fn restore_ignored_state(
             std::os::unix::fs::symlink(target, &path)?;
             #[cfg(windows)]
             std::os::windows::fs::symlink_file(target, &path)?;
-        } else if let Some(contents) = &file.contents {
+        } else if let Some(backup_relative) = &file.backup_relative {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
@@ -643,7 +751,7 @@ async fn restore_ignored_state(
                     remove_workspace_path(&path).await?;
                 }
             }
-            tokio::fs::write(&path, contents).await?;
+            tokio::fs::copy(state.backup_dir.join(backup_relative), &path).await?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -669,7 +777,7 @@ where
     let remaining = Duration::from_secs(max_duration_secs).saturating_sub(started.elapsed());
     tokio::time::timeout(remaining, future)
         .await
-        .with_context(|| "autoresearch wall-clock budget exhausted")?
+        .with_context(|| WALL_CLOCK_BUDGET_EXHAUSTED)?
 }
 
 async fn save_ledger(path: &Path, ledger: &AutoresearchLedger) -> anyhow::Result<()> {
@@ -679,36 +787,183 @@ async fn save_ledger(path: &Path, ledger: &AutoresearchLedger) -> anyhow::Result
     let content = toml::to_string_pretty(ledger)?;
     let temporary = path.with_extension("tmp");
     tokio::fs::write(&temporary, content).await?;
-    tokio::fs::rename(&temporary, path).await?;
+    replace_ledger_file(&temporary, path).await?;
     Ok(())
 }
 
+#[cfg(not(windows))]
+async fn replace_ledger_file(temporary: &Path, destination: &Path) -> anyhow::Result<()> {
+    tokio::fs::rename(temporary, destination).await?;
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn replace_ledger_file(temporary: &Path, destination: &Path) -> anyhow::Result<()> {
+    if !tokio::fs::try_exists(destination).await? {
+        tokio::fs::rename(temporary, destination).await?;
+        return Ok(());
+    }
+
+    let temporary = temporary.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || windows_replace_file(&temporary, &destination)).await??;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn ReplaceFileW(
+            replaced_file_name: *const u16,
+            replacement_file_name: *const u16,
+            backup_file_name: *const u16,
+            replace_flags: u32,
+            exclude: *const std::ffi::c_void,
+            reserved: *const std::ffi::c_void,
+        ) -> i32;
+    }
+
+    let replaced = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replacement = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let succeeded = unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(),
+            replacement.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 async fn ensure_clean_workspace(workspace: &Path) -> anyhow::Result<()> {
-    let output = git_command(workspace, &["status", "--porcelain"]).await?;
+    let output = git_status(workspace).await?;
     if !output.trim().is_empty() {
         bail!("autoresearch requires a clean workspace; commit or stash existing changes first");
     }
     Ok(())
 }
 
+async fn git_status(workspace: &Path) -> anyhow::Result<String> {
+    git_command(workspace, &["status", "--porcelain"]).await
+}
+
+async fn ensure_status_unchanged(
+    workspace: &Path,
+    expected: &str,
+    source: &str,
+) -> anyhow::Result<()> {
+    let actual = git_status(workspace).await?;
+    if actual != expected {
+        bail!("{source} modified the tracked workspace; refusing to record its result");
+    }
+    Ok(())
+}
+
+async fn ensure_tracked_state_unchanged(
+    workspace: &Path,
+    expected_branch: &str,
+    expected_head: &str,
+) -> anyhow::Result<()> {
+    ensure_experiment_state(workspace, expected_branch, expected_head).await?;
+    let status = git_status(workspace).await?;
+    if !status.trim().is_empty() {
+        bail!("baseline command modified the workspace");
+    }
+    Ok(())
+}
+
+async fn restore_baseline_state(
+    workspace: &Path,
+    branch: &str,
+    commit: &str,
+    ignored_state: &IgnoredWorkspaceState,
+) -> anyhow::Result<()> {
+    ensure_experiment_state(workspace, branch, commit).await?;
+    restore_checkpoint(workspace, commit).await?;
+    restore_ignored_state(workspace, ignored_state).await
+}
+
 async fn ensure_ledger_path_safe(workspace: &Path, ledger_path: &Path) -> anyhow::Result<()> {
-    let Ok(relative) = ledger_path.strip_prefix(workspace) else {
+    // `workspace` and the configured ledger can both be relative. Resolve
+    // them against the same current directory before canonicalizing existing
+    // ancestors; otherwise a relative workspace would be joined twice.
+    let current_dir = tokio::fs::canonicalize(".").await?;
+    let workspace_absolute = if workspace.is_absolute() {
+        workspace.to_path_buf()
+    } else {
+        current_dir.join(workspace)
+    };
+    let ledger_absolute = if ledger_path.is_absolute() {
+        ledger_path.to_path_buf()
+    } else {
+        current_dir.join(ledger_path)
+    };
+    let workspace = tokio::fs::canonicalize(&workspace_absolute)
+        .await
+        .with_context(|| format!("canonicalizing workspace {}", workspace.display()))?;
+    let ledger_path = normalize_path_for_containment(&ledger_absolute, &workspace).await?;
+    let Ok(relative) = ledger_path.strip_prefix(&workspace) else {
         return Ok(());
     };
     let relative = relative.to_string_lossy();
-    let status = tokio::process::Command::new("git")
-        .args(["check-ignore", "--quiet", "--", relative.as_ref()])
-        .current_dir(workspace)
-        .status()
-        .await
-        .with_context(|| format!("checking whether ledger path is ignored: {relative}"))?;
-    if !status.success() {
+    let output = git_command(
+        &workspace,
+        &["check-ignore", "--quiet", "--", relative.as_ref()],
+    )
+    .await;
+    if output.is_err() {
         bail!(
             "autoresearch ledger path {} is inside the workspace but is not git-ignored; choose an ignored path or store the ledger outside the workspace",
             ledger_path.display()
         );
     }
     Ok(())
+}
+
+async fn normalize_path_for_containment(path: &Path, workspace: &Path) -> anyhow::Result<PathBuf> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace.join(path)
+    };
+    if tokio::fs::try_exists(&candidate).await? {
+        return tokio::fs::canonicalize(&candidate)
+            .await
+            .map_err(Into::into);
+    }
+
+    let mut missing = Vec::new();
+    let mut existing = candidate.clone();
+    while !tokio::fs::try_exists(&existing).await? {
+        let Some(name) = existing.file_name() else {
+            bail!("cannot normalize path {}", path.display());
+        };
+        missing.push(name.to_os_string());
+        existing.pop();
+    }
+    let mut normalized = tokio::fs::canonicalize(existing).await?;
+    for component in missing.iter().rev() {
+        normalized.push(component);
+    }
+    Ok(normalized)
 }
 
 async fn git_rev(workspace: &Path) -> anyhow::Result<String> {
@@ -762,17 +1017,31 @@ async fn commit_experiment(
     if status.trim().is_empty() {
         bail!("experiment iteration {iteration} made no changes");
     }
-    git_command_with_budget(
+    // Use a fresh empty hooks directory so repository-controlled hooks cannot
+    // run during the controller's acceptance commit. `--no-verify` covers the
+    // client-side pre-commit and commit-msg hooks as well.
+    let hooks_dir = std::env::temp_dir().join(format!(
+        "apollo-autoresearch-hooks-{}",
+        uuid::Uuid::new_v4()
+    ));
+    tokio::fs::create_dir(&hooks_dir).await?;
+    let hooks_path = hooks_dir.to_string_lossy().into_owned();
+    let commit_result = git_command_with_budget(
         workspace,
         &[
+            "-c",
+            &format!("core.hooksPath={hooks_path}"),
             "commit",
+            "--no-verify",
             "-m",
             &format!("autoresearch: iteration {iteration}"),
         ],
         started,
         max_duration_secs,
     )
-    .await?;
+    .await;
+    let _ = tokio::fs::remove_dir(&hooks_dir).await;
+    commit_result?;
     git_command_with_budget(
         workspace,
         &["rev-parse", "HEAD"],
@@ -786,7 +1055,35 @@ async fn commit_experiment(
 async fn restore_checkpoint(workspace: &Path, checkpoint: &str) -> anyhow::Result<()> {
     // The clean-workspace precondition makes these scoped resets recoverable:
     // only changes made by the rejected iteration can exist at this point.
-    git_command(workspace, &["reset", "--hard", checkpoint]).await?;
+    git_command(
+        workspace,
+        &["reset", "--hard", "--recurse-submodules", checkpoint],
+    )
+    .await?;
+    git_command(
+        workspace,
+        &["submodule", "foreach", "--recursive", "git reset --hard"],
+    )
+    .await
+    .or_else(|error| {
+        if error.to_string().contains("no submodule") {
+            Ok(String::new())
+        } else {
+            Err(error)
+        }
+    })?;
+    git_command(
+        workspace,
+        &["submodule", "foreach", "--recursive", "git clean -fd"],
+    )
+    .await
+    .or_else(|error| {
+        if error.to_string().contains("no submodule") {
+            Ok(String::new())
+        } else {
+            Err(error)
+        }
+    })?;
     git_command(workspace, &["clean", "-fd"]).await?;
     Ok(())
 }
@@ -801,15 +1098,7 @@ async fn git_command_with_budget(
     started: Instant,
     max_duration_secs: u64,
 ) -> anyhow::Result<String> {
-    let timeout = if max_duration_secs == 0 {
-        None
-    } else {
-        let remaining = Duration::from_secs(max_duration_secs).saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            bail!("autoresearch wall-clock budget exhausted");
-        }
-        Some(remaining)
-    };
+    let timeout = remaining_budget(started, max_duration_secs)?;
     git_command_with_timeout(workspace, args, timeout).await
 }
 
@@ -820,6 +1109,7 @@ async fn git_command_with_timeout(
 ) -> anyhow::Result<String> {
     let mut command = tokio::process::Command::new("git");
     command.args(args).current_dir(workspace);
+    crate::tools::child_proc::scrub(&mut command);
     let output = run_process(&mut command, timeout, &format!("git {}", args.join(" "))).await?;
     if !output.status.success() {
         bail!(
@@ -831,7 +1121,12 @@ async fn git_command_with_timeout(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-async fn run_validation(config: &AutoresearchConfig, workspace: &Path) -> anyhow::Result<bool> {
+async fn run_validation(
+    config: &AutoresearchConfig,
+    workspace: &Path,
+    started: Instant,
+    max_duration_secs: u64,
+) -> anyhow::Result<bool> {
     if config.validation_command.trim().is_empty() {
         return Ok(true);
     }
@@ -840,9 +1135,12 @@ async fn run_validation(config: &AutoresearchConfig, workspace: &Path) -> anyhow
             &config.validation_command,
             workspace,
             config.command_timeout_secs,
+            started,
+            max_duration_secs,
         )
         .await
         {
+            Err(error) if is_budget_error(&error) => return Err(error),
             Ok(output) => output,
             Err(error) => {
                 tracing::warn!(attempt, "autoresearch validation could not run: {error}");
@@ -861,13 +1159,20 @@ async fn run_validation(config: &AutoresearchConfig, workspace: &Path) -> anyhow
     Ok(false)
 }
 
-async fn measure_metric(config: &AutoresearchConfig, workspace: &Path) -> anyhow::Result<f64> {
+async fn measure_metric(
+    config: &AutoresearchConfig,
+    workspace: &Path,
+    started: Instant,
+    max_duration_secs: u64,
+) -> anyhow::Result<f64> {
     let mut values = Vec::with_capacity(config.samples);
     for _ in 0..config.samples {
         let output = run_shell(
             &config.metric_command,
             workspace,
             config.command_timeout_secs,
+            started,
+            max_duration_secs,
         )
         .await?;
         if !output.status.success() {
@@ -886,15 +1191,39 @@ async fn run_shell(
     command: &str,
     workspace: &Path,
     timeout_secs: u64,
+    started: Instant,
+    max_duration_secs: u64,
 ) -> anyhow::Result<std::process::Output> {
+    let command_timeout = Duration::from_secs(timeout_secs);
+    let remaining = remaining_budget(started, max_duration_secs)?;
+    let budget_is_tighter = remaining.is_some_and(|remaining| remaining <= command_timeout);
+    let timeout = remaining
+        .map(|remaining| remaining.min(command_timeout))
+        .unwrap_or(command_timeout);
     let mut process = tokio::process::Command::new("sh");
     process.arg("-c").arg(command).current_dir(workspace);
-    run_process(
-        &mut process,
-        Some(Duration::from_secs(timeout_secs)),
-        "autoresearch shell command",
-    )
-    .await
+    crate::tools::child_proc::scrub(&mut process);
+    let label = if budget_is_tighter {
+        WALL_CLOCK_BUDGET_EXHAUSTED
+    } else {
+        "autoresearch shell command"
+    };
+    run_process(&mut process, Some(timeout), label).await
+}
+
+fn remaining_budget(started: Instant, max_duration_secs: u64) -> anyhow::Result<Option<Duration>> {
+    if max_duration_secs == 0 {
+        return Ok(None);
+    }
+    let remaining = Duration::from_secs(max_duration_secs).saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        bail!(WALL_CLOCK_BUDGET_EXHAUSTED);
+    }
+    Ok(Some(remaining))
+}
+
+fn is_budget_error(error: &anyhow::Error) -> bool {
+    error.to_string().contains(WALL_CLOCK_BUDGET_EXHAUSTED)
 }
 
 fn configure_process_group(command: &mut tokio::process::Command) {
@@ -1040,7 +1369,7 @@ mod tests {
 
     #[tokio::test]
     async fn command_timeout_is_enforced() {
-        let error = run_shell("sleep 5", Path::new("."), 1)
+        let error = run_shell("sleep 5", Path::new("."), 1, Instant::now(), 0)
             .await
             .expect_err("long-running metric should time out");
         assert!(error.to_string().contains("timed out"));
@@ -1055,11 +1384,28 @@ mod tests {
             "sleep 2; touch {}",
             shlex::try_quote(&marker.to_string_lossy()).unwrap()
         );
-        run_shell(&command, directory.path(), 1)
+        run_shell(&command, directory.path(), 1, Instant::now(), 0)
             .await
             .expect_err("command should time out");
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(!marker.exists(), "timed-out descendant survived");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wall_clock_timeout_terminates_shell_descendants() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("wall-clock-descendant-finished");
+        let command = format!(
+            "sleep 2; touch {}",
+            shlex::try_quote(&marker.to_string_lossy()).unwrap()
+        );
+        let error = run_shell(&command, directory.path(), 60, Instant::now(), 1)
+            .await
+            .expect_err("wall-clock budget should time out the command");
+        assert!(is_budget_error(&error));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!marker.exists(), "wall-clock descendant survived");
     }
 
     #[tokio::test]
@@ -1113,6 +1459,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn baseline_rejects_tracked_workspace_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        git_command(directory.path(), &["init", "-q"])
+            .await
+            .unwrap();
+        tokio::fs::write(directory.path().join("tracked.txt"), "before\n")
+            .await
+            .unwrap();
+        git_command(directory.path(), &["add", "tracked.txt"])
+            .await
+            .unwrap();
+        git_command(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=Autoresearch Test",
+                "-c",
+                "user.email=autoresearch@example.invalid",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        )
+        .await
+        .unwrap();
+        let branch = git_branch(directory.path()).await.unwrap();
+        let head = git_rev(directory.path()).await.unwrap();
+        tokio::fs::write(directory.path().join("tracked.txt"), "changed\n")
+            .await
+            .unwrap();
+
+        let error = ensure_tracked_state_unchanged(directory.path(), &branch, &head)
+            .await
+            .expect_err("baseline must reject tracked changes");
+        assert!(error.to_string().contains("baseline command modified"));
+    }
+
+    #[tokio::test]
+    async fn missing_path_is_normalized_before_workspace_containment_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = tokio::fs::canonicalize(directory.path()).await.unwrap();
+        let ledger = workspace.join(".apollo").join("ledger.toml");
+        let normalized = normalize_path_for_containment(&ledger, &workspace)
+            .await
+            .unwrap();
+        assert!(normalized.starts_with(&workspace));
+        assert_eq!(normalized, ledger);
+    }
+
+    #[tokio::test]
     async fn validation_timeout_is_a_rejected_attempt() {
         let config = AutoresearchConfig {
             validation_command: "sleep 5".into(),
@@ -1120,6 +1516,8 @@ mod tests {
             command_timeout_secs: 1,
             ..AutoresearchConfig::default()
         };
-        assert!(!run_validation(&config, Path::new(".")).await.unwrap());
+        assert!(!run_validation(&config, Path::new("."), Instant::now(), 0)
+            .await
+            .unwrap());
     }
 }
