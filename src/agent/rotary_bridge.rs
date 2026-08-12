@@ -457,6 +457,21 @@ pub struct RotaryBridgeConfig {
     pub hook_ctx: ToolHookContext,
 }
 
+fn model_registry_for(provider: &dyn UnthinkclawProvider, model: &str) -> rx4::ModelRegistry {
+    let mut registry = rx4::ModelRegistry::new();
+    let capabilities = provider.capabilities();
+    let mut info = rx4::ModelInfo::new(
+        provider.name(),
+        model,
+        capabilities.max_context.max(128_000) as usize,
+        8_192,
+    );
+    info.supports_tools = capabilities.native_tools;
+    info.supports_vision = capabilities.vision;
+    registry.register(info);
+    registry
+}
+
 /// Bridge that wraps an `rx4::Agent` and provides a simplified interface for
 /// apollo's outer shell to use.
 ///
@@ -478,12 +493,27 @@ pub struct RotaryAgentBridge {
 impl RotaryAgentBridge {
     /// Build a new bridge from the given configuration.
     pub fn new(config: RotaryBridgeConfig) -> Self {
+        Self::new_with_model_registry(config, rx4::ModelRegistry::new())
+    }
+
+    /// Build a bridge with model metadata owned by the embedding consumer.
+    /// Passing an empty registry preserves the provider-capability fallback.
+    pub fn new_with_model_registry(
+        config: RotaryBridgeConfig,
+        model_registry: rx4::ModelRegistry,
+    ) -> Self {
         let rx4_provider = Arc::new(RotaryProviderAdapter::new(
-            config.provider,
+            Arc::clone(&config.provider),
             config.cost_tracker,
         ));
 
         let mut agent = rx4::Agent::new();
+        let model_registry = if model_registry.is_empty() {
+            model_registry_for(config.provider.as_ref(), &config.model)
+        } else {
+            model_registry
+        };
+        agent.set_model_registry(model_registry);
         agent.set_model(&config.model);
         agent.set_system_prompt(&config.system_prompt);
         agent.set_provider(rx4_provider);

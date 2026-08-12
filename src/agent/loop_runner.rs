@@ -763,23 +763,40 @@ impl AgentRunner {
             .pop()
             .ok_or_else(|| anyhow::anyhow!("no user turn to run through rx4"))?;
 
-        let mut bridge = RotaryAgentBridge::new(RotaryBridgeConfig {
-            provider: Arc::clone(&self.provider),
-            tools: tools.to_vec(),
-            system_prompt,
-            model: model.to_string(),
-            workspace: self.workspace.clone(),
-            max_tool_iterations: self.agent_config.max_rounds,
-            auto_compact_after: self.agent_config.auto_compact_after,
-            cost_tracker: Some(Arc::clone(&self.cost_tracker)),
-            // Both engines must run the same hooks and emit the same events.
-            hook_ctx: crate::agent::rotary_bridge::ToolHookContext::new(
-                self.hooks.read().unwrap().clone(),
-                Some(Arc::clone(&self.plugin_registry)),
-            )
-            .with_hook_manager(Arc::clone(&self.hook_manager))
-            .with_stream(self.stream_sink()),
-        });
+        // Apollo owns provider/model selection. Supply the selected model's
+        // current provider metadata to rx4 rather than asking rx4 for a
+        // built-in catalog.
+        let capabilities = self.provider.capabilities();
+        let mut model_info = rx4::ModelInfo::new(
+            self.provider.name(),
+            model,
+            capabilities.max_context.max(128_000) as usize,
+            8_192,
+        );
+        model_info.supports_tools = capabilities.native_tools;
+        model_info.supports_vision = capabilities.vision;
+        let model_registry = rx4::ModelRegistry::from_models([model_info]);
+
+        let mut bridge = RotaryAgentBridge::new_with_model_registry(
+            RotaryBridgeConfig {
+                provider: Arc::clone(&self.provider),
+                tools: tools.to_vec(),
+                system_prompt,
+                model: model.to_string(),
+                workspace: self.workspace.clone(),
+                max_tool_iterations: self.agent_config.max_rounds,
+                auto_compact_after: self.agent_config.auto_compact_after,
+                cost_tracker: Some(Arc::clone(&self.cost_tracker)),
+                // Both engines must run the same hooks and emit the same events.
+                hook_ctx: crate::agent::rotary_bridge::ToolHookContext::new(
+                    self.hooks.read().unwrap().clone(),
+                    Some(Arc::clone(&self.plugin_registry)),
+                )
+                .with_hook_manager(Arc::clone(&self.hook_manager))
+                .with_stream(self.stream_sink()),
+            },
+            model_registry,
+        );
 
         // ── Steering queue ──
         // rx4's `messages_handle()` exposes the shared message buffer the tool

@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "apollo-agent"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 description = "Local-first Rust AI agent runtime — Telegram-first, trait-driven, SurrealDB + RocksDB state layer."
 license = "MPL-2.0"
@@ -104,7 +104,7 @@ computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 # Deliberately off: `builtin-tools` (apollo registers its own tools; also
 # pulls in the fff/git2/notify stack), `mcp` (apollo has src/mcp_server.rs),
 # `zkr-memory` (gates rx4's self_improve; apollo depends on zkr directly).
-rx4 = { version = "0.6.3", default-features = false, features = ["ipc", "providers", "skills", "graph-memory"] }
+rx4 = { version = "0.6.4", default-features = false, features = ["ipc", "providers", "skills", "graph-memory"] }
 
 # Async runtime (optimized features only)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }
