@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "apollo-agent"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "Local-first Rust AI agent runtime — Telegram-first, trait-driven, SurrealDB + RocksDB state layer."
 license = "MPL-2.0"
@@ -164,10 +164,10 @@ ed25519-dalek = { version = "2.1", features = ["rand_core"], optional = true }
 zkr = { version = "0.4.1", optional = true }
 jsonwebtoken = { version = "9", optional = true, default-features = false, features = ["use_pem"] }
 tokio-tungstenite = { version = "0.29", optional = true, default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
-rs_ai = { version = "0.2", optional = true }
-rs_ai_core = { version = "0.2", optional = true }
-rs_ai_providers = { version = "0.2", optional = true, features = ["chatgpt", "gemini", "openai-compatible", "xai", "cloudflare"] }
-rs_ai_oauth = { version = "0.2.30", optional = true, default-features = false }
+rs_ai = { version = "0.2.31", optional = true }
+rs_ai_core = { version = "0.2.31", optional = true }
+rs_ai_providers = { version = "0.2.31", optional = true, features = ["chatgpt", "gemini", "openai-compatible", "xai", "cloudflare"] }
+rs_ai_oauth = { version = "0.2.31", optional = true, default-features = false }
 
 [dev-dependencies]
 axum = "0.8"

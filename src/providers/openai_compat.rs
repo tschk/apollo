@@ -127,6 +127,41 @@ impl OpenAiCompatProvider {
         )
     }
 
+    /// Fetch the provider's current `/models` snapshot.
+    ///
+    /// OpenRouter returns a superset of the OpenAI model object. The parser
+    /// keeps its context limits, modalities, supported parameters, and
+    /// pricing while still accepting sparse OpenAI-compatible responses.
+    pub async fn list_remote_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        let response = send_with_retry(
+            crate::http::shared()
+                .get(format!("{}/models", self.base_url.trim_end_matches('/')))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Accept", "application/json"),
+            self.name(),
+        )
+        .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "{} models API error {}: {}",
+                self.provider_name,
+                status,
+                truncate_chars(&body, 200)
+            );
+        }
+        let value: Value = serde_json::from_str(&body)?;
+        let data = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("{} models response has no data array", self.name()))?;
+        Ok(data
+            .iter()
+            .filter_map(|model| parse_model_info(model, &self.provider_name))
+            .collect())
+    }
+
     fn build_tools_payload(&self, tools: &[ToolSpec]) -> Vec<Value> {
         tools
             .iter()
@@ -158,6 +193,10 @@ impl Provider for OpenAiCompatProvider {
             max_context: 128_000,
             native_web_search: false,
         }
+    }
+
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        self.list_remote_models().await
     }
 
     async fn chat(&self, request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
@@ -241,5 +280,154 @@ impl Provider for OpenAiCompatProvider {
             tool_calls,
             usage,
         })
+    }
+}
+
+fn parse_model_info(value: &Value, provider: &str) -> Option<ModelInfo> {
+    let id = value.get("id")?.as_str()?.to_string();
+    let mut info = ModelInfo {
+        id: id.clone(),
+        provider: provider.to_string(),
+        display_name: value
+            .get("name")
+            .or_else(|| value.get("display_name"))
+            .and_then(Value::as_str)
+            .unwrap_or(&id)
+            .to_string(),
+        description: value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        capabilities: ["text_input", "text_output", "streaming"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        supported_parameters: std::collections::BTreeSet::new(),
+        context_window: None,
+        max_output_tokens: None,
+        pricing: parse_pricing(value.get("pricing")),
+    };
+
+    if let Some(architecture) = value.get("architecture") {
+        info.input_modalities = string_array(architecture.get("input_modalities"));
+        info.output_modalities = string_array(architecture.get("output_modalities"));
+        if !info.input_modalities.is_empty() {
+            info.capabilities.remove("text_input");
+            if info.input_modalities.iter().any(|item| item == "text") {
+                info.capabilities.insert("text_input".into());
+            }
+            if info.input_modalities.iter().any(|item| item == "image") {
+                info.capabilities.insert("image_input".into());
+            }
+            if info.input_modalities.iter().any(|item| item == "audio") {
+                info.capabilities.insert("audio_input".into());
+            }
+        }
+        if !info.output_modalities.is_empty() {
+            info.capabilities.remove("text_output");
+            if info.output_modalities.iter().any(|item| item == "text") {
+                info.capabilities.insert("text_output".into());
+            } else {
+                info.capabilities.remove("streaming");
+            }
+            if info.output_modalities.iter().any(|item| item == "image") {
+                info.capabilities.insert("image_output".into());
+                info.capabilities.insert("image_generation".into());
+            }
+            if info.output_modalities.iter().any(|item| item == "audio") {
+                info.capabilities.insert("audio_output".into());
+            }
+        }
+    }
+
+    if let Some(parameters) = value.get("supported_parameters").and_then(Value::as_array) {
+        for parameter in parameters.iter().filter_map(Value::as_str) {
+            info.supported_parameters.insert(parameter.to_string());
+            match parameter {
+                "tools" | "tool_choice" => {
+                    info.capabilities.insert("tool_calling".into());
+                }
+                "structured_outputs" | "response_format" => {
+                    info.capabilities.insert("structured_output".into());
+                }
+                "reasoning" | "include_reasoning" => {
+                    info.capabilities.insert("extended_thinking".into());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let top_provider = value.get("top_provider");
+    info.context_window = top_provider
+        .and_then(|item| item.get("context_length"))
+        .and_then(value_u64)
+        .or_else(|| value.get("context_length").and_then(value_u64));
+    info.max_output_tokens = top_provider
+        .and_then(|item| item.get("max_completion_tokens"))
+        .and_then(value_u64)
+        .or_else(|| value.get("max_output_tokens").and_then(value_u64));
+    Some(info)
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn value_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str()?.parse::<u64>().ok())
+}
+
+fn number(value: Option<&Value>) -> Option<f64> {
+    value.and_then(|item| item.as_f64().or_else(|| item.as_str()?.parse().ok()))
+}
+
+fn parse_pricing(value: Option<&Value>) -> Option<ModelPricing> {
+    let object = value?.as_object()?;
+    Some(ModelPricing {
+        input_per_token: number(object.get("prompt")),
+        output_per_token: number(object.get("completion")),
+        request: number(object.get("request")),
+        image_input: number(object.get("image")),
+        reasoning: number(object.get("internal_reasoning")),
+        cache_read: number(object.get("input_cache_read")),
+        cache_write: number(object.get("input_cache_write")),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_model_info;
+
+    #[test]
+    fn parses_openrouter_limits_and_capabilities() {
+        let value = serde_json::json!({
+            "id": "openai/gpt-4o-mini",
+            "name": "GPT-4o Mini",
+            "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
+            "context_length": 128000,
+            "top_provider": {"context_length": 128000, "max_completion_tokens": 16384},
+            "pricing": {"prompt": "0.00000015", "completion": "0.0000006"},
+            "supported_parameters": ["tools", "structured_outputs"]
+        });
+        let model = parse_model_info(&value, "openrouter").unwrap();
+        assert_eq!(model.context_window, Some(128_000));
+        assert_eq!(model.max_output_tokens, Some(16_384));
+        assert!(model.capabilities.contains("image_input"));
+        assert!(model.capabilities.contains("tool_calling"));
+        assert_eq!(model.pricing.unwrap().input_per_token, Some(0.00000015));
     }
 }

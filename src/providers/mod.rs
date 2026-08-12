@@ -22,4 +22,6 @@ pub mod rs_ai;
 #[cfg(feature = "rs-ai")]
 pub mod shared_credentials;
 
-pub use traits::{ChatMessage, ChatRequest, ChatResponse, Provider, ToolCall};
+pub use traits::{
+    ChatMessage, ChatRequest, ChatResponse, ModelInfo, ModelPricing, Provider, ToolCall,
+};

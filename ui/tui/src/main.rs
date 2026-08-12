@@ -77,6 +77,7 @@ struct Msg {
 enum UiEvent {
     Agent(AgentEvent),
     State(AgentState),
+    Models(Vec<(String, Vec<String>)>),
     /// Output of a command that ran off the UI thread.
     Note(String),
 }
@@ -227,6 +228,106 @@ fn model_catalogue() -> Vec<(String, Vec<String>)> {
     }
 
     for (_, models) in catalogue.iter_mut() {
+        models.sort();
+    }
+    catalogue
+}
+
+/// Extend the offline picker with the latest provider snapshots.
+///
+/// This runs on a worker thread because a provider may take several seconds
+/// to answer, and OAuth discovery checks every credential currently known to
+/// the shared rs_ai store. A failed endpoint simply leaves the offline list
+/// intact.
+fn refreshable_model_catalogue() -> Vec<(String, Vec<String>)> {
+    let mut catalogue = model_catalogue();
+    let mut push = |provider: &str, model: &str| {
+        if model.is_empty() {
+            return;
+        }
+        match catalogue.iter_mut().find(|(name, _)| name == provider) {
+            Some((_, models)) => {
+                if !models.iter().any(|existing| existing == model) {
+                    models.push(model.to_string());
+                }
+            }
+            None => catalogue.push((provider.to_string(), vec![model.to_string()])),
+        }
+    };
+
+    if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        if let Ok(provider_models) = runtime.block_on(rs_ai_oauth::fetch_logged_in_models_async()) {
+            for provider_models in provider_models {
+                let provider = provider_models.provider.name().to_string();
+                for model in provider_models.models {
+                    push(&provider, &model.id);
+                }
+            }
+        }
+    }
+
+    // API-key providers are not in the OAuth credential store. OpenRouter is
+    // the important case here because its `/models` response changes often;
+    // this picker needs only IDs, while the provider adapter keeps the full
+    // metadata for capability-aware callers.
+    let config = std::fs::read_to_string("apollo.json")
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let provider = config
+        .as_ref()
+        .and_then(|value| value.get("provider"))
+        .and_then(|value| value.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if provider == "openrouter" {
+        let api_key = config
+            .as_ref()
+            .and_then(|value| value.get("provider"))
+            .and_then(|value| value.get("api_key"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+        if let Some(api_key) = api_key {
+            let endpoint = config
+                .as_ref()
+                .and_then(|value| value.get("provider"))
+                .and_then(|value| value.get("base_url"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("https://openrouter.ai/api/v1");
+            let response = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(8))
+                .build()
+                .and_then(|client| {
+                    client
+                        .get(format!("{}/models", endpoint.trim_end_matches('/')))
+                        .bearer_auth(api_key)
+                        .send()
+                });
+            if let Ok(response) = response {
+                if response.status().is_success() {
+                    if let Ok(value) = response.json::<serde_json::Value>() {
+                        if let Some(models) =
+                            value.get("data").and_then(serde_json::Value::as_array)
+                        {
+                            for model in models {
+                                if let Some(id) =
+                                    model.get("id").and_then(serde_json::Value::as_str)
+                                {
+                                    push(provider, id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (_, models) in &mut catalogue {
         models.sort();
     }
     catalogue
@@ -441,6 +542,13 @@ impl App {
         });
     }
 
+    fn refresh_model_catalogue(&self) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(UiEvent::Models(refreshable_model_catalogue()));
+        });
+    }
+
     fn apply_state(&mut self, state: AgentState) {
         self.model = state.model;
         self.engine = state.engine;
@@ -521,6 +629,7 @@ impl App {
             "/model" => {
                 if argument.is_empty() {
                     self.open_model_selector();
+                    self.refresh_model_catalogue();
                 } else {
                     self.apply_model(argument.to_string());
                 }
@@ -880,6 +989,7 @@ impl App {
 fn main() -> anyhow::Result<()> {
     let mut app = App::new();
     app.refresh_state();
+    app.refresh_model_catalogue();
     let mut tpl = Template::from_source(include_str!("../shell.crepus"));
 
     enable_raw_mode()?;
@@ -922,6 +1032,13 @@ fn run(app: &mut App, tpl: &mut Template, terminal: &mut Term) -> anyhow::Result
             match event {
                 UiEvent::Agent(event) => app.handle_event(event),
                 UiEvent::State(state) => app.apply_state(state),
+                UiEvent::Models(catalogue) => {
+                    app.catalogue = catalogue;
+                    if app.selecting_model {
+                        app.reset_model_choice();
+                    }
+                    app.status = "models refreshed".into();
+                }
                 UiEvent::Note(text) => {
                     app.note_block(&text);
                     if !app.busy {

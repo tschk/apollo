@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 use crate::tools::ToolSpec;
 
@@ -72,6 +73,44 @@ pub struct Usage {
     pub output_tokens: u32,
 }
 
+/// Provider-advertised metadata for one model.
+///
+/// Providers are allowed to return sparse model objects. Optional limits and
+/// pricing therefore remain unknown instead of being replaced with guesses.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub provider: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub capabilities: BTreeSet<String>,
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
+    #[serde(default)]
+    pub output_modalities: Vec<String>,
+    #[serde(default)]
+    pub supported_parameters: BTreeSet<String>,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default)]
+    pub pricing: Option<ModelPricing>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelPricing {
+    pub input_per_token: Option<f64>,
+    pub output_per_token: Option<f64>,
+    pub request: Option<f64>,
+    pub image_input: Option<f64>,
+    pub reasoning: Option<f64>,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
+}
+
 impl ChatResponse {
     pub fn has_tool_calls(&self) -> bool {
         !self.tool_calls.is_empty()
@@ -117,6 +156,15 @@ pub trait Provider: Send + Sync {
     /// Query capabilities
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::default()
+    }
+
+    /// Discover the provider's current model snapshot.
+    ///
+    /// Implementations that do not expose a model endpoint can keep the
+    /// default empty result. Consumers should treat an empty result as
+    /// "not advertised", not as proof that the provider has no models.
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        Ok(Vec::new())
     }
 
     /// Send a chat request and get a response.

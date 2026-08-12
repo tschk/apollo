@@ -222,7 +222,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apollo-agent"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -274,7 +274,9 @@ dependencies = [
  "crepuscularity-tui",
  "crossterm 0.28.1",
  "reqwest",
+ "rs_ai_oauth",
  "serde_json",
+ "tokio",
  "tungstenite 0.24.0",
 ]
 

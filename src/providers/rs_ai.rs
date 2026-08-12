@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use rs_ai_core::{
     GenerateOptions, GenerateResult, Message, Prompt, ToolCallRequest, ToolDefinition,
 };
+use rs_ai_oauth::{fetch_models_async, ModelInfo as OAuthModelInfo, OAuthProvider};
 
 use crate::providers::traits::{
     ChatRequest, ChatResponse, Provider, ProviderCapabilities, ToolCall, Usage,
@@ -110,6 +111,16 @@ impl Provider for RsAiProvider {
         }
     }
 
+    async fn list_models(&self) -> anyhow::Result<Vec<crate::providers::ModelInfo>> {
+        let Some(provider) = OAuthProvider::parse(&self.provider_name) else {
+            return Ok(Vec::new());
+        };
+        let models = fetch_models_async(provider, &self.api_key)
+            .await
+            .map_err(|error| anyhow::anyhow!("model discovery failed: {error}"))?;
+        Ok(models.into_iter().map(map_model_info).collect())
+    }
+
     async fn chat(&self, request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
         let model = self.build_model()?;
 
@@ -156,6 +167,30 @@ impl Provider for RsAiProvider {
             .map_err(|e| anyhow::anyhow!("rs_ai provider error: {e}"))?;
 
         Ok(map_generate_result(result)?)
+    }
+}
+
+fn map_model_info(model: OAuthModelInfo) -> crate::providers::ModelInfo {
+    crate::providers::ModelInfo {
+        id: model.id,
+        provider: model.provider,
+        display_name: model.display_name,
+        description: model.description,
+        capabilities: model.capabilities,
+        input_modalities: model.input_modalities,
+        output_modalities: model.output_modalities,
+        supported_parameters: model.supported_parameters,
+        context_window: model.limits.context_window,
+        max_output_tokens: model.limits.max_output_tokens,
+        pricing: model.pricing.map(|pricing| crate::providers::ModelPricing {
+            input_per_token: pricing.input_per_token,
+            output_per_token: pricing.output_per_token,
+            request: pricing.request,
+            image_input: pricing.image_input,
+            reasoning: pricing.reasoning,
+            cache_read: pricing.cache_read,
+            cache_write: pricing.cache_write,
+        }),
     }
 }
 

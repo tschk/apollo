@@ -17,4 +17,6 @@ crossterm = "0.28"
 anyhow = "1"
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+rs_ai_oauth = "0.2.31"
+tokio = { version = "1", features = ["rt", "time"] }
 tungstenite = "0.24"
