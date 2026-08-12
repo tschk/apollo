@@ -420,6 +420,7 @@ pub fn register_apollo_tools(
                     id: String::new(),
                     content: result.output,
                     is_error: result.is_error,
+                    error_kind: None,
                 }
             })
         });
