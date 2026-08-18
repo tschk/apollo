@@ -86,8 +86,7 @@ fn short_text_is_one_chunk() {
 #[test]
 fn no_chunk_exceeds_the_limit_and_nothing_is_lost() {
     let para = "The deposit is refunded against the final bill. ".repeat(30);
-    let text = std::iter::repeat(para.as_str())
-        .take(8)
+    let text = std::iter::repeat_n(para.as_str(), 8)
         .collect::<Vec<_>>()
         .join("\n\n");
     assert!(text.len() > TELEGRAM_MAX_LEN);
@@ -173,8 +172,7 @@ fn prose_around_a_code_block_stays_in_reading_order() {
 #[test]
 fn multibyte_paragraphs_chunk_on_character_boundaries() {
     let para = "訂枱按金會喺埋單嗰陣全數扣返，準時到就當錢使。".repeat(20);
-    let text = std::iter::repeat(para.as_str())
-        .take(10)
+    let text = std::iter::repeat_n(para.as_str(), 10)
         .collect::<Vec<_>>()
         .join("\n\n");
 
