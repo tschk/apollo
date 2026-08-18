@@ -7,6 +7,7 @@
 
 pub mod build_runner;
 pub mod compaction;
+pub mod guardrail_store;
 pub mod hooks;
 pub mod loop_runner;
 pub mod mode;
@@ -14,6 +15,7 @@ pub mod rotary_bridge;
 pub mod stream;
 pub mod streaming;
 
+pub use guardrail_store::{ChatGuardrailHook, GuardrailStore};
 pub use build_runner::{
     BuildResult, BuildRunner, BuildRunnerConfig, CompileError, DiagnosticSeverity,
 };

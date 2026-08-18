@@ -480,6 +480,9 @@ pub struct RotaryBridgeConfig {
     /// Pre/post tool hooks, so rx4 enforces the same permissions as the
     /// legacy loop.
     pub hook_ctx: ToolHookContext,
+    /// Within-turn loop detection. `None` leaves rx4's default (no loop
+    /// detection at all) in place.
+    pub guardrails: Option<rx4::guardrails::GuardrailConfig>,
 }
 
 fn model_registry_for(provider: &dyn UnthinkclawProvider, model: &str) -> rx4::ModelRegistry {
@@ -564,6 +567,13 @@ impl RotaryAgentBridge {
         // `full_access` makes it defer to that single gate rather than
         // second-guessing it with a policy apollo never configured.
         agent.set_policy(rx4::Policy::full_access());
+
+        // rx4 disables loop detection unless it is configured, so a turn that
+        // calls the same failing tool forever is the default. Forward apollo's
+        // thresholds so the documented guardrails actually run.
+        if let Some(guardrails) = config.guardrails {
+            agent.set_guardrails(guardrails);
+        }
 
         // Register apollo's tools into rx4's tool registry
         let mut tool_registry = rx4::ToolRegistry::new();

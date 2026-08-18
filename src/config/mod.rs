@@ -71,6 +71,8 @@ pub struct AgentConfig {
     pub auto_compact_after: usize,
     /// ReAct trajectory capture for RL export.
     pub trajectory: TrajectoryConfig,
+    /// Loop detection and failure counting.
+    pub guardrails: GuardrailsConfig,
 }
 
 impl Default for AgentConfig {
@@ -86,10 +88,43 @@ impl Default for AgentConfig {
             permission_profile: "auto".to_string(),
             auto_compact_after: 0,
             trajectory: TrajectoryConfig::default(),
+            guardrails: GuardrailsConfig::default(),
         }
     }
 }
 
+/// Loop detection and failure counting.
+///
+/// The thresholds drive two things. rx4 gets them for the turn it is running,
+/// which is where a runaway loop is caught. apollo keeps the per-chat failure
+/// streaks alongside them, so a restart does not erase the knowledge that a
+/// tool has been failing every time it is called in this chat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuardrailsConfig {
+    /// Run loop detection at all. Off means rx4's historical behaviour: a
+    /// turn may repeat the same failing call until it runs out of rounds.
+    pub enabled: bool,
+    /// Keep per-chat failure streaks across restarts.
+    pub persist: bool,
+    /// Where those streaks live. Relative paths resolve against the
+    /// workspace. The file holds tool names, argument hashes and counts —
+    /// never arguments, output, or message text.
+    pub state_path: PathBuf,
+    /// Warn/block thresholds, shared by both guardrails.
+    pub thresholds: crate::tools::guardrails::GuardrailConfig,
+}
+
+impl Default for GuardrailsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            persist: true,
+            state_path: PathBuf::from(".apollo/guardrails.json"),
+            thresholds: crate::tools::guardrails::GuardrailConfig::default(),
+        }
+    }
+}
 
 /// ReAct trajectory capture — off by default.
 ///

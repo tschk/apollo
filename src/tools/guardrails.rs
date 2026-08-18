@@ -6,6 +6,7 @@
 //! pontytail: single-threaded, in-memory history. Per-chat isolation is handled by
 //! the HashMap<String, ToolGuardrails> in the agent loop.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,7 @@ pub struct ToolCallRecord {
 
 /// Guardrail configuration thresholds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GuardrailConfig {
     pub warnings_enabled: bool,
     pub hard_stop_enabled: bool,
@@ -95,10 +97,28 @@ pub enum GuardrailDecision {
     Stop(String),
 }
 
+/// The part of a guardrail's state that outlives the process.
+///
+/// `history` is not in here on purpose: an `Instant` has no meaning across a
+/// restart, and the decisions only need the streaks. What survives is what a
+/// restarted bot must not forget — that a tool has been failing, and that it
+/// was being called with the same arguments over and over.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuardrailSnapshot {
+    /// Consecutive failures per tool. A success clears the tool's entry.
+    pub error_streaks: HashMap<String, usize>,
+    /// How many times in a row the last call was repeated identically.
+    pub identical_call_count: usize,
+    /// `(tool, arguments hash)` of the last call observed.
+    pub last_call_identity: Option<(String, String)>,
+}
+
 /// Tool call guardrails — pure analysis, no side effects.
 pub struct ToolGuardrails {
     config: GuardrailConfig,
     history: Vec<ToolCallRecord>,
+    error_streaks: HashMap<String, usize>,
     identical_call_count: usize,
     last_call_identity: Option<(String, String)>,
 }
@@ -108,9 +128,53 @@ impl ToolGuardrails {
         Self {
             config,
             history: Vec::with_capacity(64),
+            error_streaks: HashMap::new(),
             identical_call_count: 0,
             last_call_identity: None,
         }
+    }
+
+    /// Rebuild from a snapshot taken before a restart.
+    pub fn restore(config: GuardrailConfig, snapshot: GuardrailSnapshot) -> Self {
+        Self {
+            config,
+            history: Vec::with_capacity(64),
+            error_streaks: snapshot.error_streaks,
+            identical_call_count: snapshot.identical_call_count,
+            last_call_identity: snapshot.last_call_identity,
+        }
+    }
+
+    /// The state worth carrying across a restart.
+    pub fn snapshot(&self) -> GuardrailSnapshot {
+        GuardrailSnapshot {
+            error_streaks: self.error_streaks.clone(),
+            identical_call_count: self.identical_call_count,
+            last_call_identity: self.last_call_identity.clone(),
+        }
+    }
+
+    /// Consecutive failures recorded for `tool`, including ones from before a
+    /// restart.
+    pub fn error_streak(&self, tool: &str) -> usize {
+        self.error_streaks.get(tool).copied().unwrap_or(0)
+    }
+
+    /// Every tool currently in a failure streak of at least `min`, worst first.
+    pub fn failing_tools(&self, min: usize) -> Vec<(String, usize)> {
+        let mut failing: Vec<(String, usize)> = self
+            .error_streaks
+            .iter()
+            .filter(|(_, count)| **count >= min)
+            .map(|(tool, count)| (tool.clone(), *count))
+            .collect();
+        failing.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        failing
+    }
+
+    /// Thresholds this guardrail was built with.
+    pub fn config(&self) -> &GuardrailConfig {
+        &self.config
     }
 
     /// Observe a tool call and return the guardrail decision.
@@ -123,6 +187,16 @@ impl ToolGuardrails {
     ) -> GuardrailDecision {
         let hash = hash_args(args);
         let identity = (name.to_string(), hash.clone());
+
+        // Track consecutive failures per tool. Keyed by tool rather than
+        // derived from the tail of `history`, so an unrelated call in between
+        // no longer hides a tool that fails every single time it is used —
+        // and so the count survives a restart through the snapshot.
+        if is_error {
+            *self.error_streaks.entry(name.to_string()).or_insert(0) += 1;
+        } else {
+            self.error_streaks.remove(name);
+        }
 
         // Track identical consecutive calls
         if Some(&identity) == self.last_call_identity.as_ref() {
@@ -164,13 +238,7 @@ impl ToolGuardrails {
 
         // Error counting
         if is_error {
-            let error_count = self
-                .history
-                .iter()
-                .rev()
-                .take_while(|r| r.name == name && r.is_error)
-                .count()
-                + 1;
+            let error_count = self.error_streak(name);
 
             if self.config.hard_stop_enabled && error_count >= self.config.exact_failure_block_after
             {
@@ -218,6 +286,7 @@ impl ToolGuardrails {
     /// Reset for a new turn.
     pub fn reset(&mut self) {
         self.history.clear();
+        self.error_streaks.clear();
         self.identical_call_count = 0;
         self.last_call_identity = None;
     }
@@ -312,6 +381,41 @@ mod tests {
         let _ = g.observe("shell", r#"{"command":"ls"}"#, "", true);
         let decision = g.observe("shell", r#"{"command":"ls"}"#, "", true);
         assert!(matches!(decision, GuardrailDecision::Warn(_)));
+    }
+
+    #[test]
+    fn an_unrelated_call_in_between_does_not_hide_a_failing_tool() {
+        // The streak is per tool. Counting the tail of one shared history
+        // meant a read between two failed shells reset the count, and a tool
+        // that fails every single time it is used never reached a threshold.
+        let mut g = ToolGuardrails::new(GuardrailConfig {
+            exact_failure_warn_after: 2,
+            ..Default::default()
+        });
+
+        let _ = g.observe("shell", r#"{"command":"a"}"#, "", true);
+        let _ = g.observe("read", r#"{"path":"x"}"#, "", false);
+        let decision = g.observe("shell", r#"{"command":"b"}"#, "", true);
+
+        assert!(matches!(decision, GuardrailDecision::Warn(_)));
+        assert_eq!(g.error_streak("shell"), 2);
+        assert_eq!(g.error_streak("read"), 0);
+    }
+
+    #[test]
+    fn a_snapshot_carries_the_streaks_and_nothing_else() {
+        let mut g = ToolGuardrails::new(GuardrailConfig::default());
+        let _ = g.observe("shell", "{}", "", true);
+        let _ = g.observe("shell", "{}", "", true);
+
+        let snapshot = g.snapshot();
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("timestamp"), "{json}");
+
+        let restored = ToolGuardrails::restore(GuardrailConfig::default(), snapshot);
+        assert_eq!(restored.error_streak("shell"), 2);
+        assert_eq!(restored.failing_tools(2), vec![("shell".to_string(), 2)]);
+        assert!(restored.failing_tools(3).is_empty());
     }
 
     #[test]

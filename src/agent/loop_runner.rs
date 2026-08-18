@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
+use crate::agent::guardrail_store::{ChatGuardrailHook, GuardrailStore};
 use crate::agent::hooks::ToolHook;
 use crate::agent::mode::{AgentMode, NullChannel};
 use crate::agent::stream::{emit, AgentStreamEvent};
@@ -50,6 +51,9 @@ pub struct AgentRunner {
     plugin_registry: Arc<RwLock<PluginRegistry>>,
     /// Current trajectory being recorded (per chat)
     trajectories: Arc<RwLock<HashMap<String, Trajectory>>>,
+    /// Per-chat guardrail streaks that outlive the process. Built on first
+    /// use so the workspace and config are already set.
+    guardrails: tokio::sync::OnceCell<Option<Arc<GuardrailStore>>>,
     /// Whether this runner may read or persist conversational memory.
     memory_enabled: bool,
     memory_ideas: crate::config::MemoryIdeasConfig,
@@ -91,6 +95,7 @@ impl AgentRunner {
             hook_manager: Arc::new(HookManager::new()),
             plugin_registry: Arc::new(RwLock::new(PluginRegistry::new())),
             trajectories: Arc::new(RwLock::new(HashMap::new())),
+            guardrails: tokio::sync::OnceCell::new(),
             memory_enabled: true,
             memory_ideas: crate::config::MemoryIdeasConfig::default(),
             group_chat: crate::config::GroupChatConfig::default(),
@@ -716,6 +721,11 @@ impl AgentRunner {
                 }
             }
         }
+        if let Some(store) = self.guardrail_store().await {
+            if let Some(note) = store.carried_note(&msg.chat_id).await {
+                user_turn = format!("{user_turn}\n\n{note}");
+            }
+        }
         messages.push(ChatMessage::user(&user_turn));
 
         let tools_snapshot: Vec<Arc<dyn Tool>> = self.tools.read().await.iter().cloned().collect();
@@ -781,6 +791,25 @@ impl AgentRunner {
         model_info.supports_vision = capabilities.vision;
         let model_registry = rx4::ModelRegistry::from_models([model_info]);
 
+        // The turn's hooks: the runner's own, plus this chat's guardrail so a
+        // tool that has been failing since before the restart can be stopped.
+        let mut hooks = self.hooks.read().unwrap().clone();
+        let mut rx4_guardrails = None;
+        if let Some(store) = self.guardrail_store().await {
+            let t = &self.agent_config.guardrails.thresholds;
+            rx4_guardrails = Some(rx4::guardrails::GuardrailConfig {
+                warnings_enabled: t.warnings_enabled,
+                hard_stop_enabled: t.hard_stop_enabled,
+                exact_failure_warn_after: t.exact_failure_warn_after,
+                exact_failure_block_after: t.exact_failure_block_after,
+                same_tool_failure_warn_after: t.same_tool_failure_warn_after,
+                same_tool_failure_halt_after: t.same_tool_failure_halt_after,
+                no_progress_warn_after: t.no_progress_warn_after,
+                no_progress_block_after: t.no_progress_block_after,
+            });
+            hooks.push(Arc::new(ChatGuardrailHook::new(store, chat_id)) as Arc<dyn ToolHook>);
+        }
+
         let mut bridge = RotaryAgentBridge::new_with_model_registry(
             RotaryBridgeConfig {
                 provider: Arc::clone(&self.provider),
@@ -792,8 +821,9 @@ impl AgentRunner {
                 auto_compact_after: self.agent_config.auto_compact_after,
                 cost_tracker: Some(Arc::clone(&self.cost_tracker)),
                 // Both engines must run the same hooks and emit the same events.
+                guardrails: rx4_guardrails,
                 hook_ctx: crate::agent::rotary_bridge::ToolHookContext::new(
-                    self.hooks.read().unwrap().clone(),
+                    hooks,
                     Some(Arc::clone(&self.plugin_registry)),
                 )
                 .with_hook_manager(Arc::clone(&self.hook_manager))
@@ -1032,6 +1062,35 @@ impl AgentRunner {
         } else {
             self.workspace.join(configured)
         }
+    }
+
+    /// The guardrail store, built once per runner. `None` when guardrails are
+    /// off; `Some` with no path when they are on but not persisted.
+    pub async fn guardrail_store(&self) -> Option<Arc<GuardrailStore>> {
+        self.guardrails
+            .get_or_init(|| async {
+                let cfg = &self.agent_config.guardrails;
+                if !cfg.enabled {
+                    return None;
+                }
+                let path = cfg.persist.then(|| {
+                    if cfg.state_path.is_absolute() {
+                        cfg.state_path.clone()
+                    } else {
+                        self.workspace.join(&cfg.state_path)
+                    }
+                });
+                let thresholds = cfg.thresholds.clone();
+                let store = tokio::task::spawn_blocking(move || {
+                    // Reading the state file is blocking I/O.
+                    GuardrailStore::load(thresholds, path)
+                })
+                .await
+                .ok()?;
+                Some(Arc::new(store))
+            })
+            .await
+            .clone()
     }
 
     /// A recorder for `chat_id`, or `None` when collection is off.
