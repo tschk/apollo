@@ -250,6 +250,144 @@ async fn post_webhook(port: u16, path: &str, body: serde_json::Value) {
     panic!("webhook receiver on port {port} never accepted a request");
 }
 
+// ───────────────────────── telegram inbound media ─────────────────────────
+
+/// A voice note must reach the agent as text.
+///
+/// Transcription depends on python3 and faster-whisper being installed, so
+/// what is asserted is the contract that holds either way: the file is fetched
+/// through `getFile` and then downloaded, the turn is delivered as a message
+/// rather than dropped, and a machine without the transcriber says so in the
+/// message instead of failing silently. The temp file it downloads to must not
+/// be left behind — a bot that runs for weeks would fill /tmp with voice notes.
+#[cfg(feature = "channel-telegram")]
+#[tokio::test]
+async fn telegram_delivers_voice_and_audio_as_text() {
+    use apollo::channels::telegram::TelegramChannel;
+
+    for (kind, field) in [("voice", "voice"), ("audio", "audio")] {
+        let updates = format!(
+            r#"{{"ok":true,"result":[{{"update_id":1,"message":{{"message_id":5,
+            "chat":{{"id":42,"type":"private"}},"from":{{"id":9,"username":"u"}},
+            "{field}":{{"file_id":"file-{kind}","duration":3}}}}}}]}}"#
+        );
+        let mock = Mock::start(Arc::new(move |path: &str| {
+            if path.ends_with("/getUpdates") {
+                json(&updates)
+            } else if path.contains("/getFile") {
+                json(r#"{"ok":true,"result":{"file_path":"voice/file_0.ogg"}}"#)
+            } else if path.contains("/file/bot") {
+                (200, "OggS-not-really-audio".to_string())
+            } else {
+                json(r#"{"ok":true,"result":{"message_id":7}}"#)
+            }
+        }))
+        .await;
+
+        let before = voice_temp_files();
+        let mut channel = TelegramChannel::new("tok".to_string(), 42).with_api_base(&mock.base);
+        let mut rx = channel.start().await.unwrap();
+        let msg = assert_receives(kind, &mut rx).await;
+
+        assert_eq!(msg.chat_id, "42");
+        assert!(
+            msg.text.starts_with("[Voice message"),
+            "{kind}: expected a transcription or a plain-language reason, got {:?}",
+            msg.text
+        );
+        let get_file = mock.wait_for("/getFile").await;
+        assert!(
+            get_file.query.contains(&format!("file_id=file-{kind}")),
+            "{kind}: getFile asked for the wrong file: {:?}",
+            get_file.query
+        );
+        mock.wait_for("/file/bot").await;
+        assert_eq!(
+            voice_temp_files(),
+            before,
+            "{kind}: the downloaded audio was left in the temp directory"
+        );
+    }
+}
+
+/// Stickers arrive as a description the model can reason about, and the
+/// description is cached so the same sticker is not re-analysed forever.
+#[cfg(feature = "channel-telegram")]
+#[tokio::test]
+async fn telegram_delivers_a_sticker_as_a_description() {
+    use apollo::channels::telegram::TelegramChannel;
+
+    let mock = Mock::start(Arc::new(|path: &str| {
+        if path.ends_with("/getUpdates") {
+            json(
+                r#"{"ok":true,"result":[{"update_id":1,"message":{"message_id":5,
+                "chat":{"id":42,"type":"private"},"from":{"id":9,"username":"u"},
+                "sticker":{"file_id":"f1","file_unique_id":"u1","emoji":"🙂",
+                "set_name":"test_set","is_animated":true,"is_video":false}}}]}"#,
+            )
+        } else {
+            json(r#"{"ok":true,"result":{"message_id":7}}"#)
+        }
+    }))
+    .await;
+
+    let mut channel = TelegramChannel::new("tok".to_string(), 42).with_api_base(&mock.base);
+    let mut rx = channel.start().await.unwrap();
+    let msg = assert_receives("sticker", &mut rx).await;
+
+    assert!(msg.text.contains('🙂'), "{:?}", msg.text);
+    assert!(msg.text.contains("test_set"), "{:?}", msg.text);
+    assert!(msg.text.contains("animated"), "{:?}", msg.text);
+    assert!(!msg.text.is_empty());
+}
+
+/// A message type the channel does not understand must be skipped, not
+/// delivered as an empty turn that costs a model call and confuses the agent.
+#[cfg(feature = "channel-telegram")]
+#[tokio::test]
+async fn telegram_skips_a_message_with_no_usable_content() {
+    use apollo::channels::telegram::TelegramChannel;
+
+    let mock = Mock::start(Arc::new(|path: &str| {
+        if path.ends_with("/getUpdates") {
+            json(
+                r#"{"ok":true,"result":[
+                {"update_id":1,"message":{"message_id":5,"chat":{"id":42,"type":"private"},
+                 "from":{"id":9,"username":"u"}}},
+                {"update_id":2,"message":{"message_id":6,"chat":{"id":42,"type":"private"},
+                 "from":{"id":9,"username":"u"},"text":"after the empty one"}}]}"#,
+            )
+        } else {
+            json(r#"{"ok":true,"result":{"message_id":7}}"#)
+        }
+    }))
+    .await;
+
+    let mut channel = TelegramChannel::new("tok".to_string(), 42).with_api_base(&mock.base);
+    let mut rx = channel.start().await.unwrap();
+    let msg = assert_receives("telegram", &mut rx).await;
+    assert_eq!(
+        msg.text, "after the empty one",
+        "the contentless update must be skipped, not delivered"
+    );
+}
+
+/// Voice notes are downloaded to the system temp directory under this prefix.
+fn voice_temp_files() -> usize {
+    std::fs::read_dir(std::env::temp_dir())
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("apollo_voice_")
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 // ───────────────────────── telegram ─────────────────────────
 
 #[cfg(feature = "channel-telegram")]

@@ -176,7 +176,7 @@ fn split_blocks(text: &str) -> Vec<String> {
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") {
             if !current.trim().is_empty() && !in_code_block {
-                blocks.push(current.trim_end().to_string());
+                blocks.push(trimmed_block(&current));
                 current.clear();
             }
 
@@ -185,7 +185,7 @@ fn split_blocks(text: &str) -> Vec<String> {
             in_code_block = !in_code_block;
 
             if !in_code_block {
-                blocks.push(current.trim_end().to_string());
+                blocks.push(trimmed_block(&current));
                 current.clear();
             }
             continue;
@@ -196,10 +196,17 @@ fn split_blocks(text: &str) -> Vec<String> {
     }
 
     if !current.trim().is_empty() {
-        blocks.push(current.trim_end().to_string());
+        blocks.push(trimmed_block(&current));
     }
 
     blocks
+}
+
+/// A block is sent as its own message, so the blank line that separated it
+/// from the previous block is not content — it renders as an empty first line
+/// in Telegram. Leading indentation on the first line is kept.
+fn trimmed_block(block: &str) -> String {
+    block.trim_matches('\n').trim_end().to_string()
 }
 
 fn chunk_prose_block(text: &str, max_len: usize) -> Vec<String> {
