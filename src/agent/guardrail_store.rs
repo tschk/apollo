@@ -30,7 +30,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
 use crate::agent::hooks::{HookDecision, ToolHook};
-use crate::tools::guardrails::{GuardrailConfig, GuardrailDecision, GuardrailSnapshot, ToolGuardrails};
+use crate::tools::guardrails::{
+    GuardrailConfig, GuardrailDecision, GuardrailSnapshot, ToolGuardrails,
+};
 use crate::tools::ToolResult;
 
 /// The on-disk document: chat id hash → snapshot.
@@ -302,7 +304,12 @@ mod tests {
         let path = dir.path().join("guardrails.json");
         let store = GuardrailStore::load(hard_stop_config(), Some(path.clone()));
         store
-            .observe("../../etc/passwd", "shell", "{}", &ToolResult::error("boom"))
+            .observe(
+                "../../etc/passwd",
+                "shell",
+                "{}",
+                &ToolResult::error("boom"),
+            )
             .await;
         store.persist().await.unwrap();
 

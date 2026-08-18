@@ -42,7 +42,10 @@ fn a_code_block_is_passed_through_untouched() {
     assert!(out.contains("| a | b |"), "{out}");
     assert!(out.contains("|---|---|"), "{out}");
     assert!(out.contains("let x = 2 * 3 * 4;"), "{out}");
-    assert!(!out.contains("• a | b"), "table rewriting leaked into code: {out}");
+    assert!(
+        !out.contains("• a | b"),
+        "table rewriting leaked into code: {out}"
+    );
 }
 
 #[test]
@@ -56,7 +59,10 @@ fn an_unclosed_code_fence_does_not_swallow_the_rest_of_the_message() {
 fn headings_become_bold_and_separator_rows_disappear() {
     let out = telegram("## Menu\n\n| dish | price |\n| --- | ---: |\n| chicken | 268 |");
     assert!(out.contains("*Menu*"), "{out}");
-    assert!(!out.contains("---"), "separator row must not reach Telegram: {out}");
+    assert!(
+        !out.contains("---"),
+        "separator row must not reach Telegram: {out}"
+    );
     assert!(out.contains("• dish | price"), "{out}");
     assert!(out.contains("• chicken | 268"), "{out}");
 }
@@ -130,8 +136,15 @@ fn every_chunk_of_a_long_code_block_is_a_closed_fence() {
     let parts = chunks(&text, TELEGRAM_MAX_LEN);
     assert!(parts.len() > 1);
     for part in &parts {
-        assert!(part.len() <= TELEGRAM_MAX_LEN, "chunk of {} bytes", part.len());
-        assert!(part.starts_with("```rust\n"), "chunk lost its language: {part}");
+        assert!(
+            part.len() <= TELEGRAM_MAX_LEN,
+            "chunk of {} bytes",
+            part.len()
+        );
+        assert!(
+            part.starts_with("```rust\n"),
+            "chunk lost its language: {part}"
+        );
         assert!(part.ends_with("\n```"), "chunk left a fence open: {part}");
         assert_eq!(
             part.matches("```").count(),
@@ -158,7 +171,11 @@ fn prose_around_a_code_block_stays_in_reading_order() {
         "echo hello\n".repeat(500)
     );
     let parts = chunks(&text, 1000);
-    assert!(parts.first().unwrap().starts_with("intro"), "{:?}", parts.first());
+    assert!(
+        parts.first().unwrap().starts_with("intro"),
+        "{:?}",
+        parts.first()
+    );
     assert!(
         parts.last().unwrap().starts_with("closing"),
         "{:?}",

@@ -1238,7 +1238,11 @@ mod retry_tests {
         };
 
         recorder
-            .record("shell", r#"{"command":"ls"}"#, &ToolResult::success("日本語です"))
+            .record(
+                "shell",
+                r#"{"command":"ls"}"#,
+                &ToolResult::success("日本語です"),
+            )
             .await;
         recorder
             .record("shell", r#"{"command":"nope"}"#, &ToolResult::error("boom"))
@@ -1262,8 +1266,14 @@ mod retry_tests {
             "a trajectory redacts content unless the operator asked otherwise"
         );
         assert!(traj.steps[0].success);
-        assert!(!traj.steps[1].success, "an error step is recorded as failed");
-        assert!(!trajs.contains_key("chat-2"), "no trajectory is created on the fly");
+        assert!(
+            !traj.steps[1].success,
+            "an error step is recorded as failed"
+        );
+        assert!(
+            !trajs.contains_key("chat-2"),
+            "no trajectory is created on the fly"
+        );
     }
 
     #[test]

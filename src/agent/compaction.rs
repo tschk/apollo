@@ -349,7 +349,10 @@ mod tests {
         let seen = provider.seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "one summarization call per compaction");
         assert!(seen[0].contains("take a booking"), "{}", seen[0]);
-        assert!(seen[0].contains("question 0"), "the old turns are summarized");
+        assert!(
+            seen[0].contains("question 0"),
+            "the old turns are summarized"
+        );
         assert!(
             !seen[0].contains("answer 9"),
             "the kept tail is not re-summarized"
@@ -367,7 +370,10 @@ mod tests {
         let messages = conversation(10);
         let result = compactor.compress(&messages, None).await;
 
-        assert!(result.did_compact, "compaction must not depend on the model");
+        assert!(
+            result.did_compact,
+            "compaction must not depend on the model"
+        );
         assert!(result.messages[1].content.contains("dropped"));
         assert!(result.messages.len() < messages.len());
     }

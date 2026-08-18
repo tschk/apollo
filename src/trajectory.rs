@@ -592,7 +592,10 @@ mod tests {
         assert!(args.contains("deploy"), "{args}");
 
         let json = t.to_json().unwrap();
-        assert!(json.contains("deployed"), "saving must not re-redact: {json}");
+        assert!(
+            json.contains("deployed"),
+            "saving must not re-redact: {json}"
+        );
         assert!(!json.contains("sk-ant-abcdefghijklmnopqrstuvwx"));
         assert!(
             !json.contains("redact_content"),

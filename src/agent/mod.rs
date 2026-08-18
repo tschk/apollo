@@ -15,10 +15,10 @@ pub mod rotary_bridge;
 pub mod stream;
 pub mod streaming;
 
-pub use guardrail_store::{ChatGuardrailHook, GuardrailStore};
 pub use build_runner::{
     BuildResult, BuildRunner, BuildRunnerConfig, CompileError, DiagnosticSeverity,
 };
+pub use guardrail_store::{ChatGuardrailHook, GuardrailStore};
 pub use loop_runner::AgentRunner;
 pub use mode::{agent_mode_from_permission_profile, AgentMode, NullChannel};
 pub use rotary_bridge::{

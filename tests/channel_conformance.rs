@@ -378,11 +378,7 @@ fn voice_temp_files() -> usize {
         .map(|entries| {
             entries
                 .flatten()
-                .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .starts_with("apollo_voice_")
-                })
+                .filter(|e| e.file_name().to_string_lossy().starts_with("apollo_voice_"))
                 .count()
         })
         .unwrap_or(0)
