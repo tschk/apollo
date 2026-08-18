@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-07-27
+Last updated: 2026-08-18
 
 ## Now
 
@@ -27,11 +27,19 @@ Last updated: 2026-07-27
 - Cron scheduler — SurrealDB-backed with in-memory noop fallback for testing
 - Cargo publish v0.2.0 to crates.io as `apollo-agent`
 
+## Done (since v0.6.0)
+
+- trajectory collection toggle, and trajectories that actually record steps
+- loop detection wired to rx4, with per-chat failure streaks that survive a
+  restart
+- Telegram sanitizer, chunker and inbound-media tests
+- a compactor that summarizes instead of claiming to
+- skill routing for space-free scripts (Cantonese, Japanese)
+
 ## Next
 
-- add tests for Telegram markdown conversion and long-message chunking
-- add tests for audio/sticker handling in Telegram
-- add trajectory collection toggle in config.yaml
+- non-English operators end to end: descriptions, skill bodies and default
+  prompts are still English-only
 - make swarm state more visible and easier to operate
 - improve operator diagnostics
 - move scheduler/session/control metadata onto unified Surreal contract

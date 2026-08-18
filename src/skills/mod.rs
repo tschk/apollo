@@ -145,9 +145,60 @@ fn is_stopword(word: &str) -> bool {
     STOPWORDS.contains(&word)
 }
 
+/// Minimum score for a skill to be considered a match at all.
+const MATCH_THRESHOLD: f32 = 5.0;
+
+/// How many distinct shared terms a space-free script needs to match.
+const CONTINUA_TERMS_FOR_MATCH: f32 = 2.0;
+
+/// Whether `c` belongs to a script written without spaces between words.
+///
+/// Han and kana, not Hangul: Korean is written with spaces, so the
+/// whitespace tokenizer already handles it.
+fn is_scriptio_continua(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF   // hiragana, katakana
+        | 0x3400..=0x4DBF // CJK extension A
+        | 0x4E00..=0x9FFF // CJK unified ideographs
+        | 0xF900..=0xFAFF // compatibility ideographs
+    )
+}
+
+/// Character bigrams of every run of space-free script in `text`.
+///
+/// A Chinese or Japanese sentence is one whitespace token, so the word
+/// scoring below rates every such message at zero and no skill is ever
+/// matched — the assistant answers a Cantonese operator with no playbook
+/// loaded, and nobody sees an error because "no skill matched" is normal.
+/// Bigrams are the standard cheap answer: "訂枱" and "按金" fall out of
+/// "今晚訂枱要收按金" without a segmenter.
+fn continua_bigrams(text: &str) -> Vec<String> {
+    let mut bigrams = Vec::new();
+    let mut run: Vec<char> = Vec::new();
+    let flush = |run: &mut Vec<char>, out: &mut Vec<String>| {
+        for pair in run.windows(2) {
+            let bigram: String = pair.iter().collect();
+            if !out.contains(&bigram) {
+                out.push(bigram);
+            }
+        }
+        run.clear();
+    };
+    for c in text.chars() {
+        if is_scriptio_continua(c) {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut bigrams);
+        }
+    }
+    flush(&mut run, &mut bigrams);
+    bigrams
+}
+
 pub fn match_skill<'a>(skills: &'a [Skill], user_message: &str) -> Option<&'a Skill> {
     let msg_lower = user_message.to_lowercase();
     let msg_words: Vec<&str> = msg_lower.split_whitespace().collect();
+    let msg_bigrams = continua_bigrams(&msg_lower);
 
     let mut best_score = 0.0f32;
     let mut best_skill = None;
@@ -179,16 +230,96 @@ pub fn match_skill<'a>(skills: &'a [Skill], user_message: &str) -> Option<&'a Sk
             }
         }
 
+        // Space-free scripts. A Chinese term is typically two characters —
+        // one bigram — where an English keyword is one word scored twice
+        // (once in each direction above), so the weight is derived from the
+        // threshold rather than guessed: two distinct shared terms match, one
+        // does not. Longer terms produce more bigrams and score higher on
+        // their own.
+        for bigram in &msg_bigrams {
+            if desc_lower.contains(bigram) {
+                score += MATCH_THRESHOLD / CONTINUA_TERMS_FOR_MATCH;
+            }
+        }
+
         if score > best_score {
             best_score = score;
             best_skill = Some(skill);
         }
     }
 
-    if best_score >= 5.0 {
+    if best_score >= MATCH_THRESHOLD {
         best_skill
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod matcher_tests {
+    use super::*;
+
+    fn skill(name: &str, description: &str) -> Skill {
+        Skill {
+            name: name.to_string(),
+            description: description.to_string(),
+            location: std::path::PathBuf::from("/dev/null"),
+        }
+    }
+
+    #[test]
+    fn english_routing_is_unchanged_by_bigram_scoring() {
+        let skills = vec![
+            skill("weather", "Get weather forecasts for any location"),
+            skill("github", "GitHub operations, PRs, issues, code review"),
+        ];
+        assert_eq!(
+            match_skill(&skills, "what's the weather in Melbourne?").map(|s| s.name.as_str()),
+            Some("weather")
+        );
+        assert!(match_skill(&skills, "unrelated chatter").is_none());
+    }
+
+    #[test]
+    fn utterances_in_space_free_scripts_route() {
+        let skills = vec![
+            skill(
+                "bookings",
+                "Bookings and reservations — book a table, 訂枱, 訂位, 按金, 訂金, 取消訂枱",
+            ),
+            skill(
+                "knowledge",
+                "Business knowledge base — prices, menu, 價錢, 幾錢, 餐牌, 營業時間",
+            ),
+        ];
+
+        assert_eq!(
+            match_skill(&skills, "今晚七點半訂枱六位，收返按金").map(|s| s.name.as_str()),
+            Some("bookings")
+        );
+        assert_eq!(
+            match_skill(&skills, "鹽焗雞幾錢？睇下餐牌").map(|s| s.name.as_str()),
+            Some("knowledge")
+        );
+        assert!(
+            match_skill(&skills, "今日天氣好熱啊").is_none(),
+            "unrelated chatter must still fall through"
+        );
+        assert!(
+            match_skill(&skills, "訂咗未").is_none(),
+            "one incidental term is not enough to route on"
+        );
+    }
+
+    #[test]
+    fn bigrams_only_come_from_space_free_scripts() {
+        assert!(continua_bigrams("hello world").is_empty());
+        assert_eq!(continua_bigrams("訂枱"), vec!["訂枱".to_string()]);
+        assert_eq!(
+            continua_bigrams("訂枱 按金"),
+            vec!["訂枱".to_string(), "按金".to_string()],
+            "a space ends a run rather than joining across it"
+        );
     }
 }
 

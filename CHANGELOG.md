@@ -1,5 +1,53 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed — features that were documented but not running
+
+- **Trajectory capture recorded no tool calls.** rx4 owns the loop, so
+  `record_tool_step` had no callers: a saved trajectory held one final
+  response, `tool_calls: 0`, and zero ReAct steps. Steps are now recorded at
+  the bridge's tool chokepoint through a chat-scoped `ToolCallRecorder`.
+- **Loop detection was never switched on.** rx4 builds its guardrails from
+  `Agent::guardrails`, which defaults to `None`, and apollo never called
+  `set_guardrails`; apollo's own `ToolGuardrails` had no callers either.
+  `agent.guardrails` now drives both.
+- **The "summarization-based" compactor never summarized.** It built the
+  prompt, dropped it, and emitted a marker claiming a summary. Split into
+  `DefaultCompactor` (drops, and says so) and `LlmCompactor` (summarizes
+  through a provider, falling back to the marker on failure).
+- **Skill routing scored every Cantonese and Japanese message at zero.**
+  Keyword overlap is whitespace-tokenized and those scripts have no spaces,
+  so no skill was ever injected — with no error anywhere. `match_skill` now
+  also scores character bigrams of space-free scripts; two shared terms
+  match. Descriptions still have to carry the operator's vocabulary.
+- Failure counting is per tool rather than a scan of one shared history, so
+  an unrelated call between two failures no longer resets the count.
+- Chunked Telegram messages no longer begin with the blank line that
+  separated their block from the previous one.
+
+### Added
+
+- `agent.trajectory` — `enabled` (off by default), `dir`,
+  `save_on_completion`, `redact_content`. Recording every tool call and
+  observation, then writing it to disk, is now something an operator opts
+  into; `redact_content: false` keeps the text with credentials scrubbed,
+  which is what makes the export usable as training data.
+- `agent.guardrails` — thresholds shared by rx4's per-turn loop detection and
+  apollo's per-chat failure streaks, which survive a restart
+  (`agent/guardrail_store.rs`). Warn-only unless `hard_stop_enabled`. The
+  state file holds tool names, argument hashes and counts; chat ids are
+  hashed so one cannot name a path.
+- Telegram tests: sanitizer and chunker invariants
+  (`tests/telegram_formatting.rs`), and inbound voice, audio, sticker and
+  contentless messages in the conformance suite.
+
+### Known limitations
+
+- Skill descriptions, skill bodies and default prompts remain English-only;
+  only routing is script-aware.
+- `apollo channel-check` has still only been through Telegram and CLI.
+
 ## [0.6.0]
 
 ### Breaking

@@ -56,8 +56,12 @@ Goals:
 > `rotary_bridge::execute_tool_with_hooks`. Draft progress works because the
 > bridge is handed the turn's stream sink.
 >
-> Trajectory recording stays in apollo and is fed from `rx4::Event`
-> subscription.
+> Trajectory recording stays in apollo and is fed from the bridge's tool
+> chokepoint: the turn's `ToolHookContext` carries a chat-scoped
+> `ToolCallRecorder`, which `execute_tool_with_hooks` calls after every tool
+> call. It is not fed from `rx4::Event` — an earlier note here said it was,
+> and while that was written nothing fed it at all, so a saved trajectory
+> held one response, `tool_calls: 0`, and no steps.
 >
 > `tests/rx4_engine.rs` drives a real turn. Extend it before changing the
 > bridge.
@@ -259,9 +263,45 @@ and before this filter existed they were scored `0.0` and still returned as
 - Progress channel: receiver is kept alive (not dropped)
 - History: last 20 messages loaded from the active backend, ordered ASC
 - Context compaction: rx4 auto-compaction via `agent.auto_compact_after`
-- Trajectory recording: per-chat ReAct step capture for RL training
+- Trajectory recording: per-chat ReAct step capture for RL training, **off by
+  default** (`agent.trajectory.enabled`). Content is blanket-redacted unless
+  `agent.trajectory.redact_content` is set false, which keeps the text with
+  credentials scrubbed — the only setting that makes the export usable as
+  training data, and one an operator has to choose.
+- Guardrails: `agent.guardrails` drives both halves. rx4 gets the thresholds
+  for the turn it is running (its `ToolGuardrails` is rebuilt per `prompt()`,
+  so nothing leaks between turns); apollo keeps the per-chat failure streaks
+  in `agent/guardrail_store.rs`, which survive a restart. Warn-only by
+  default: `hard_stop_enabled` is what turns a streak into a block.
 - Lifecycle hooks: pre/post tool, session events from plugin system
 - Skill preprocessing: template vars + inline shell in SKILL.md
+
+### Compaction (agent/compaction.rs)
+
+Two implementations and the difference is not cosmetic. `DefaultCompactor`
+drops old turns and leaves a marker saying so. `LlmCompactor` summarizes them
+through a provider first, and falls back to the same marker when the
+summarizer fails — compaction must not fail a turn.
+
+Neither runs on apollo's own turn path; rx4 owns that. They are the extension
+point for an embedder. The default one was documented as "summarization-based
+using a fast model" while it built the prompt, dropped it, and emitted a
+marker claiming a summary that was never made — do not re-introduce that gap
+by describing behaviour the code does not have.
+
+### Skill routing and non-English operators
+
+`match_skill` scores whitespace-separated words **and** character bigrams of
+space-free scripts (Han, kana). Without the bigrams a Cantonese or Japanese
+message is a single token, every skill scores zero, and the turn runs with no
+playbook injected — silently, since "no skill matched" is a normal outcome.
+Two distinct shared terms clear the threshold, derived from `MATCH_THRESHOLD`
+rather than hand-tuned.
+
+A description is a routing table, so it must carry the operator's own
+vocabulary. A skill written for a market that does not work in English needs
+that market's words in its description or it will never route, however good
+its body is.
 
 ### Swarm (swarm.rs)
 - Spawns parallel Codex sub-agents via API
@@ -441,7 +481,7 @@ while `start()` still returned a healthy-looking receiver.
 | vibemania | Subspace coding agent |
 | dynamic | Dynamically loaded tools |
 | session | Session management |
-| guardrails | Loop detection, failure counting, idempotent/mutating classify |
+| guardrails | Loop detection, failure counting, idempotent/mutating classify (a module, not a model-callable tool) |
 | cron | Schedule recurring tasks |
 | mode_switch | Switch execution mode at runtime |
 | doctor | Diagnostics and health checks |

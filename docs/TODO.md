@@ -1,6 +1,6 @@
 # TODO
 
-Last updated: 2026-07-27
+Last updated: 2026-08-18
 
 ## Done
 
@@ -42,10 +42,18 @@ Last updated: 2026-07-27
   runs when the provider returns no native tool calls
 - [x] Wire the rx4 bridge into the execution path
 - [x] Refresh and persist expired Anthropic OAuth tokens
-- [ ] Add trajectory collection toggle in config.yaml
-- [ ] Add tests for Telegram markdown conversion and long-message chunking
-- [ ] Add tests for audio/sticker handling in Telegram
-- [ ] Make guardrails state persistable across restarts
+- [x] Add trajectory collection toggle in config (`agent.trajectory.*`) — and
+  make collection real: steps are recorded at the bridge's tool chokepoint,
+  where before nothing fed them
+- [x] Add tests for Telegram markdown conversion and long-message chunking
+  (`tests/telegram_formatting.rs`)
+- [x] Add tests for audio/sticker handling in Telegram
+  (`tests/channel_conformance.rs`)
+- [x] Make guardrails state persistable across restarts — and switch loop
+  detection on, which was never wired to rx4 at all
+- [ ] Route non-English operators end to end. `match_skill` now scores CJK
+  bigrams, but skill descriptions, skill bodies and the default system
+  prompts are English-only.
 
 ## Backlog
 
@@ -53,3 +61,6 @@ Last updated: 2026-07-27
 - [ ] Add `curator start|stop` CLI commands
 - [ ] Docker runtime adapter to replace Daytona
 - [ ] WASM-based plugin sandbox (long-term)
+- [ ] Voice notes are written to the shared temp directory with default
+  permissions before transcription. Trajectories already use `save_private`;
+  audio should too.
