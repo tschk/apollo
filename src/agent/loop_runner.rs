@@ -569,14 +569,17 @@ impl AgentRunner {
             .await;
 
         // Initialize per-chat trajectory
-        {
+        if self.agent_config.trajectory.enabled {
             let mut trajs = self.trajectories.write().await;
             if !trajs.contains_key(&msg.chat_id) {
-                let t = Trajectory::new(
+                let mut t = Trajectory::new(
                     format!("traj_{}", chrono::Utc::now().timestamp()),
                     msg.chat_id.clone(),
                     self.get_model(),
                 );
+                if !self.agent_config.trajectory.redact_content {
+                    t = t.keeping_content();
+                }
                 trajs.insert(msg.chat_id.clone(), t);
             }
         }
@@ -723,7 +726,7 @@ impl AgentRunner {
         // ── rx4 engine ──
         // Context assembly above stays apollo's; from here rx4 owns the loop.
         let text = self
-            .run_via_rotary(&messages, &tools_snapshot, &main_model)
+            .run_via_rotary(&messages, &tools_snapshot, &main_model, &msg.chat_id)
             .await?;
         self.finish_execution(msg, &text, &delivery).await
     }
@@ -742,6 +745,7 @@ impl AgentRunner {
         messages: &[ChatMessage],
         tools: &[Arc<dyn Tool>],
         model: &str,
+        chat_id: &str,
     ) -> anyhow::Result<String> {
         use crate::agent::rotary_bridge::{RotaryAgentBridge, RotaryBridgeConfig};
 
@@ -793,7 +797,8 @@ impl AgentRunner {
                     Some(Arc::clone(&self.plugin_registry)),
                 )
                 .with_hook_manager(Arc::clone(&self.hook_manager))
-                .with_stream(self.stream_sink()),
+                .with_stream(self.stream_sink())
+                .with_recorder(self.trajectory_recorder(chat_id)),
             },
             model_registry,
         );
@@ -847,12 +852,20 @@ impl AgentRunner {
         }
 
         // Mark trajectory as successful, record final response
-        {
-            let mut trajs = self.trajectories.write().await;
-            if let Some(t) = trajs.get_mut(&msg.chat_id) {
-                t.success = true;
-                t.record_response(text.to_string());
-                t.iterations = t.tool_calls; // Approximate iterations as tool calls
+        if self.agent_config.trajectory.enabled {
+            {
+                let mut trajs = self.trajectories.write().await;
+                if let Some(t) = trajs.get_mut(&msg.chat_id) {
+                    t.success = true;
+                    t.record_response(text.to_string());
+                    t.iterations = t.tool_calls; // Approximate iterations as tool calls
+                }
+            }
+            if self.agent_config.trajectory.save_on_completion {
+                let dir = self.trajectory_dir();
+                if let Err(e) = self.save_trajectory(&msg.chat_id, &dir).await {
+                    tracing::warn!("trajectory save failed: {e}");
+                }
             }
         }
 
@@ -1009,6 +1022,33 @@ impl AgentRunner {
 
     // ── Trajectory access ──
 
+    /// Directory completed trajectories are written to. A relative configured
+    /// path resolves against the workspace, so two workspaces do not share a
+    /// training-data directory by accident.
+    pub fn trajectory_dir(&self) -> PathBuf {
+        let configured = &self.agent_config.trajectory.dir;
+        if configured.is_absolute() {
+            configured.clone()
+        } else {
+            self.workspace.join(configured)
+        }
+    }
+
+    /// A recorder for `chat_id`, or `None` when collection is off.
+    fn trajectory_recorder(
+        &self,
+        chat_id: &str,
+    ) -> Option<Arc<dyn crate::agent::rotary_bridge::ToolCallRecorder>> {
+        if !self.agent_config.trajectory.enabled {
+            return None;
+        }
+        Some(Arc::new(ChatTrajectoryRecorder {
+            trajectories: Arc::clone(&self.trajectories),
+            chat_id: chat_id.to_string(),
+            max_observation_chars: self.agent_config.max_tool_result_chars,
+        }))
+    }
+
     /// Get trajectory for a chat (for export)
     pub async fn get_trajectory(&self, chat_id: &str) -> Option<Trajectory> {
         let trajs = self.trajectories.read().await;
@@ -1024,6 +1064,7 @@ impl AgentRunner {
     /// Save trajectory to disk
     pub async fn save_trajectory(&self, chat_id: &str, dir: &Path) -> anyhow::Result<()> {
         if let Some(traj) = self.get_trajectory(chat_id).await {
+            std::fs::create_dir_all(dir)?;
             let path = dir.join(trajectory_filename(chat_id));
             traj.save_to_file(&path)?;
             tracing::info!("Trajectory saved: {:?}", path);
@@ -1033,6 +1074,36 @@ impl AgentRunner {
 }
 
 // ── Helper ──
+
+/// Records every tool call of one chat into that chat's trajectory.
+///
+/// rx4 runs the loop, so the steps are collected at the bridge's tool
+/// chokepoint rather than by the code that used to drive the loop. Without
+/// this the trajectory held only the final response — `tool_calls` stayed at
+/// zero and the exported ReAct steps were empty, which is worthless as
+/// training data and looked identical to working.
+struct ChatTrajectoryRecorder {
+    trajectories: Arc<RwLock<HashMap<String, Trajectory>>>,
+    chat_id: String,
+    max_observation_chars: usize,
+}
+
+#[async_trait::async_trait]
+impl crate::agent::rotary_bridge::ToolCallRecorder for ChatTrajectoryRecorder {
+    async fn record(&self, name: &str, arguments: &str, result: &crate::tools::ToolResult) {
+        let observation = truncate_chars(&result.output, self.max_observation_chars);
+        let mut trajs = self.trajectories.write().await;
+        if let Some(t) = trajs.get_mut(&self.chat_id) {
+            t.record_tool_step(
+                None,
+                name.to_string(),
+                arguments.to_string(),
+                observation,
+                !result.is_error,
+            );
+        }
+    }
+}
 
 fn trajectory_filename(chat_id: &str) -> String {
     format!("traj_{:x}.json", Sha256::digest(chat_id.as_bytes()))
@@ -1084,6 +1155,74 @@ mod retry_tests {
         assert_eq!(truncate_chars(&output, 200).chars().count(), 200);
         assert_eq!(truncate_chars("hi", 200), "hi");
         assert_eq!(truncate_chars("héllo", 2), "hé");
+    }
+
+    #[tokio::test]
+    async fn the_recorder_puts_tool_steps_in_the_chats_trajectory() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use tokio::sync::RwLock;
+
+        use super::{ChatTrajectoryRecorder, Trajectory};
+        use crate::agent::rotary_bridge::ToolCallRecorder;
+        use crate::tools::ToolResult;
+
+        let trajectories = Arc::new(RwLock::new(HashMap::from([(
+            "chat-1".to_string(),
+            Trajectory::new("traj-1", "chat-1", "model"),
+        )])));
+        let recorder = ChatTrajectoryRecorder {
+            trajectories: Arc::clone(&trajectories),
+            chat_id: "chat-1".to_string(),
+            max_observation_chars: 4,
+        };
+
+        recorder
+            .record("shell", r#"{"command":"ls"}"#, &ToolResult::success("日本語です"))
+            .await;
+        recorder
+            .record("shell", r#"{"command":"nope"}"#, &ToolResult::error("boom"))
+            .await;
+        // A different chat's recorder must not write into this one.
+        ChatTrajectoryRecorder {
+            trajectories: Arc::clone(&trajectories),
+            chat_id: "chat-2".to_string(),
+            max_observation_chars: 100,
+        }
+        .record("shell", "{}", &ToolResult::success("elsewhere"))
+        .await;
+
+        let trajs = trajectories.read().await;
+        let traj = trajs.get("chat-1").expect("trajectory");
+        assert_eq!(traj.tool_calls, 2, "both calls recorded as ReAct steps");
+        assert_eq!(traj.steps[0].action.as_deref(), Some("shell"));
+        assert_eq!(
+            traj.steps[0].observation.as_deref(),
+            Some("[REDACTED]"),
+            "a trajectory redacts content unless the operator asked otherwise"
+        );
+        assert!(traj.steps[0].success);
+        assert!(!traj.steps[1].success, "an error step is recorded as failed");
+        assert!(!trajs.contains_key("chat-2"), "no trajectory is created on the fly");
+    }
+
+    #[test]
+    fn trajectory_collection_is_off_until_it_is_asked_for() {
+        let config = crate::config::AgentConfig::default();
+        assert!(
+            !config.trajectory.enabled,
+            "recording training data must be opted into"
+        );
+        assert!(config.trajectory.save_on_completion);
+        assert!(
+            config.trajectory.redact_content,
+            "content is kept only when explicitly asked for"
+        );
+        assert_eq!(
+            config.trajectory.dir,
+            std::path::PathBuf::from(".apollo/trajectories")
+        );
     }
 
     #[test]

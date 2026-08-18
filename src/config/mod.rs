@@ -69,6 +69,8 @@ pub struct AgentConfig {
     /// default); a non-zero value is forwarded to `Agent::auto_compact_after`,
     /// which rx4 interprets as an estimated-token cutoff before each prompt.
     pub auto_compact_after: usize,
+    /// ReAct trajectory capture for RL export.
+    pub trajectory: TrajectoryConfig,
 }
 
 impl Default for AgentConfig {
@@ -83,6 +85,41 @@ impl Default for AgentConfig {
             permissions: PermissionRulesConfig::default(),
             permission_profile: "auto".to_string(),
             auto_compact_after: 0,
+            trajectory: TrajectoryConfig::default(),
+        }
+    }
+}
+
+
+/// ReAct trajectory capture — off by default.
+///
+/// Recording is not free: every tool call and its (redacted) observation is
+/// kept in memory for the life of the chat, and a completed turn writes a
+/// JSON file per chat. Training-data collection is a deliberate act, so it
+/// is opted into rather than out of.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrajectoryConfig {
+    /// Record thought → action → observation steps for each turn.
+    pub enabled: bool,
+    /// Where completed trajectories are written. A relative path resolves
+    /// against the workspace.
+    pub dir: PathBuf,
+    /// Write the trajectory to `dir` when a turn finishes.
+    pub save_on_completion: bool,
+    /// Blanket-redact recorded content. `true` (the default) keeps only the
+    /// shape of a run; `false` keeps the text with credentials scrubbed,
+    /// which is what makes the export usable as training data.
+    pub redact_content: bool,
+}
+
+impl Default for TrajectoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: PathBuf::from(".apollo/trajectories"),
+            save_on_completion: true,
+            redact_content: true,
         }
     }
 }

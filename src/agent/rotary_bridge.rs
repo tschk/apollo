@@ -41,6 +41,19 @@ pub struct ToolHookContext {
     plugins: Option<Arc<tokio::sync::RwLock<PluginRegistry>>>,
     hook_manager: Option<Arc<HookManager>>,
     stream: Option<AgentStreamTx>,
+    recorder: Option<Arc<dyn ToolCallRecorder>>,
+}
+
+/// Observer for completed tool calls.
+///
+/// rx4 owns the loop, so apollo cannot see a tool call by watching its own
+/// code run. `execute_tool_with_hooks` is the one place every call passes
+/// through under either engine, so anything that needs the (name, arguments,
+/// result) triple — trajectory capture today — is handed in here rather than
+/// reconstructed from the event stream.
+#[async_trait::async_trait]
+pub trait ToolCallRecorder: Send + Sync {
+    async fn record(&self, name: &str, arguments: &str, result: &UnthinkclawToolResult);
 }
 
 impl ToolHookContext {
@@ -53,7 +66,15 @@ impl ToolHookContext {
             plugins,
             hook_manager: None,
             stream: None,
+            recorder: None,
         }
+    }
+
+    /// Attach a per-turn recorder. The recorder is chat-scoped, so it is set
+    /// on the context built for the turn, never on a shared one.
+    pub fn with_recorder(mut self, recorder: Option<Arc<dyn ToolCallRecorder>>) -> Self {
+        self.recorder = recorder;
+        self
     }
 
     /// Attach the lifecycle hook manager, so plugins observing tool calls see
@@ -155,6 +176,10 @@ pub async fn execute_tool_with_hooks(
     };
 
     ctx.notify_post_tool(name, arguments, &result).await;
+
+    if let Some(recorder) = &ctx.recorder {
+        recorder.record(name, arguments, &result).await;
+    }
 
     emit(
         &ctx.stream,

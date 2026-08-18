@@ -61,6 +61,23 @@ pub struct Trajectory {
     pub messages: Vec<TrajectoryMessage>,
     /// Arbitrary metadata
     pub metadata: HashMap<String, String>,
+    /// Whether recorded content is blanket-redacted.
+    ///
+    /// `true` (the default) keeps only the shape of a run — tool names, step
+    /// order, success flags — which is what a trajectory recorded without
+    /// anyone asking should contain. `false` keeps the text, with credentials
+    /// scrubbed by [`crate::redaction::redact_text`]; it is what an operator
+    /// who turned collection on for training data actually wants, and it is
+    /// reached only through explicit configuration.
+    ///
+    /// Not part of the saved document: a trajectory read back from disk is
+    /// already redacted or already not.
+    #[serde(skip, default = "redact_content_by_default")]
+    pub redact_content: bool,
+}
+
+fn redact_content_by_default() -> bool {
+    true
 }
 
 /// A single message in the conversation for training data.
@@ -95,12 +112,24 @@ impl Trajectory {
             steps: Vec::new(),
             messages: Vec::new(),
             metadata: HashMap::new(),
+            redact_content: true,
         }
+    }
+
+    /// Keep step and message content (credentials still scrubbed) instead of
+    /// blanket-redacting it.
+    pub fn keeping_content(mut self) -> Self {
+        self.redact_content = false;
+        self
     }
 
     /// Add a ReAct step to the trajectory.
     pub fn add_step(&mut self, mut step: TrajectoryStep) {
-        redact_step(&mut step);
+        if self.redact_content {
+            redact_step(&mut step);
+        } else {
+            scrub_step(&mut step);
+        }
         if step.action.is_some() {
             self.tool_calls += 1;
         }
@@ -150,7 +179,11 @@ impl Trajectory {
     ) {
         self.messages.push(TrajectoryMessage {
             role: role.to_string(),
-            content: redacted(content),
+            content: if self.redact_content {
+                redacted(content)
+            } else {
+                crate::redaction::redact_text(content)
+            },
             tool_call_id: tool_call_id.map(|s| s.to_string()),
             tool_name: tool_name.map(|s| s.to_string()),
         });
@@ -159,16 +192,27 @@ impl Trajectory {
     /// Serialize to pretty JSON.
     pub fn to_json(&self) -> anyhow::Result<String> {
         let mut trajectory = self.clone();
-        trajectory
-            .metadata
-            .values_mut()
-            .for_each(|value| *value = "[REDACTED]".to_string());
-        trajectory.steps.iter_mut().for_each(redact_step);
-        trajectory.messages.iter_mut().for_each(|message| {
-            if !message.content.is_empty() {
-                message.content = "[REDACTED]".to_string();
-            }
-        });
+        if self.redact_content {
+            trajectory
+                .metadata
+                .values_mut()
+                .for_each(|value| *value = "[REDACTED]".to_string());
+            trajectory.steps.iter_mut().for_each(redact_step);
+            trajectory.messages.iter_mut().for_each(|message| {
+                if !message.content.is_empty() {
+                    message.content = "[REDACTED]".to_string();
+                }
+            });
+        } else {
+            trajectory
+                .metadata
+                .values_mut()
+                .for_each(|value| *value = crate::redaction::redact_text(value));
+            trajectory.steps.iter_mut().for_each(scrub_step);
+            trajectory.messages.iter_mut().for_each(|message| {
+                message.content = crate::redaction::redact_text(&message.content);
+            });
+        }
         Ok(serde_json::to_string_pretty(&trajectory)?)
     }
 
@@ -293,6 +337,20 @@ fn redact_step(step: &mut TrajectoryStep) {
     ] {
         if value.as_deref().is_some_and(|value| !value.is_empty()) {
             *value = Some("[REDACTED]".to_string());
+        }
+    }
+}
+
+/// Scrub credentials out of a step, keeping the text around them.
+fn scrub_step(step: &mut TrajectoryStep) {
+    for value in [
+        &mut step.thought,
+        &mut step.action_args,
+        &mut step.observation,
+        &mut step.response,
+    ] {
+        if let Some(text) = value.as_deref() {
+            *value = Some(crate::redaction::redact_text(text));
         }
     }
 }
@@ -514,5 +572,47 @@ mod tests {
             std::fs::read_to_string(destination).expect("destination should remain readable"),
             "existing"
         );
+    }
+
+    #[test]
+    fn keeping_content_survives_the_round_trip_but_credentials_do_not() {
+        let mut t = Trajectory::new("id", "chat", "model").keeping_content();
+        t.record_tool_step(
+            None,
+            "shell".to_string(),
+            r#"{"command":"deploy --token sk-ant-abcdefghijklmnopqrstuvwx"}"#.to_string(),
+            "deployed 日本語".to_string(),
+            true,
+        );
+
+        let step = &t.steps[0];
+        assert_eq!(step.observation.as_deref(), Some("deployed 日本語"));
+        let args = step.action_args.as_deref().unwrap();
+        assert!(!args.contains("sk-ant-abcdefghijklmnopqrstuvwx"), "{args}");
+        assert!(args.contains("deploy"), "{args}");
+
+        let json = t.to_json().unwrap();
+        assert!(json.contains("deployed"), "saving must not re-redact: {json}");
+        assert!(!json.contains("sk-ant-abcdefghijklmnopqrstuvwx"));
+        assert!(
+            !json.contains("redact_content"),
+            "the flag is not part of the document"
+        );
+    }
+
+    #[test]
+    fn a_default_trajectory_still_redacts_everything_it_records() {
+        let mut t = Trajectory::new("id", "chat", "model");
+        t.record_tool_step(
+            None,
+            "shell".to_string(),
+            r#"{"command":"ls"}"#.to_string(),
+            "a.txt".to_string(),
+            true,
+        );
+        assert_eq!(t.steps[0].observation.as_deref(), Some("[REDACTED]"));
+        assert_eq!(t.steps[0].action.as_deref(), Some("shell"));
+        let json = t.to_json().unwrap();
+        assert!(!json.contains("a.txt"), "{json}");
     }
 }
