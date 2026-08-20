@@ -166,7 +166,10 @@ mod tests {
     #[test]
     fn test_should_respond_direct_mention() {
         // Contains "@apollo" -> true
-        assert!(should_respond(&create_msg(true, "hey @apollo, how are you?")));
+        assert!(should_respond(&create_msg(
+            true,
+            "hey @apollo, how are you?"
+        )));
         assert!(should_respond(&create_msg(true, "@apollo")));
     }
 
@@ -176,7 +179,10 @@ mod tests {
         assert!(should_respond(&create_msg(true, "what is a plugin?")));
         assert!(should_respond(&create_msg(true, "how do i configure this")));
         assert!(should_respond(&create_msg(true, "what does this do")));
-        assert!(should_respond(&create_msg(true, "is there a plugin layer?")));
+        assert!(should_respond(&create_msg(
+            true,
+            "is there a plugin layer?"
+        )));
 
         // Assistant patterns
         assert!(should_respond(&create_msg(true, "can you help me?")));
@@ -189,6 +195,9 @@ mod tests {
         assert!(!should_respond(&create_msg(true, "hello world")));
         assert!(!should_respond(&create_msg(true, "just testing the chat")));
         assert!(!should_respond(&create_msg(true, "what's for lunch?")));
-        assert!(!should_respond(&create_msg(true, "I think we should do that later.")));
+        assert!(!should_respond(&create_msg(
+            true,
+            "I think we should do that later."
+        )));
     }
 }
