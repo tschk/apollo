@@ -69,6 +69,9 @@ pub struct AgentConfig {
     /// default); a non-zero value is forwarded to `Agent::auto_compact_after`,
     /// which rx4 interprets as an estimated-token cutoff before each prompt.
     pub auto_compact_after: usize,
+    /// Record ReAct trajectories per chat for RL export. Defaults to `true`,
+    /// which is the historical behaviour; set to `false` to stop collecting.
+    pub trajectory_enabled: bool,
 }
 
 impl Default for AgentConfig {
@@ -83,6 +86,7 @@ impl Default for AgentConfig {
             permissions: PermissionRulesConfig::default(),
             permission_profile: "auto".to_string(),
             auto_compact_after: 0,
+            trajectory_enabled: true,
         }
     }
 }
@@ -695,6 +699,25 @@ mod config_path_tests {
         assert_eq!(value["provider"]["api_key"], "********");
         assert_eq!(value["channel"]["token"], "********");
         assert_eq!(value["provider"]["name"], "chatgpt");
+    }
+
+    #[test]
+    fn trajectory_collection_defaults_on_for_existing_configs() {
+        let cfg: Config = serde_json::from_str(r#"{"model":"m"}"#).unwrap();
+        assert!(cfg.agent.trajectory_enabled);
+    }
+
+    #[test]
+    fn trajectory_collection_can_be_turned_off() {
+        let cfg: Config =
+            serde_json::from_str(r#"{"agent":{"trajectory_enabled":false}}"#).unwrap();
+        assert!(!cfg.agent.trajectory_enabled);
+
+        let (updated, written) = Config::default()
+            .set_path("agent.trajectory_enabled", "false")
+            .unwrap();
+        assert_eq!(written, serde_json::json!(false));
+        assert!(!updated.agent.trajectory_enabled);
     }
 
     #[test]
