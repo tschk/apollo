@@ -42,8 +42,9 @@ Last updated: 2026-07-27
   runs when the provider returns no native tool calls
 - [x] Wire the rx4 bridge into the execution path
 - [x] Refresh and persist expired Anthropic OAuth tokens
-- [ ] Add trajectory collection toggle in config.yaml
-- [ ] Add tests for Telegram markdown conversion and long-message chunking
+- [x] Add trajectory collection toggle — `agent.trajectory_enabled` in the
+  JSON config (the repo has no `config.yaml`; `Config::load` reads JSON)
+- [x] Add tests for Telegram markdown conversion and long-message chunking
 - [ ] Add tests for audio/sticker handling in Telegram
 - [ ] Make guardrails state persistable across restarts
 

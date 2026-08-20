@@ -569,7 +569,7 @@ impl AgentRunner {
             .await;
 
         // Initialize per-chat trajectory
-        {
+        if self.agent_config.trajectory_enabled {
             let mut trajs = self.trajectories.write().await;
             if !trajs.contains_key(&msg.chat_id) {
                 let t = Trajectory::new(
