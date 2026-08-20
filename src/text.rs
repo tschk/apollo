@@ -38,6 +38,17 @@ mod tests {
     #[test]
     fn test_truncate_chars_counted() {
         assert_eq!(truncate_chars_counted("hello", 5), None);
+        assert_eq!(truncate_chars_counted("hello", 6), None);
+        assert_eq!(
+            truncate_chars_counted("hello", 4),
+            Some(("hell".to_string(), 1))
+        );
+        assert_eq!(
+            truncate_chars_counted("hello", 0),
+            Some(("".to_string(), 5))
+        );
+        assert_eq!(truncate_chars_counted("", 0), None);
+        assert_eq!(truncate_chars_counted("", 5), None);
         assert_eq!(truncate_chars_counted("你好世界", 4), None);
         assert_eq!(
             truncate_chars_counted("你好世界", 2),
