@@ -380,30 +380,26 @@ mod tests {
 
     #[test]
     fn render_findings_formats_findings_correctly() {
-        let findings_without = vec![
-            Finding {
-                code: "CODE_01",
-                severity: Severity::Warn,
-                title: "Warning Title",
-                detail: "Some warning detail".into(),
-                remediation: None,
-            },
-        ];
+        let findings_without = vec![Finding {
+            code: "CODE_01",
+            severity: Severity::Warn,
+            title: "Warning Title",
+            detail: "Some warning detail".into(),
+            remediation: None,
+        }];
 
         let rendered_without = render_findings(&findings_without);
         assert!(rendered_without.contains("[WARN] Warning Title (CODE_01)"));
         assert!(rendered_without.contains("Some warning detail"));
         assert!(!rendered_without.contains("Remediation:"));
 
-        let findings_with = vec![
-            Finding {
-                code: "CODE_02",
-                severity: Severity::Critical,
-                title: "Critical Title",
-                detail: "Some critical detail".into(),
-                remediation: Some("Do this to fix".into()),
-            },
-        ];
+        let findings_with = vec![Finding {
+            code: "CODE_02",
+            severity: Severity::Critical,
+            title: "Critical Title",
+            detail: "Some critical detail".into(),
+            remediation: Some("Do this to fix".into()),
+        }];
 
         let rendered_with = render_findings(&findings_with);
         assert!(rendered_with.contains("[CRITICAL] Critical Title (CODE_02)"));
