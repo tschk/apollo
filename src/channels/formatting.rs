@@ -382,6 +382,128 @@ mod tests {
     }
 
     #[test]
+    fn telegram_headers_become_bold_lines() {
+        let output = format_outgoing_text(FormatTarget::Telegram, "# Title\n### Sub\nbody");
+        assert_eq!(output, "*Title*\n*Sub*\nbody");
+    }
+
+    #[test]
+    fn telegram_empty_header_is_dropped() {
+        let output = format_outgoing_text(FormatTarget::Telegram, "#\nbody");
+        assert_eq!(output, "body");
+    }
+
+    #[test]
+    fn telegram_untagged_code_fence_gets_a_language() {
+        let output = format_outgoing_text(FormatTarget::Telegram, "```\nlet x = 1;\n```");
+        assert_eq!(output, "```text\nlet x = 1;\n```");
+    }
+
+    #[test]
+    fn telegram_leaves_code_block_contents_untouched() {
+        let input = "```rust\n# not a header\n| not | a table |\n```";
+        let output = format_outgoing_text(FormatTarget::Telegram, input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn telegram_table_separator_row_is_dropped() {
+        let input = "| A | B |\n|:---|---:|\n| 1 | 2 |";
+        let output = format_outgoing_text(FormatTarget::Telegram, input);
+        assert_eq!(output, "• A | B\n• 1 | 2");
+    }
+
+    #[test]
+    fn telegram_preserves_inline_emphasis() {
+        let input = "*bold* and _italic_ and `code`";
+        assert_eq!(format_outgoing_text(FormatTarget::Telegram, input), input);
+    }
+
+    #[test]
+    fn plain_and_discord_are_passthrough() {
+        let input = "# Header\n| A | B |";
+        assert_eq!(format_outgoing_text(FormatTarget::Plain, input), input);
+        assert_eq!(format_outgoing_text(FormatTarget::Discord, input), input);
+    }
+
+    #[test]
+    fn short_text_is_a_single_chunk() {
+        let chunks = chunk_outgoing_text(FormatTarget::Telegram, "hello", 4096);
+        assert_eq!(chunks, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn non_telegram_targets_are_not_chunked() {
+        let long = "x".repeat(9000);
+        let chunks = chunk_outgoing_text(FormatTarget::Discord, &long, 4096);
+        assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn telegram_chunker_splits_on_paragraphs() {
+        let para = "a".repeat(60);
+        let input = format!("{para}\n\n{para}\n\n{para}");
+        let chunks = chunk_outgoing_text(FormatTarget::Telegram, &input, 130);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|c| c.len() <= 130));
+        assert!(chunks.iter().all(|c| !c.starts_with('\n')));
+        let rejoined: String = chunks.join("");
+        assert_eq!(rejoined.replace('\n', ""), input.replace('\n', ""));
+    }
+
+    #[test]
+    fn telegram_chunker_splits_an_oversized_paragraph_on_sentences() {
+        let sentence = format!("{}. ", "b".repeat(50));
+        let input = sentence.repeat(4);
+        let chunks = chunk_outgoing_text(FormatTarget::Telegram, &input, 120);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|c| c.len() <= 120));
+        assert!(chunks.iter().all(|c| c.contains('b')));
+    }
+
+    #[test]
+    fn telegram_chunker_hard_splits_an_unbreakable_run() {
+        let input = "z".repeat(500);
+        let chunks = chunk_outgoing_text(FormatTarget::Telegram, &input, 100);
+        assert_eq!(chunks.len(), 5);
+        assert!(chunks.iter().all(|c| c.len() == 100));
+        assert_eq!(chunks.concat(), input);
+    }
+
+    #[test]
+    fn telegram_chunker_never_splits_a_multibyte_char() {
+        let input = "é".repeat(400);
+        let chunks = chunk_outgoing_text(FormatTarget::Telegram, &input, 101);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 101);
+            assert!(chunk.chars().all(|c| c == 'é'));
+        }
+        assert_eq!(chunks.concat(), input);
+    }
+
+    #[test]
+    fn telegram_chunker_respects_the_4096_limit() {
+        let para = format!("{}\n\n", "word ".repeat(200));
+        let input = para.repeat(20);
+        let chunks = chunk_outgoing_text(FormatTarget::Telegram, &input, 4096);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|c| c.len() <= 4096));
+    }
+
+    #[test]
+    fn telegram_chunker_keeps_prose_and_code_in_separate_chunks() {
+        let prose = "p".repeat(80);
+        let input = format!("{prose}\n\n```rust\nfn a() {{}}\n```\n\n{prose}");
+        let chunks = chunk_outgoing_text(FormatTarget::Telegram, &input, 100);
+        assert!(chunks.iter().any(|c| c.starts_with("```rust")));
+        for chunk in &chunks {
+            let fences = chunk.matches("```").count();
+            assert!(fences == 0 || fences == 2, "unbalanced fences in {chunk:?}");
+        }
+    }
+
+    #[test]
     fn telegram_chunker_rewraps_code_blocks() {
         let input =
             "```rust\nfn main() {\n    println!(\"hello\");\n    println!(\"world\");\n}\n```";

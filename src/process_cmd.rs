@@ -20,19 +20,22 @@ pub async fn run_argv_command(command: &str, timeout_secs: u64) -> anyhow::Resul
     let program = &parts[0];
     let args = &parts[1..];
 
-    let child = Command::new(program)
+    let mut child = Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
 
-    let output =
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-            .await
-        {
-            Ok(result) => result?,
-            Err(_) => anyhow::bail!("command timed out after {}s", timeout_secs),
-        };
+    let output = match crate::tools::child_proc::wait_with_timeout(
+        &mut child,
+        Duration::from_secs(timeout_secs),
+    )
+    .await?
+    {
+        Some(output) => output,
+        None => anyhow::bail!("command timed out after {}s", timeout_secs),
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -63,6 +66,32 @@ mod tests {
         let (out, ok) = run_argv_command("echo one;two", 5).await.unwrap();
         assert!(ok);
         assert!(out.contains("one;two") || out.contains("one"));
+    }
+
+    #[tokio::test]
+    async fn empty_command_is_rejected() {
+        for command in ["", "   ", "\t\n"] {
+            let err = run_argv_command(command, 5).await.unwrap_err();
+            assert!(
+                err.to_string().contains("empty command"),
+                "{command:?} -> {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_quoting_is_rejected() {
+        let err = run_argv_command("echo 'unterminated", 5).await.unwrap_err();
+        assert!(
+            err.to_string().contains("invalid command quoting"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_is_reported_as_failure() {
+        let (out, ok) = run_argv_command("false", 5).await.unwrap();
+        assert!(!ok, "got output: {out}");
     }
 
     #[tokio::test]

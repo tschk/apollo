@@ -115,6 +115,7 @@ impl Tool for HostPluginToolAdapter {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
                 anyhow::anyhow!("host plugin tool '{}' failed to start: {e}", self.name)
@@ -125,16 +126,17 @@ impl Tool for HostPluginToolAdapter {
             let _ = stdin.shutdown().await;
         }
 
-        let output = match tokio::time::timeout(EXEC_TIMEOUT, child.wait_with_output()).await {
-            Ok(out) => out?,
-            Err(_) => {
-                return Ok(ToolResult::error(format!(
-                    "host plugin tool '{}' exceeded {}s and was abandoned",
-                    self.name,
-                    EXEC_TIMEOUT.as_secs()
-                )))
-            }
-        };
+        let output =
+            match crate::tools::child_proc::wait_with_timeout(&mut child, EXEC_TIMEOUT).await? {
+                Some(out) => out,
+                None => {
+                    return Ok(ToolResult::error(format!(
+                        "host plugin tool '{}' exceeded {}s and was killed",
+                        self.name,
+                        EXEC_TIMEOUT.as_secs()
+                    )))
+                }
+            };
 
         let mut text = String::from_utf8_lossy(&output.stdout).to_string();
         if text.is_empty() {

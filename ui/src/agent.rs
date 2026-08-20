@@ -477,6 +477,33 @@ mod tests {
     /// `APOLLO_HTTP_PORT` is process-wide, so the turn tests take turns.
     static PORT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn serve_fetch_state(response_bytes: &[u8]) -> Option<AgentState> {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let response_vec = response_bytes.to_vec();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(&response_vec);
+                let _ = stream.flush();
+            }
+        });
+
+        let guard = PORT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("APOLLO_HTTP_PORT", port.to_string());
+        let result = fetch_state();
+        std::env::remove_var("APOLLO_HTTP_PORT");
+        drop(guard);
+        server.join().unwrap();
+
+        result
+    }
+
     /// Run one turn against a throwaway WS server that drops the connection
     /// after `frames` have been sent, and collect what the UI was told.
     fn turn_against_dropping_server(frames: &'static [&'static str]) -> Vec<AgentEvent> {
@@ -566,5 +593,71 @@ mod tests {
             parse_event(r#"{"type":"tool_end","name":"edit"}"#),
             Some(AgentEvent::ToolEnd { ok: true, secs: 0, name }) if name == "edit"
         ));
+    }
+
+    #[test]
+    fn fetch_state_success() {
+        let response = "HTTP/1.1 200 OK\r\n\
+                        Content-Type: application/json\r\n\
+                        Connection: close\r\n\
+                        \r\n\
+                        {\
+                          \"model\": \"gpt-4o\",\
+                          \"engine\": \"legacy\",\
+                          \"mode\": \"chat\",\
+                          \"cost_usd\": 0.15,\
+                          \"total_tokens\": 1000,\
+                          \"call_count\": 5,\
+                          \"context_tokens\": 500,\
+                          \"context_window\": 8000,\
+                          \"context_pct\": 6,\
+                          \"provider\": \"openai\",\
+                          \"message_count\": 10\
+                        }";
+
+        let state = serve_fetch_state(response.as_bytes()).expect("Expected Some(AgentState)");
+        assert_eq!(state.model, "gpt-4o");
+        assert_eq!(state.engine, "legacy");
+        assert_eq!(state.cost_usd, 0.15);
+        assert_eq!(state.total_tokens, 1000);
+        assert_eq!(state.call_count, 5);
+        assert_eq!(state.context_pct, 6);
+    }
+
+    #[test]
+    fn fetch_state_http_error() {
+        let response = "HTTP/1.1 500 Internal Server Error\r\n\
+                        Connection: close\r\n\
+                        \r\n\
+                        Server Error";
+        let state = serve_fetch_state(response.as_bytes());
+        assert!(state.is_none(), "Expected None on HTTP error");
+    }
+
+    #[test]
+    fn fetch_state_invalid_json() {
+        let response = "HTTP/1.1 200 OK\r\n\
+                        Content-Type: application/json\r\n\
+                        Connection: close\r\n\
+                        \r\n\
+                        { \"model\": \"gpt-4o\", oops }";
+        let state = serve_fetch_state(response.as_bytes());
+        assert!(state.is_none(), "Expected None on invalid JSON");
+    }
+
+    #[test]
+    fn fetch_state_unreachable() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // Ensure the port is closed
+
+        let guard = PORT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("APOLLO_HTTP_PORT", port.to_string());
+        let result = fetch_state();
+        std::env::remove_var("APOLLO_HTTP_PORT");
+        drop(guard);
+
+        assert!(result.is_none(), "Expected None when unreachable");
     }
 }
