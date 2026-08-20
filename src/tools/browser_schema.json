@@ -1,0 +1,81 @@
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "open",
+        "snapshot",
+        "click",
+        "fill",
+        "type",
+        "get_text",
+        "get_title",
+        "get_url",
+        "screenshot",
+        "wait",
+        "press",
+        "hover",
+        "scroll",
+        "is_visible",
+        "close"
+      ],
+      "description": "Browser action to perform"
+    },
+    "url": {
+      "type": "string",
+      "description": "URL (for open action)"
+    },
+    "selector": {
+      "type": "string",
+      "description": "CSS selector or element ref (for click, fill, type, get_text, hover, is_visible)"
+    },
+    "value": {
+      "type": "string",
+      "description": "Value to fill (for fill action)"
+    },
+    "text": {
+      "type": "string",
+      "description": "Text to type (for type action)"
+    },
+    "key": {
+      "type": "string",
+      "description": "Key to press (for press action)"
+    },
+    "direction": {
+      "type": "string",
+      "description": "Scroll direction: up, down, left, right (for scroll action)"
+    },
+    "pixels": {
+      "type": "integer",
+      "description": "Pixels to scroll (for scroll action)"
+    },
+    "interactive_only": {
+      "type": "boolean",
+      "description": "Only show interactive elements in snapshot"
+    },
+    "compact": {
+      "type": "boolean",
+      "description": "Compact snapshot output"
+    },
+    "depth": {
+      "type": "integer",
+      "description": "Max depth for snapshot tree"
+    },
+    "path": {
+      "type": "string",
+      "description": "File path for screenshot"
+    },
+    "full_page": {
+      "type": "boolean",
+      "description": "Capture full page screenshot"
+    },
+    "ms": {
+      "type": "integer",
+      "description": "Milliseconds to wait (for wait action)"
+    }
+  },
+  "required": [
+    "action"
+  ]
+}
