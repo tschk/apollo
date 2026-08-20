@@ -61,6 +61,7 @@ pub trait SwarmStorage: Send + Sync {
     // === Team Tasks ===
     async fn create_team_task(&self, task: &TeamTask) -> Result<()>;
     async fn get_team_task(&self, task_id: &str) -> Result<Option<TeamTask>>;
+    async fn get_team_tasks_by_ids(&self, task_ids: &[String]) -> Result<Vec<TeamTask>>;
     async fn list_team_tasks(&self, team_id: &str, status: Option<&str>) -> Result<Vec<TeamTask>>;
     async fn claim_team_task(&self, task_id: &str, agent_id: &str) -> Result<bool>;
     async fn complete_team_task(&self, task_id: &str, result: &str) -> Result<()>;
@@ -550,6 +551,18 @@ impl SwarmStorage for SurrealBackend {
             .await?;
         let tasks: Vec<TeamTask> = result.take(0)?;
         Ok(tasks.into_iter().next())
+    }
+
+    async fn get_team_tasks_by_ids(&self, task_ids: &[String]) -> Result<Vec<TeamTask>> {
+        if task_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut result = self
+            .db
+            .query("SELECT * FROM team_tasks WHERE task_id IN $ids")
+            .bind(("ids", task_ids.to_vec()))
+            .await?;
+        Ok(result.take(0)?)
     }
 
     async fn list_team_tasks(&self, team_id: &str, status: Option<&str>) -> Result<Vec<TeamTask>> {
