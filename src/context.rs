@@ -118,3 +118,41 @@ pub fn group_memory_prompt(chat_id: &str, summary: &str) -> String {
         summary.trim()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_assistant_topic() {
+        // Empty strings and whitespace
+        assert!(!is_assistant_topic(""));
+        assert!(!is_assistant_topic("   "));
+        assert!(!is_assistant_topic("\n\t"));
+
+        // General non-matching chatter
+        assert!(!is_assistant_topic("hello world"));
+        assert!(!is_assistant_topic("did anyone see the game last night?"));
+        assert!(!is_assistant_topic("just pushing some code"));
+
+        // Group keywords
+        assert!(is_assistant_topic("what is apollo?"));
+        assert!(is_assistant_topic("i need to write a plugin"));
+        assert!(is_assistant_topic("where are the settings"));
+        assert!(is_assistant_topic("how do i do this")); // "how do i"
+        assert!(is_assistant_topic("help me out")); // "help"
+
+        // General assistant patterns
+        assert!(is_assistant_topic("what can you do"));
+        assert!(is_assistant_topic("could you help me with this"));
+
+        // Case insensitivity
+        assert!(is_assistant_topic("APOLLO"));
+        assert!(is_assistant_topic("Plugin"));
+        assert!(is_assistant_topic("What Is This"));
+
+        // Leading/trailing whitespace
+        assert!(is_assistant_topic("   apollo   "));
+        assert!(is_assistant_topic("\nhelp\n"));
+    }
+}
