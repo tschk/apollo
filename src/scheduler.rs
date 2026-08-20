@@ -150,7 +150,29 @@ mod tests {
     async fn test_invalid_cron() {
         let scheduler = Scheduler::new();
 
+        // Standard invalid strings
         let result = scheduler.schedule("invalid", "test", 5).await;
+        assert!(result.is_err());
+
+        // Empty string
+        let result = scheduler.schedule("", "test", 5).await;
+        assert!(result.is_err());
+
+        // Too few fields
+        let result = scheduler.schedule("* * * *", "test", 5).await;
+        assert!(result.is_err());
+
+        // Too many fields
+        let result = scheduler.schedule("* * * * * * * * *", "test", 5).await;
+        assert!(result.is_err());
+
+        // Out of range value
+        let result = scheduler.schedule("60 * * * * * *", "test", 5).await;
+        assert!(result.is_err());
+
+        // Exceptionally long string
+        let long_string = "a".repeat(10_000);
+        let result = scheduler.schedule(&long_string, "test", 5).await;
         assert!(result.is_err());
     }
 
