@@ -334,6 +334,91 @@ async fn telegram_conformance() {
     channel.stop().await.unwrap();
 }
 
+/// A reply longer than Telegram's 4096-char limit must go out as several
+/// `sendMessage` calls, each within the limit — not as one rejected request.
+#[cfg(feature = "channel-telegram")]
+#[tokio::test]
+async fn telegram_long_message_is_chunked() {
+    use apollo::channels::telegram::TelegramChannel;
+
+    let mock = Mock::start(Arc::new(|_path: &str| {
+        json(r#"{"ok":true,"result":{"message_id":7}}"#)
+    }))
+    .await;
+
+    let channel = TelegramChannel::new("tok".to_string(), 42).with_api_base(&mock.base);
+
+    let paragraph = format!("{}\n\n", "word ".repeat(400));
+    let text = paragraph.repeat(6);
+    assert!(text.len() > 4096 * 2);
+    channel.send_message(&text).await.unwrap();
+
+    let sends: Vec<Hit> = mock
+        .hits()
+        .into_iter()
+        .filter(|h| h.path.ends_with("/sendMessage"))
+        .collect();
+
+    assert!(
+        sends.len() > 2,
+        "a {}-char message produced {} sendMessage calls",
+        text.len(),
+        sends.len()
+    );
+
+    let mut total = 0usize;
+    for hit in &sends {
+        let body: serde_json::Value = serde_json::from_str(&hit.body).unwrap();
+        let chunk = body["text"].as_str().expect("no text field");
+        assert!(
+            chunk.chars().count() <= 4096,
+            "chunk exceeds the telegram limit: {} chars",
+            chunk.chars().count()
+        );
+        assert_eq!(body["parse_mode"], "Markdown");
+        assert_eq!(body["chat_id"], 42);
+        total += chunk.matches("word").count();
+    }
+    assert_eq!(total, 2400, "chunking dropped or duplicated content");
+}
+
+/// Telegram rejects malformed Markdown with `ok:false`. The channel must
+/// retry the same chunk as plain text rather than dropping the reply.
+#[cfg(feature = "channel-telegram")]
+#[tokio::test]
+async fn telegram_retries_without_parse_mode_when_markdown_fails() {
+    use apollo::channels::telegram::TelegramChannel;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
+    let mock = Mock::start(Arc::new(move |_path: &str| {
+        if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            json(r#"{"ok":false,"description":"can't parse entities"}"#)
+        } else {
+            json(r#"{"ok":true,"result":{"message_id":11}}"#)
+        }
+    }))
+    .await;
+
+    let channel = TelegramChannel::new("tok".to_string(), 42).with_api_base(&mock.base);
+    let id = channel.send_message("*unbalanced").await.unwrap();
+    assert_eq!(id, 11, "retry did not return the delivered message id");
+
+    let sends: Vec<Hit> = mock
+        .hits()
+        .into_iter()
+        .filter(|h| h.path.ends_with("/sendMessage"))
+        .collect();
+    assert_eq!(sends.len(), 2, "no plain-text retry was attempted");
+    assert!(sends[0].body.contains("parse_mode"));
+    assert!(
+        !sends[1].body.contains("parse_mode"),
+        "retry still sent parse_mode: {:?}",
+        sends[1].body
+    );
+}
+
 // ───────────────────────── cli ─────────────────────────
 
 #[cfg(feature = "channel-cli")]

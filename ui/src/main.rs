@@ -69,6 +69,97 @@ enum Entry {
     Error(String),
 }
 
+impl Entry {
+    fn view(&self, cursor: &'static str) -> impl IntoElement {
+        match self {
+            Entry::User(text) => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_xs().text_color(rgb(TEXT_GHOST)).child("you"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(USER))
+                        .child(SharedString::from(text.clone())),
+                ),
+
+            Entry::Agent { text, streaming } => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_xs().text_color(rgb(ACCENT)).child("apollo"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(SharedString::from(if *streaming {
+                            format!("{text}{cursor}")
+                        } else {
+                            text.clone()
+                        })),
+                ),
+
+            Entry::Tool {
+                name,
+                hint,
+                outcome,
+            } => {
+                let (mark, color) = match outcome {
+                    None => ("…".to_string(), TEXT_FAINT),
+                    Some((true, secs)) => (format!("✓ {secs}s"), OK),
+                    Some((false, secs)) => (format!("✗ {secs}s"), ERR),
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_FAINT))
+                                    .child(SharedString::from(format!("| {name}"))),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(color))
+                                    .child(SharedString::from(mark)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_GHOST))
+                            .child(SharedString::from(format!("  {hint}"))),
+                    )
+            }
+
+            Entry::Status(text) => div()
+                .text_xs()
+                .text_color(rgb(TEXT_GHOST))
+                .child(SharedString::from(text.clone())),
+
+            Entry::Error(text) => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_xs().text_color(rgb(ERR)).child("error"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(ERR))
+                        .child(SharedString::from(text.clone())),
+                ),
+        }
+    }
+}
+
 struct ApolloView {
     /// GPUI only routes key events to the focused element, so the root div
     /// tracks this handle and the window focuses it on open.
@@ -410,95 +501,7 @@ impl ApolloView {
             .flex()
             .flex_col()
             .gap_4()
-            .children(self.entries.iter().map(|entry| {
-                match entry {
-                    Entry::User(text) => div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(div().text_xs().text_color(rgb(TEXT_GHOST)).child("you"))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(USER))
-                                .child(SharedString::from(text.clone())),
-                        ),
-
-                    Entry::Agent { text, streaming } => div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(div().text_xs().text_color(rgb(ACCENT)).child("apollo"))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(TEXT))
-                                .child(SharedString::from(if *streaming {
-                                    format!("{text}{cursor}")
-                                } else {
-                                    text.clone()
-                                })),
-                        ),
-
-                    // `| tool` with indented detail, as in shell.crepus.
-                    Entry::Tool {
-                        name,
-                        hint,
-                        outcome,
-                    } => {
-                        let (mark, color) = match outcome {
-                            None => ("…".to_string(), TEXT_FAINT),
-                            Some((true, secs)) => (format!("✓ {secs}s"), OK),
-                            Some((false, secs)) => (format!("✗ {secs}s"), ERR),
-                        };
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(TEXT_FAINT))
-                                            .child(SharedString::from(format!("| {name}"))),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(color))
-                                            .child(SharedString::from(mark)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(TEXT_GHOST))
-                                    .child(SharedString::from(format!("  {hint}"))),
-                            )
-                    }
-
-                    Entry::Status(text) => div()
-                        .text_xs()
-                        .text_color(rgb(TEXT_GHOST))
-                        .child(SharedString::from(text.clone())),
-
-                    Entry::Error(text) => div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(div().text_xs().text_color(rgb(ERR)).child("error"))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(ERR))
-                                .child(SharedString::from(text.clone())),
-                        ),
-                }
-            }))
+            .children(self.entries.iter().map(|entry| entry.view(cursor)))
     }
 }
 
