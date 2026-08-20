@@ -807,3 +807,51 @@ mod tests {
         assert!(cache.delete(cf, key).is_err());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_rockscache_operations() {
+        let dir = tempdir().unwrap();
+        let cache = RocksCache::new(dir.path()).unwrap();
+
+        let cf = "embeddings";
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // Test getting non-existent key
+        assert_eq!(cache.get(cf, key).unwrap(), None);
+
+        // Test putting a value
+        cache.put(cf, key, value).unwrap();
+
+        // Test getting the value
+        assert_eq!(cache.get(cf, key).unwrap().unwrap(), value);
+
+        // Test overwriting the value
+        let new_value = b"new_test_value";
+        cache.put(cf, key, new_value).unwrap();
+        assert_eq!(cache.get(cf, key).unwrap().unwrap(), new_value);
+
+        // Test deleting the value
+        cache.delete(cf, key).unwrap();
+        assert_eq!(cache.get(cf, key).unwrap(), None);
+    }
+
+    #[test]
+    fn test_rockscache_invalid_cf() {
+        let dir = tempdir().unwrap();
+        let cache = RocksCache::new(dir.path()).unwrap();
+
+        let cf = "invalid_cf";
+        let key = b"test_key";
+        let value = b"test_value";
+
+        assert!(cache.get(cf, key).is_err());
+        assert!(cache.put(cf, key, value).is_err());
+        assert!(cache.delete(cf, key).is_err());
+    }
+}
