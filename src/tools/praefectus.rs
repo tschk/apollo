@@ -174,15 +174,15 @@ impl PraefectusRuntime {
                         "praefectus execution only permits semantic invoke and set_value actions"
                     );
                 }
-                let request = signed_request(
-                    *desktop_action,
-                    *target,
+                let request = signed_request(SignedRequestParams {
+                    action: *desktop_action,
+                    target: *target,
                     operation_id,
                     deadline_at_ms,
                     interaction_mode,
-                    &self.signing_key,
-                    &self.session_id,
-                )?;
+                    signing_key: &self.signing_key,
+                    session_id: &self.session_id,
+                })?;
                 let report = self.engine.execute(&request, cancellation)?;
                 let is_error = !report_succeeded(&report);
                 let output = serde_json::to_string(&json!({
@@ -221,34 +221,38 @@ fn tool_observation(observation: &SemanticObservation) -> anyhow::Result<Semanti
     })
 }
 
-fn signed_request(
+struct SignedRequestParams<'a> {
     action: Action,
     target: SemanticTargetRef,
     operation_id: String,
     deadline_at_ms: i64,
     interaction_mode: InteractionMode,
-    signing_key: &SigningKey,
-    session_id: &str,
+    signing_key: &'a SigningKey,
+    session_id: &'a str,
+}
+
+fn signed_request(
+    params: SignedRequestParams,
 ) -> anyhow::Result<ActionRequest> {
     let safety = SafetyClass::External;
     let subject = "local-host-user".to_string();
-    let authority_expires_at_ms = deadline_at_ms.min(now_ms()?.saturating_add(ACTION_WINDOW_MS));
+    let authority_expires_at_ms = params.deadline_at_ms.min(now_ms()?.saturating_add(ACTION_WINDOW_MS));
     let mut request = ActionRequest {
         protocol_version: PROTOCOL_VERSION,
         action_version: PROTOCOL_VERSION,
         target_version: PROTOCOL_VERSION,
         verification_version: PROTOCOL_VERSION,
-        operation_id: operation_id.clone(),
+        operation_id: params.operation_id.clone(),
         subject: subject.clone(),
-        session_id: session_id.to_string(),
+        session_id: params.session_id.to_string(),
         authority: SignedAuthority {
             grant: AuthorityGrant {
                 protocol_version: PROTOCOL_VERSION,
                 issuer: "apollo".to_string(),
                 key_id: "host-process".to_string(),
-                operation_id,
+                operation_id: params.operation_id,
                 subject,
-                session_id: session_id.to_string(),
+                session_id: params.session_id.to_string(),
                 risk: safety,
                 expires_at_ms: authority_expires_at_ms,
                 policy_generation: "computer-use-enabled-v2".to_string(),
@@ -256,22 +260,22 @@ fn signed_request(
             },
             signature: String::new(),
         },
-        verification: match &action {
+        verification: match &params.action {
             Action::SetValue { value } => VerificationPolicy::TargetValueHash {
                 sha256: value_hash(value),
             },
             Action::Invoke => VerificationPolicy::None,
             _ => anyhow::bail!("action has no authorized semantic route"),
         },
-        action,
-        target: TargetRef::Element { target },
-        interaction_mode,
-        deadline_at_ms,
+        action: params.action,
+        target: TargetRef::Element { target: params.target },
+        interaction_mode: params.interaction_mode,
+        deadline_at_ms: params.deadline_at_ms,
         safety,
     };
     request.authority.grant.action_hash = normalized_action_hash(&request)?;
     request.authority.signature = encode_hex(
-        &signing_key
+        &params.signing_key
             .sign(&canonical_authority_bytes(&request.authority.grant)?)
             .to_bytes(),
     );
@@ -567,35 +571,35 @@ mod tests {
     #[test]
     fn authority_hash_binds_interaction_mode_and_operation() {
         let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let interactive = signed_request(
-            Action::Invoke,
-            target(),
-            "operation:1".to_string(),
-            i64::MAX,
-            InteractionMode::Interactive,
-            &signing_key,
-            "session:1",
-        )
+        let interactive = signed_request(SignedRequestParams {
+            action: Action::Invoke,
+            target: target(),
+            operation_id: "operation:1".to_string(),
+            deadline_at_ms: i64::MAX,
+            interaction_mode: InteractionMode::Interactive,
+            signing_key: &signing_key,
+            session_id: "session:1",
+        })
         .expect("interactive request should sign");
-        let background = signed_request(
-            Action::Invoke,
-            target(),
-            "operation:1".to_string(),
-            i64::MAX,
-            InteractionMode::BackgroundOnly,
-            &signing_key,
-            "session:1",
-        )
+        let background = signed_request(SignedRequestParams {
+            action: Action::Invoke,
+            target: target(),
+            operation_id: "operation:1".to_string(),
+            deadline_at_ms: i64::MAX,
+            interaction_mode: InteractionMode::BackgroundOnly,
+            signing_key: &signing_key,
+            session_id: "session:1",
+        })
         .expect("background request should sign");
-        let other_operation = signed_request(
-            Action::Invoke,
-            target(),
-            "operation:2".to_string(),
-            i64::MAX,
-            InteractionMode::Interactive,
-            &signing_key,
-            "session:1",
-        )
+        let other_operation = signed_request(SignedRequestParams {
+            action: Action::Invoke,
+            target: target(),
+            operation_id: "operation:2".to_string(),
+            deadline_at_ms: i64::MAX,
+            interaction_mode: InteractionMode::Interactive,
+            signing_key: &signing_key,
+            session_id: "session:1",
+        })
         .expect("other operation should sign");
 
         assert_ne!(
@@ -614,17 +618,18 @@ mod tests {
 
     #[test]
     fn set_value_verification_binds_the_exact_value() {
-        let request = signed_request(
-            Action::SetValue {
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let request = signed_request(SignedRequestParams {
+            action: Action::SetValue {
                 value: "private value".to_string(),
             },
-            target(),
-            "operation:1".to_string(),
-            i64::MAX,
-            InteractionMode::Interactive,
-            &SigningKey::from_bytes(&[7; 32]),
-            "session:1",
-        )
+            target: target(),
+            operation_id: "operation:1".to_string(),
+            deadline_at_ms: i64::MAX,
+            interaction_mode: InteractionMode::Interactive,
+            signing_key: &signing_key,
+            session_id: "session:1",
+        })
         .expect("set value request should sign");
 
         assert!(matches!(
