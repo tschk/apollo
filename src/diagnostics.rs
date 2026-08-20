@@ -372,6 +372,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn render_findings_empty_returns_no_findings() {
+        let findings = vec![];
+        let rendered = render_findings(&findings);
+        assert_eq!(rendered, "No audit findings.");
+    }
+
+    #[test]
+    fn render_findings_formats_findings_correctly() {
+        let findings_without = vec![Finding {
+            code: "CODE_01",
+            severity: Severity::Warn,
+            title: "Warning Title",
+            detail: "Some warning detail".into(),
+            remediation: None,
+        }];
+
+        let rendered_without = render_findings(&findings_without);
+        assert!(rendered_without.contains("[WARN] Warning Title (CODE_01)"));
+        assert!(rendered_without.contains("Some warning detail"));
+        assert!(!rendered_without.contains("Remediation:"));
+
+        let findings_with = vec![Finding {
+            code: "CODE_02",
+            severity: Severity::Critical,
+            title: "Critical Title",
+            detail: "Some critical detail".into(),
+            remediation: Some("Do this to fix".into()),
+        }];
+
+        let rendered_with = render_findings(&findings_with);
+        assert!(rendered_with.contains("[CRITICAL] Critical Title (CODE_02)"));
+        assert!(rendered_with.contains("Some critical detail"));
+        assert!(rendered_with.contains("Remediation: Do this to fix"));
+    }
+
+    #[test]
     fn render_doctor_report_marks_soft_warn_and_fail() {
         let report = DoctorReport {
             findings: vec![],
