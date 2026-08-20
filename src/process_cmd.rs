@@ -24,6 +24,7 @@ pub async fn run_argv_command(command: &str, timeout_secs: u64) -> anyhow::Resul
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
 
     let output =
@@ -31,7 +32,9 @@ pub async fn run_argv_command(command: &str, timeout_secs: u64) -> anyhow::Resul
             .await
         {
             Ok(result) => result?,
-            Err(_) => anyhow::bail!("command timed out after {}s", timeout_secs),
+            Err(_) => {
+                anyhow::bail!("command timed out after {}s", timeout_secs)
+            }
         };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -63,5 +66,32 @@ mod tests {
         let (out, ok) = run_argv_command("echo one;two", 5).await.unwrap();
         assert!(ok);
         assert!(out.contains("one;two") || out.contains("one"));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_command_is_killed_not_left_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("still-alive");
+        let script = tmp.path().join("hold.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nsleep 3\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let err = run_argv_command(script.to_str().unwrap(), 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(
+            !marker.exists(),
+            "the killed command must not have kept running to completion"
+        );
     }
 }
