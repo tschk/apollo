@@ -431,4 +431,50 @@ mod tests {
         assert_eq!(summary.system_chars, 42);
         assert_eq!(summary.estimated_input_tokens, 40);
     }
+
+    #[tokio::test]
+    async fn test_record_unknown_model_adds_unpriced_record() {
+        let tracker = CostTracker::new();
+        let usage = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            total_tokens: 30,
+        };
+
+        tracker.record("unknown-model-123", usage).await.unwrap();
+
+        let history = tracker.history(1).await;
+        assert_eq!(history.len(), 1);
+
+        let record = &history[0];
+        assert_eq!(record.model, "unknown-model-123");
+        assert_eq!(record.input_tokens, 10);
+        assert_eq!(record.output_tokens, 20);
+        assert_eq!(record.cost_usd, 0.0);
+        assert_eq!(record.pricing_known, false);
+    }
+
+    #[tokio::test]
+    async fn test_record_known_model_adds_priced_record() {
+        let tracker = CostTracker::new();
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            total_tokens: 2_000_000,
+        };
+
+        // Based on CostTracker::new() defaults:
+        // gpt-4-turbo: input = 10.0, output = 30.0
+        tracker.record("gpt-4-turbo", usage).await.unwrap();
+
+        let history = tracker.history(1).await;
+        assert_eq!(history.len(), 1);
+
+        let record = &history[0];
+        assert_eq!(record.model, "gpt-4-turbo");
+        assert_eq!(record.input_tokens, 1_000_000);
+        assert_eq!(record.output_tokens, 1_000_000);
+        assert_eq!(record.cost_usd, 40.0); // 10.0 + 30.0
+        assert_eq!(record.pricing_known, true);
+    }
 }
