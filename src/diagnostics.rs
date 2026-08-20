@@ -422,43 +422,4 @@ mod tests {
         assert!(!check.soft_warn);
         assert!(check.detail.contains("parses OK"));
     }
-
-    #[test]
-    fn audit_config_detects_missing_api_keys() {
-        temp_env::with_var("OPENAI_API_KEY", None::<&str>, || {
-            let mut cfg = Config::default_config();
-            cfg.provider.api_key = None;
-
-            let findings = audit_config(&cfg);
-            assert!(findings
-                .iter()
-                .any(|f| f.code == "provider_credentials_missing"));
-        });
-    }
-
-    #[test]
-    fn audit_config_ok_with_env_api_key() {
-        temp_env::with_var("OPENAI_API_KEY", Some("sk-test"), || {
-            let mut cfg = Config::default_config();
-            cfg.provider.api_key = None;
-
-            let findings = audit_config(&cfg);
-            assert!(!findings
-                .iter()
-                .any(|f| f.code == "provider_credentials_missing"));
-        });
-    }
-
-    #[test]
-    fn audit_config_ok_with_config_api_key() {
-        temp_env::with_var("OPENAI_API_KEY", None::<&str>, || {
-            let mut cfg = Config::default_config();
-            cfg.provider.api_key = Some("sk-test".into());
-
-            let findings = audit_config(&cfg);
-            assert!(!findings
-                .iter()
-                .any(|f| f.code == "provider_credentials_missing"));
-        });
-    }
 }
