@@ -256,9 +256,15 @@ pub fn expand_inline_shell(content: &str, cwd: Option<&Path>, _timeout_secs: u64
             if cmd.is_empty() {
                 return String::new();
             }
-            match std::process::Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
+            let mut args = match shlex::split(cmd) {
+                Some(args) if !args.is_empty() => args,
+                _ => return format!("[inline-shell error: failed to parse command]"),
+            };
+
+            let program = args.remove(0);
+
+            match std::process::Command::new(program)
+                .args(args)
                 .current_dir(cwd.unwrap_or(Path::new(".")))
                 .output()
             {
@@ -415,5 +421,16 @@ mod tests {
     fn test_inline_shell_expansion() {
         let result = expand_inline_shell("Date is !`echo hello`", None, 5);
         assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn test_inline_shell_expansion_command_injection_prevention() {
+        // Since we are not using `sh -c`, shell metacharacters should just be treated as arguments to `echo`.
+        // The command `echo hello; echo injected` passed through `shlex::split` yields `["echo", "hello;", "echo", "injected"]`.
+        // So `echo` should just print `hello; echo injected`.
+        let result = expand_inline_shell("Date is !`echo hello; echo injected`", None, 5);
+
+        // Ensure "hello; echo injected" is present, meaning `echo injected` was not executed as a separate command.
+        assert!(result.contains("hello; echo injected"));
     }
 }
