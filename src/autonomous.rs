@@ -283,20 +283,9 @@ impl AutonomousLoop {
 /// Run a test command, return true if it passes.
 async fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
     tracing::info!("[autonomous] running tests: {}", cmd);
-
-    let args = match shlex::split(cmd) {
-        Some(a) if !a.is_empty() => a,
-        _ => {
-            tracing::error!("[autonomous] invalid or empty test command: {}", cmd);
-            return Ok(false);
-        }
-    };
-
-    let program = &args[0];
-    let args = &args[1..];
-
-    let output = tokio::process::Command::new(program)
-        .args(args)
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
         .current_dir(cwd)
         .output()
         .await?;
