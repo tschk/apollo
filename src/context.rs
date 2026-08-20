@@ -118,3 +118,77 @@ pub fn group_memory_prompt(chat_id: &str, summary: &str) -> String {
         summary.trim()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn create_msg(is_group: bool, text: &str) -> IncomingMessage {
+        IncomingMessage {
+            id: "test-id".to_string(),
+            sender_id: "user1".to_string(),
+            sender_name: Some("User One".to_string()),
+            chat_id: "chat1".to_string(),
+            text: text.to_string(),
+            is_group,
+            reply_to: None,
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_should_respond_non_group() {
+        // Non-group messages should always get a response, regardless of content
+        assert!(should_respond(&create_msg(false, "")));
+        assert!(should_respond(&create_msg(false, "hello")));
+        assert!(should_respond(&create_msg(false, "@apollo hi")));
+    }
+
+    #[test]
+    fn test_should_respond_empty_group_message() {
+        // Empty text (or just whitespace) in a group -> false
+        assert!(!should_respond(&create_msg(true, "")));
+        assert!(!should_respond(&create_msg(true, "   ")));
+    }
+
+    #[test]
+    fn test_should_respond_commands() {
+        // Starts with '/' or '!' -> true
+        assert!(should_respond(&create_msg(true, "/help")));
+        assert!(should_respond(&create_msg(true, "!status")));
+        // Spaces before don't count for standard logic, but let's test what's there.
+        // Wait, the code trims before checking starts_with.
+        assert!(should_respond(&create_msg(true, "  /help  ")));
+        assert!(should_respond(&create_msg(true, " !status")));
+    }
+
+    #[test]
+    fn test_should_respond_direct_mention() {
+        // Contains "@apollo" -> true
+        assert!(should_respond(&create_msg(true, "hey @apollo, how are you?")));
+        assert!(should_respond(&create_msg(true, "@apollo")));
+    }
+
+    #[test]
+    fn test_should_respond_assistant_topic() {
+        // Group keywords
+        assert!(should_respond(&create_msg(true, "what is a plugin?")));
+        assert!(should_respond(&create_msg(true, "how do i configure this")));
+        assert!(should_respond(&create_msg(true, "what does this do")));
+        assert!(should_respond(&create_msg(true, "is there a plugin layer?")));
+
+        // Assistant patterns
+        assert!(should_respond(&create_msg(true, "can you help me?")));
+        assert!(should_respond(&create_msg(true, "how does this work?")));
+    }
+
+    #[test]
+    fn test_should_respond_unrelated_chatter() {
+        // Unrelated stuff -> false
+        assert!(!should_respond(&create_msg(true, "hello world")));
+        assert!(!should_respond(&create_msg(true, "just testing the chat")));
+        assert!(!should_respond(&create_msg(true, "what's for lunch?")));
+        assert!(!should_respond(&create_msg(true, "I think we should do that later.")));
+    }
+}
