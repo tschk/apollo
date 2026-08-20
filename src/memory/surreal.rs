@@ -951,7 +951,6 @@ mod tests {
         assert_ne!(h1, h2);
     }
 
-
     fn mock_dim(dim: usize) -> Vec<f32> {
         let mut v = vec![0.0f32; dim];
         if dim > 0 {
