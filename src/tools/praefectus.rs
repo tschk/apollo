@@ -231,12 +231,12 @@ struct SignedRequestParams<'a> {
     session_id: &'a str,
 }
 
-fn signed_request(
-    params: SignedRequestParams,
-) -> anyhow::Result<ActionRequest> {
+fn signed_request(params: SignedRequestParams) -> anyhow::Result<ActionRequest> {
     let safety = SafetyClass::External;
     let subject = "local-host-user".to_string();
-    let authority_expires_at_ms = params.deadline_at_ms.min(now_ms()?.saturating_add(ACTION_WINDOW_MS));
+    let authority_expires_at_ms = params
+        .deadline_at_ms
+        .min(now_ms()?.saturating_add(ACTION_WINDOW_MS));
     let mut request = ActionRequest {
         protocol_version: PROTOCOL_VERSION,
         action_version: PROTOCOL_VERSION,
@@ -268,14 +268,17 @@ fn signed_request(
             _ => anyhow::bail!("action has no authorized semantic route"),
         },
         action: params.action,
-        target: TargetRef::Element { target: params.target },
+        target: TargetRef::Element {
+            target: params.target,
+        },
         interaction_mode: params.interaction_mode,
         deadline_at_ms: params.deadline_at_ms,
         safety,
     };
     request.authority.grant.action_hash = normalized_action_hash(&request)?;
     request.authority.signature = encode_hex(
-        &params.signing_key
+        &params
+            .signing_key
             .sign(&canonical_authority_bytes(&request.authority.grant)?)
             .to_bytes(),
     );
