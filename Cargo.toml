@@ -89,9 +89,6 @@ computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 # harness.
 #
 # Every feature here is load-bearing; read this before trimming.
-#   ipc       — despite the name, this gates mid-turn *cancellation* in rx4's
-#               agent loop, not just the ACP/LSP transports. Removing it
-#               silently drops the ability to cancel a running turn.
 #   providers — gates `provider::StreamResult` and `Provider::stream`
 #               themselves, so the bridge's `impl rx4::Provider for
 #               RotaryProviderAdapter` will not compile without it. It is
@@ -103,8 +100,9 @@ computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 #
 # Deliberately off: `builtin-tools` (apollo registers its own tools; also
 # pulls in the fff/git2/notify stack), `mcp` (apollo has src/mcp_server.rs),
-# `zkr-memory` (gates rx4's self_improve; apollo depends on zkr directly).
-rx4 = { version = "0.6.4", default-features = false, features = ["ipc", "providers", "skills", "graph-memory"] }
+# `zkr-memory` (gates rx4's self_improve; apollo depends on zkr directly),
+# `ipc` (AcpHost/LspManager only; cancellation is always-on in 0.6.5).
+rx4 = { version = "0.6.5", default-features = false, features = ["providers", "skills", "graph-memory"] }
 
 # Async runtime (optimized features only)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }
