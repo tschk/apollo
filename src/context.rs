@@ -118,3 +118,23 @@ pub fn group_memory_prompt(chat_id: &str, summary: &str) -> String {
         summary.trim()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_routing_guidance_not_group() {
+        assert_eq!(routing_guidance(false, "telegram"), None);
+    }
+
+    #[test]
+    fn test_routing_guidance_is_group() {
+        let result = routing_guidance(true, "telegram");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("## Group chat routing"));
+        assert!(msg.contains("Transport: telegram"));
+        assert!(msg.contains("Respond even without a direct mention"));
+    }
+}
