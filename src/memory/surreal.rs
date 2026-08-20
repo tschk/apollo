@@ -951,10 +951,24 @@ mod tests {
         assert_ne!(h1, h2);
     }
 
-    #[tokio::test]
-    async fn test_surreal_store_and_recall() {
+
+    fn mock_dim(dim: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; dim];
+        if dim > 0 {
+            v[0] = 1.0;
+        }
+        v
+    }
+
+    async fn setup_memory() -> (tempfile::TempDir, SurrealMemory) {
         let dir = tempfile::tempdir().unwrap();
         let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        (dir, mem)
+    }
+
+    #[tokio::test]
+    async fn test_surreal_store_and_recall() {
+        let (_dir, mem) = setup_memory().await;
 
         mem.store("test", "greeting", "hello world", None)
             .await
@@ -966,8 +980,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_surreal_recall_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
         let val = mem.recall("test", "missing-key").await.unwrap();
         assert!(val.is_none());
@@ -975,8 +988,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_surreal_search() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
         mem.store("ns", "k1", "the quick brown fox", None)
             .await
@@ -993,8 +1005,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_surreal_delete() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
         mem.store("ns", "del-key", "to delete", None).await.unwrap();
         assert!(mem.recall("ns", "del-key").await.unwrap().is_some());
@@ -1005,8 +1016,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_surreal_conversation_history() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
         mem.store_conversation("chat-1", "user-1", "user", "Hello")
             .await
@@ -1026,8 +1036,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_surreal_clear_conversation_is_scoped_to_one_chat() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
         mem.store_conversation("chat-1", "user-1", "user", "keep me out")
             .await
@@ -1053,10 +1062,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_surreal_embeddings() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
-        let vec1 = vec![1.0, 0.0, 0.0];
+        let vec1 = mock_dim(3);
         let vec2 = vec![0.0, 1.0, 0.0];
         let vec3 = vec![0.9, 0.1, 0.0];
 
@@ -1081,8 +1089,7 @@ mod tests {
     /// replace it rather than add a duplicate.
     #[tokio::test]
     async fn test_search_embeddings_sees_writes_after_cache_is_warm() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
         mem.store_embedding("ns", "a", &[1.0, 0.0, 0.0], "a", "m")
             .await
@@ -1139,8 +1146,7 @@ mod tests {
     /// than silently vanishing from every search.
     #[tokio::test]
     async fn test_search_embeddings_reads_legacy_array_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
         let db = mem.db().await.unwrap();
 
         db.query(
@@ -1175,12 +1181,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_embeddings_excludes_other_dimensions() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
         // Simulates a provider switch: 3-dim rows from the old model coexist
         // with 8-dim rows from the new one.
-        let old_dim = vec![1.0f32, 0.0, 0.0];
+        let old_dim = mock_dim(3);
         let new_dim = vec![0.25f32; 8];
         mem.store_embedding("ns", "old", &old_dim, "old model", "old-model")
             .await
@@ -1204,8 +1209,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_embeddings_skips_rows_without_dimension() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
         let db = mem.db().await.unwrap();
 
         // A legacy row written before `dim`/`model` were recorded.
@@ -1228,8 +1232,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_surreal_file_index() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
         mem.store_file_index("/src/main.rs", "abc123")
             .await
@@ -1244,8 +1247,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_surreal_chunks() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
         mem.store_chunk("/src/lib.rs", 1, 10, "fn main() {}", None)
             .await
@@ -1266,8 +1268,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_surreal_sticker_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
 
         mem.store_sticker_cache("stk-1", "file-1", "A happy cat")
             .await
@@ -1325,8 +1326,7 @@ mod tests {
         };
 
         for size in sizes {
-            let dir = tempfile::tempdir().unwrap();
-            let mem = SurrealMemory::new(dir.path()).await.unwrap();
+            let (dir, mem) = setup_memory().await;
             let mut rng = Xorshift(0x2545_F491_4F6C_DD1D);
 
             let write_start = std::time::Instant::now();
@@ -1368,8 +1368,7 @@ mod tests {
             // What this arm measures is what the encoding still does affect:
             // insert cost, on-disk size, and the cold first query, which loads
             // the cache and shows up in `search_max`.
-            let dir = tempfile::tempdir().unwrap();
-            let mem = SurrealMemory::new(dir.path()).await.unwrap();
+            let (dir, mem) = setup_memory().await;
             let db = mem.db().await.unwrap();
             let mut rng = Xorshift(0x2545_F491_4F6C_DD1D);
 
@@ -1434,8 +1433,7 @@ mod tests {
         const DIM: usize = 1536;
         const SIZE: usize = 2_000;
 
-        let dir = tempfile::tempdir().unwrap();
-        let mem = SurrealMemory::new(dir.path()).await.unwrap();
+        let (_dir, mem) = setup_memory().await;
         let mut rng = Xorshift(0x2545_F491_4F6C_DD1D);
         let db = mem.db().await.unwrap();
 
