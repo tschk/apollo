@@ -211,24 +211,24 @@ impl TelegramChannel {
 
         let output = tokio::process::Command::new("python3")
             .arg("-c")
-            .arg(format!(
+            .arg(
                 r#"
 import sys
 try:
     from faster_whisper import WhisperModel
     model = WhisperModel("tiny", device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(r"{}", language="en")
+    segments, _ = model.transcribe(sys.argv[1], language="en")
     text = " ".join([segment.text for segment in segments])
     print(text.strip())
 except ImportError:
     print("ERROR: faster-whisper not installed")
     sys.exit(1)
 except Exception as e:
-    print(f"ERROR: {{e}}")
+    print(f"ERROR: {e}")
     sys.exit(1)
 "#,
-                temp_path.display()
-            ))
+            )
+            .arg(&temp_path)
             .output()
             .await?;
 
