@@ -1,5 +1,5 @@
 //! Message tool — send messages via Telegram (like OpenClaw's message tool).
-//! Allows the AI to proactively send messages, edit, delete, react.
+//! Allows the AI to proactively send messages, edit, delete.
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -20,15 +20,12 @@ impl MessageTool {
 
 #[derive(Deserialize)]
 struct MessageArgs {
-    /// Action: send, edit, delete, react
+    /// Action: send, edit, delete
     action: String,
     /// Message text (for send/edit)
     message: Option<String>,
-    /// Message ID (for edit/delete/react)
+    /// Message ID (for edit/delete)
     message_id: Option<i64>,
-    /// Emoji (for react)
-    #[allow(dead_code)]
-    emoji: Option<String>,
 }
 
 #[async_trait]
