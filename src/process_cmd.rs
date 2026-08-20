@@ -64,4 +64,31 @@ mod tests {
         assert!(ok);
         assert!(out.contains("one;two") || out.contains("one"));
     }
+
+    #[tokio::test]
+    async fn a_timed_out_command_is_killed_not_left_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("still-alive");
+        let script = tmp.path().join("hold.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nsleep 3\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let err = run_argv_command(script.to_str().unwrap(), 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(
+            !marker.exists(),
+            "the killed command must not have kept running to completion"
+        );
+    }
 }
