@@ -145,6 +145,7 @@ impl Tool for DynamicTool {
             }
             "shell" => {
                 tokio::process::Command::new("bash")
+                    .arg("--")
                     .arg(&run_path)
                     .arg(arguments)
                     .current_dir(&self.tool_dir)
