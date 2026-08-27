@@ -116,7 +116,7 @@ impl Tool for ClaudeUsageTool {
                 output.push(String::new());
                 output.push("By model:".to_string());
                 let mut models: Vec<_> = summary.by_model.iter().collect();
-                models.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+                models.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
                 for (model, cost) in models {
                     output.push(format!("• {}: ${:.4}", model, cost));

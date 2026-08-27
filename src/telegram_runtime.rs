@@ -336,7 +336,7 @@ async fn handle_command(
         "/cost" => {
             let summary = runner.get_cost_summary().await;
             let mut by_model: Vec<_> = summary.by_model.iter().collect();
-            by_model.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+            by_model.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             let model_breakdown = if by_model.is_empty() {
                 "No usage yet.".to_string()
