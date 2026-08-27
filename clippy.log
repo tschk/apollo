@@ -1,0 +1,15 @@
+   Compiling librocksdb-sys v0.17.3+10.4.2
+    Checking rocksdb v0.23.0
+    Checking surrealdb-core v2.3.10
+    Checking surrealdb v2.3.10
+    Checking apollo-agent v0.6.2 (/app)
+error[E0432]: unresolved import `rs_ai_providers::catalog`
+ --> src/bootstrap.rs:7:5
+  |
+7 | use rs_ai_providers::catalog;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^ no `catalog` in the root
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `apollo-agent` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `apollo-agent` (lib test) due to 1 previous error
