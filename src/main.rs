@@ -1405,7 +1405,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 workspace.join(spec)
             };
-            let mut autoresearch_config = AutoresearchConfig::load(&spec_path)?;
+            let mut autoresearch_config = AutoresearchConfig::load(&spec_path).await?;
             if let Some(iterations) = iterations {
                 autoresearch_config.max_iterations = iterations;
             }
