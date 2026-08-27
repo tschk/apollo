@@ -873,6 +873,7 @@ fn unpack_vector_into(encoded: &str, scratch: &mut Vec<u8>, out: &mut Vec<f32>) 
         return;
     }
     out.reserve(scratch.len() / 4);
+    #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
     for chunk in scratch.chunks_exact(4) {
         out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
