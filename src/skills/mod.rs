@@ -265,8 +265,7 @@ pub fn expand_inline_shell(content: &str, cwd: Option<&Path>, _timeout_secs: u64
                 .env_clear()
                 .envs(crate::tools::child_proc::child_env());
 
-            match cmd_obj.output()
-            {
+            match cmd_obj.output() {
                 Ok(output) if output.status.success() => {
                     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     match crate::text::truncate_chars_counted(&stdout, 4000) {
