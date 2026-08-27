@@ -3,6 +3,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(feature = "rs-ai")]
+use rs_ai_providers::catalog;
+
 use crate::config::Config;
 use crate::memory::embeddings::{create_embedding_provider, EmbeddingProvider};
 use crate::memory::search::{MemoryGetTool, MemorySearchTool, SessionSearchTool};
@@ -72,6 +75,15 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
         }
     }
 
+    #[cfg(feature = "rs-ai")]
+    {
+        if cfg.provider.api_key.is_none() {
+            if let Some(key) = catalog::find(&cfg.provider.name).and_then(catalog::env_key) {
+                cfg.provider.api_key = Some(key);
+            }
+        }
+    }
+
     if cfg.provider.name == "ollama" && cfg.provider.base_url.is_none() {
         if let Ok(url) = std::env::var("OLLAMA_BASE_URL") {
             cfg.provider.base_url = Some(url);
@@ -98,6 +110,15 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
                 }
             }
             _ => {}
+        }
+    }
+
+    #[cfg(feature = "rs-ai")]
+    {
+        if cfg.embeddings.api_key.is_none() {
+            if let Some(key) = catalog::find(&cfg.embeddings.provider).and_then(catalog::env_key) {
+                cfg.embeddings.api_key = Some(key);
+            }
         }
     }
 
