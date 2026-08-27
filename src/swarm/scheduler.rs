@@ -217,34 +217,38 @@ impl ConcurrencyScheduler {
 fn find_cycles(wait_map: &HashMap<String, String>) -> Vec<Vec<String>> {
     let mut cycles = Vec::new();
     let mut visited = std::collections::HashSet::new();
+    let mut path = Vec::new();
+    let mut path_set = std::collections::HashSet::new();
 
     for start in wait_map.keys() {
         if visited.contains(start) {
             continue;
         }
 
-        let mut path = vec![start.clone()];
-        let mut current = start.clone();
-        let mut path_set = std::collections::HashSet::new();
-        path_set.insert(start.clone());
+        path.clear();
+        path_set.clear();
 
-        while let Some(next) = wait_map.get(&current) {
-            if path_set.contains(next) {
+        path.push(start);
+        path_set.insert(start);
+        let mut current = start;
+
+        while let Some(next) = wait_map.get(current) {
+            if path_set.contains(&next) {
                 // Found a cycle
-                let cycle_start = path.iter().position(|p| p == next).unwrap();
-                cycles.push(path[cycle_start..].to_vec());
+                let cycle_start = path.iter().position(|&p| p == next).unwrap();
+                cycles.push(path[cycle_start..].iter().map(|&s| s.clone()).collect());
                 break;
             }
-            if visited.contains(next) {
+            if visited.contains(&next) {
                 break;
             }
-            path.push(next.clone());
-            path_set.insert(next.clone());
-            current = next.clone();
+            path.push(next);
+            path_set.insert(next);
+            current = next;
         }
 
         for p in &path {
-            visited.insert(p.clone());
+            visited.insert(*p);
         }
     }
 
