@@ -729,6 +729,44 @@ mod config_path_tests {
         assert_eq!(raw["model"], "m");
         assert_eq!(raw["agent"]["max_rounds"], 12);
     }
+
+    #[test]
+    fn mask_secrets_covers_objects_arrays_and_skips_empty() {
+        let mut data = serde_json::json!({
+            "api_key": "secret_value",
+            "empty_api_key": "",
+            "null_token": null,
+            "number_secret": 12345,
+            "nested": {
+                "token": "inner_secret",
+                "normal": "value"
+            },
+            "array": [
+                { "password": "arr_secret" },
+                { "normal": "value" },
+                "just_a_string"
+            ]
+        });
+
+        mask_secrets(&mut data);
+
+        // String secrets are masked
+        assert_eq!(data["api_key"], "********");
+        assert_eq!(data["nested"]["token"], "********");
+        assert_eq!(data["array"][0]["password"], "********");
+
+        // Empty string secrets are untouched
+        assert_eq!(data["empty_api_key"], "");
+
+        // Non-string secrets are untouched (the mask_secrets only masks String)
+        assert_eq!(data["null_token"], serde_json::Value::Null);
+        assert_eq!(data["number_secret"], 12345);
+
+        // Normal values are untouched
+        assert_eq!(data["nested"]["normal"], "value");
+        assert_eq!(data["array"][1]["normal"], "value");
+        assert_eq!(data["array"][2], "just_a_string");
+    }
 }
 
 #[cfg(test)]
