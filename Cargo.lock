@@ -6861,7 +6861,7 @@ dependencies = [
 [[package]]
 name = "rx4"
 version = "0.6.5"
-source = "git+https://github.com/tschk/rotary.git?rev=b097343119e987af85738e057f4cd3771ac2b7ee#b097343119e987af85738e057f4cd3771ac2b7ee"
+source = "git+https://github.com/tschk/rotary.git?rev=d1f94aa7db05946c6a1285da34bf26c9887a9f03#d1f94aa7db05946c6a1285da34bf26c9887a9f03"
 dependencies = [
  "async-trait",
  "cancellation-token",
