@@ -127,6 +127,13 @@ impl Trajectory {
         });
     }
 
+    pub fn absorb_recorded_steps(&mut self, steps: Vec<TrajectoryStep>, iterations: usize) {
+        for step in steps {
+            self.add_step(step);
+        }
+        self.iterations = self.iterations.max(iterations);
+    }
+
     /// Record the final text response for the current step (used by loop_runner).
     pub fn record_response(&mut self, response: String) {
         let response_len = response.len();

@@ -26,7 +26,9 @@ use crate::agent::stream::{emit, AgentStreamEvent, AgentStreamTx};
 use crate::cost::{ContextSnapshot, CostTracker, TokenUsage};
 use crate::plugin::{HookManager, LifecycleEvent, PluginRegistry};
 use crate::providers::{ChatMessage, ChatRequest, Provider as UnthinkclawProvider};
+use crate::tools::pty_worker::PtyWorker;
 use crate::tools::{Tool as UnthinkclawTool, ToolResult as UnthinkclawToolResult, ToolSpec};
+use crate::trajectory::{Trajectory, TrajectoryStep};
 
 /// Everything a tool call must be wrapped in.
 ///
@@ -166,6 +168,89 @@ pub async fn execute_tool_with_hooks(
     );
 
     result
+}
+
+#[derive(Debug, Default)]
+pub struct Rx4TrajectoryRecorder {
+    pending: Option<(String, String)>,
+    steps: Vec<TrajectoryStep>,
+    iterations: usize,
+}
+
+impl Rx4TrajectoryRecorder {
+    pub fn on_event(&mut self, event: &rx4::Event) {
+        record_rx4_event(self, event);
+    }
+
+    pub fn take_steps(&mut self) -> (Vec<TrajectoryStep>, usize) {
+        (std::mem::take(&mut self.steps), self.iterations)
+    }
+}
+
+pub fn record_rx4_event(recorder: &mut Rx4TrajectoryRecorder, event: &rx4::Event) {
+    match event {
+        rx4::Event::TurnStart { turn } => {
+            recorder.iterations = *turn;
+        }
+        rx4::Event::ToolExecutionStart(call) => {
+            recorder.pending = Some((call.name.clone(), call.arguments.clone()));
+        }
+        rx4::Event::ToolExecutionEnd(result) => {
+            let (action, action_args) = recorder
+                .pending
+                .take()
+                .unwrap_or_else(|| ("tool".to_string(), String::new()));
+            recorder.steps.push(TrajectoryStep {
+                step: recorder.steps.len() + 1,
+                thought: None,
+                action: Some(action),
+                action_args: Some(action_args),
+                observation: Some(result.content.clone()),
+                response: None,
+                success: !result.is_error,
+            });
+        }
+        rx4::Event::GuardrailWarning { tool, reason }
+        | rx4::Event::GuardrailStop { tool, reason } => {
+            recorder.steps.push(TrajectoryStep {
+                step: recorder.steps.len() + 1,
+                thought: None,
+                action: Some(tool.clone()),
+                action_args: None,
+                observation: Some(reason.clone()),
+                response: None,
+                success: false,
+            });
+        }
+        rx4::Event::Error(message) => {
+            recorder.steps.push(TrajectoryStep {
+                step: recorder.steps.len() + 1,
+                thought: None,
+                action: Some("error".to_string()),
+                action_args: None,
+                observation: Some(message.clone()),
+                response: None,
+                success: false,
+            });
+        }
+        rx4::Event::BudgetExceeded { reason } => {
+            recorder.steps.push(TrajectoryStep {
+                step: recorder.steps.len() + 1,
+                thought: None,
+                action: Some("budget".to_string()),
+                action_args: None,
+                observation: Some(reason.clone()),
+                response: None,
+                success: false,
+            });
+        }
+        _ => {}
+    }
+}
+
+pub fn apply_recorded_steps(trajectory: &mut Trajectory, recorder: &mut Rx4TrajectoryRecorder) {
+    let (steps, iterations) = recorder.take_steps();
+    trajectory.absorb_recorded_steps(steps, iterations);
 }
 
 // ── Message translation ──────────────────────────────────────────────────
@@ -488,6 +573,7 @@ pub struct RotaryAgentBridge {
     hook_ctx: ToolHookContext,
     /// Conversation messages maintained in rx4 format (per-session)
     messages: Vec<Message>,
+    pty: Option<Arc<PtyWorker>>,
 }
 
 impl RotaryAgentBridge {
@@ -549,7 +635,25 @@ impl RotaryAgentBridge {
             agent,
             hook_ctx: config.hook_ctx,
             messages: Vec::new(),
+            pty: None,
         }
+    }
+
+    pub fn with_pty_worker(mut self, worker: Arc<PtyWorker>) -> Self {
+        self.pty = Some(worker);
+        self
+    }
+
+    pub fn pty_worker(&self) -> Option<Arc<PtyWorker>> {
+        self.pty.clone()
+    }
+
+    pub async fn write_stdin(&self, process_id: &str, data: &[u8]) -> anyhow::Result<()> {
+        let worker = self
+            .pty
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("pty worker is not attached"))?;
+        worker.write_stdin(process_id, data).await
     }
 
     /// Get a reference to the inner rx4::Agent (for advanced configuration).
@@ -596,6 +700,12 @@ impl RotaryAgentBridge {
     /// Add a subscriber to receive agent events (tool calls, deltas, etc.).
     pub fn subscribe(&mut self, callback: impl Fn(&rx4::Event) + Send + Sync + 'static) {
         self.agent.subscribe(callback);
+    }
+
+    pub fn subscribe_trajectory(&mut self, recorder: Arc<std::sync::Mutex<Rx4TrajectoryRecorder>>) {
+        self.agent.subscribe(move |event| {
+            recorder.lock().unwrap().on_event(event);
+        });
     }
 
     /// Run a single user prompt through the rx4 agent loop.
@@ -1040,5 +1150,33 @@ mod tests {
             seen.lock().unwrap().clone(),
             vec!["before:exec", "after:exec"]
         );
+    }
+
+    #[test]
+    fn rx4_events_become_trajectory_steps() {
+        let mut recorder = Rx4TrajectoryRecorder::default();
+        recorder.on_event(&rx4::Event::TurnStart { turn: 2 });
+        recorder.on_event(&rx4::Event::ToolExecutionStart(rx4::ToolCall {
+            id: "c1".into(),
+            name: "probe".into(),
+            arguments: r#"{"path":"hello.txt"}"#.into(),
+        }));
+        recorder.on_event(&rx4::Event::ToolExecutionEnd(rx4::ToolResult {
+            id: "c1".into(),
+            content: "hello".into(),
+            is_error: false,
+            error_kind: None,
+        }));
+        recorder.on_event(&rx4::Event::GuardrailStop {
+            tool: "exec".into(),
+            reason: "loop".into(),
+        });
+        let (steps, iterations) = recorder.take_steps();
+        assert_eq!(iterations, 2);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].action.as_deref(), Some("probe"));
+        assert!(steps[0].success);
+        assert_eq!(steps[1].action.as_deref(), Some("exec"));
+        assert!(!steps[1].success);
     }
 }

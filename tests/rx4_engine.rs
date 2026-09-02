@@ -16,14 +16,20 @@ use std::sync::{Arc, Mutex};
 
 use apollo::agent::hooks::PermissionHook;
 use apollo::agent::mode::NullChannel;
+use apollo::agent::rotary_bridge::{record_rx4_event, Rx4TrajectoryRecorder};
 use apollo::agent::AgentRunner;
 use apollo::channels::IncomingMessage;
 use apollo::memory::surreal::SurrealMemory;
 use apollo::providers::traits::{
     ChatRequest, ChatResponse, Provider, ProviderCapabilities, ToolCall,
 };
+use apollo::tools::confine::{confine, ConfineDialect, ConfinePolicy, RunnerKind};
+use apollo::tools::pty_worker::PtyWorker;
+use apollo::tools::shell::ShellTool;
 use apollo::tools::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
+use std::path::PathBuf;
+use std::time::Duration;
 
 const FINAL_REPLY: &str = "the file says hello";
 
@@ -280,4 +286,172 @@ async fn rx4_engine_persists_the_turn() {
             .any(|(_, content)| content.contains(FINAL_REPLY)),
         "rx4 reply not persisted: {history:?}"
     );
+}
+
+#[tokio::test]
+async fn rx4_engine_records_tool_steps_on_the_trajectory() {
+    let h = harness().await;
+    h.runner
+        .handle_message(
+            &message("rx4-traj", "read hello.txt"),
+            &NullChannel::new("test"),
+        )
+        .await
+        .unwrap();
+
+    let traj = h
+        .runner
+        .get_trajectory("rx4-traj")
+        .await
+        .expect("trajectory must be collected");
+    assert!(
+        traj.tool_calls >= 1,
+        "rx4 events were not subscribed into the trajectory: {traj:?}"
+    );
+    assert!(
+        traj.steps
+            .iter()
+            .any(|step| step.action.as_deref() == Some("probe")),
+        "probe tool step missing: {:?}",
+        traj.steps
+    );
+}
+
+struct ExecThenTextProvider {
+    calls: AtomicUsize,
+}
+
+impl ExecThenTextProvider {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ExecThenTextProvider {
+    fn name(&self) -> &str {
+        "exec-then-text"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            native_tools: true,
+            streaming: false,
+            vision: false,
+            max_context: 32_000,
+            native_web_search: false,
+        }
+    }
+
+    async fn chat(&self, _request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            Ok(ChatResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_exec".to_string(),
+                    name: "exec".to_string(),
+                    arguments: r#"{"command":"printf confined-ok"}"#.to_string(),
+                }],
+                usage: None,
+            })
+        } else {
+            Ok(ChatResponse {
+                text: Some(FINAL_REPLY.to_string()),
+                tool_calls: vec![],
+                usage: None,
+            })
+        }
+    }
+}
+
+#[tokio::test]
+async fn rx4_engine_confines_exec_and_records_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let memory = SurrealMemory::new(dir.path()).await.unwrap();
+    let provider = Arc::new(ExecThenTextProvider::new());
+    let tool: Arc<dyn Tool> = Arc::new(
+        ShellTool::new(
+            dir.path().to_path_buf(),
+            Arc::new(apollo::policy::ExecutionPolicy::default()),
+        )
+        .with_confine(ConfinePolicy::host()),
+    );
+    let runner = AgentRunner::new(
+        Arc::clone(&provider) as Arc<dyn Provider>,
+        vec![tool],
+        Arc::new(memory),
+        "you are a test agent",
+        "test-model",
+    )
+    .with_workspace(dir.path().to_path_buf());
+
+    let response = runner
+        .handle_message(&message("rx4-exec", "run it"), &NullChannel::new("test"))
+        .await
+        .unwrap();
+    assert_eq!(response, FINAL_REPLY);
+
+    let traj = runner
+        .get_trajectory("rx4-exec")
+        .await
+        .expect("trajectory must be collected");
+    assert!(
+        traj.steps
+            .iter()
+            .any(|step| step.action.as_deref() == Some("exec")),
+        "exec step missing: {:?}",
+        traj.steps
+    );
+}
+
+#[test]
+fn confine_host_runner_is_not_a_silent_pass() {
+    let argv = vec!["printf".into(), "ok".into()];
+    let out = confine(&argv, &ConfinePolicy::host());
+    assert_eq!(out.dialect(), ConfineDialect::Runner(RunnerKind::Host));
+    assert_eq!(out.argv(), Some(argv.as_slice()));
+}
+
+#[test]
+fn confine_denies_instead_of_passing_an_unusable_isolator() {
+    let out = confine(
+        &["echo".into(), "hi".into()],
+        &ConfinePolicy::required(Some(PathBuf::from("/definitely/missing/boxlite"))),
+    );
+    assert_eq!(out.dialect(), ConfineDialect::Denial);
+    assert!(out.argv().is_none());
+}
+
+#[tokio::test]
+async fn rx4_bridge_write_stdin_uses_the_pty_worker() {
+    let worker = Arc::new(PtyWorker::new());
+    let tmp = tempfile::tempdir().unwrap();
+    let id = worker
+        .spawn(
+            &["sh".into(), "-c".into(), "read x; printf %s \"$x\"".into()],
+            tmp.path(),
+            &ConfinePolicy::host(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ToolExecutionStart(rx4::ToolCall {
+            id: id.clone(),
+            name: "exec".into(),
+            arguments: "{}".into(),
+        }),
+    );
+
+    worker.write_stdin(&id, b"bridge-hi\n").await.unwrap();
+    worker.close_stdin(&id).await.unwrap();
+    let output = worker.wait(&id, Duration::from_secs(5)).await.unwrap();
+    assert!(output.stdout.contains("bridge-hi"), "{}", output.stdout);
+    assert!(!id.is_empty());
 }
