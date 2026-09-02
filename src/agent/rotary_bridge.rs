@@ -200,6 +200,7 @@ pub fn record_rx4_event(recorder: &mut Rx4TrajectoryRecorder, event: &rx4::Event
                 .pending
                 .take()
                 .unwrap_or_else(|| ("tool".to_string(), String::new()));
+            let spill = spill_locator(&result.content).map(str::to_string);
             recorder.steps.push(TrajectoryStep {
                 step: recorder.steps.len() + 1,
                 thought: None,
@@ -209,6 +210,17 @@ pub fn record_rx4_event(recorder: &mut Rx4TrajectoryRecorder, event: &rx4::Event
                 response: None,
                 success: !result.is_error,
             });
+            if let Some(locator) = spill {
+                recorder.steps.push(TrajectoryStep {
+                    step: recorder.steps.len() + 1,
+                    thought: None,
+                    action: Some("spill".to_string()),
+                    action_args: None,
+                    observation: Some(locator),
+                    response: None,
+                    success: true,
+                });
+            }
         }
         rx4::Event::GuardrailWarning { tool, reason }
         | rx4::Event::GuardrailStop { tool, reason } => {
@@ -308,6 +320,15 @@ pub fn record_rx4_event(recorder: &mut Rx4TrajectoryRecorder, event: &rx4::Event
         }
         _ => {}
     }
+}
+
+fn spill_locator(content: &str) -> Option<&str> {
+    let marker = "[truncated, full output at ";
+    let start = content.find(marker)? + marker.len();
+    let rest = content.get(start..)?;
+    let end = rest.find(']')?;
+    let locator = rest[..end].trim();
+    (!locator.is_empty()).then_some(locator)
 }
 
 pub fn apply_recorded_steps(trajectory: &mut Trajectory, recorder: &mut Rx4TrajectoryRecorder) {

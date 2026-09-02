@@ -531,3 +531,44 @@ fn rx4_sandbox_escalate_records_retry_and_stays_fail_closed() {
         "top layer must deny instead of silently passing"
     );
 }
+
+#[test]
+fn rx4_spilled_tool_result_records_a_spill_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "x".repeat(20_000);
+    let spilled = rx4::tools::spill::bound_tool_output(&body, 1024, dir.path()).unwrap();
+    assert!(spilled.spilled);
+    assert!(rx4::tools::spill::locator_is_file(&spilled.locator));
+
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ToolExecutionStart(rx4::ToolCall {
+            id: "c-spill".into(),
+            name: "exec".into(),
+            arguments: "{}".into(),
+        }),
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ToolExecutionEnd(rx4::ToolResult {
+            id: "c-spill".into(),
+            content: spilled.preview,
+            is_error: false,
+            error_kind: None,
+        }),
+    );
+    let (steps, _) = recorder.take_steps();
+    assert!(
+        steps
+            .iter()
+            .any(|step| step.action.as_deref() == Some("exec")),
+        "tool step missing: {:?}",
+        steps
+    );
+    let spill = steps
+        .iter()
+        .find(|step| step.action.as_deref() == Some("spill"))
+        .expect("spill step missing");
+    assert_eq!(spill.observation.as_deref(), Some(spilled.locator.as_str()));
+}
