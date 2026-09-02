@@ -244,6 +244,68 @@ pub fn record_rx4_event(recorder: &mut Rx4TrajectoryRecorder, event: &rx4::Event
                 success: false,
             });
         }
+        rx4::Event::RetryReason {
+            retry_reason,
+            layer,
+        } => {
+            recorder.steps.push(TrajectoryStep {
+                step: recorder.steps.len() + 1,
+                thought: None,
+                action: Some("retry".to_string()),
+                action_args: Some(layer.clone()),
+                observation: Some(retry_reason.clone()),
+                response: None,
+                success: false,
+            });
+        }
+        rx4::Event::ProcessStdin { process_id, bytes } => {
+            recorder.steps.push(TrajectoryStep {
+                step: recorder.steps.len() + 1,
+                thought: None,
+                action: Some("stdin".to_string()),
+                action_args: Some(process_id.clone()),
+                observation: Some(bytes.to_string()),
+                response: None,
+                success: true,
+            });
+        }
+        rx4::Event::RequestPermissions { tool, paths } => {
+            recorder.steps.push(TrajectoryStep {
+                step: recorder.steps.len() + 1,
+                thought: None,
+                action: Some("permissions".to_string()),
+                action_args: Some(tool.clone()),
+                observation: Some(paths.join(",")),
+                response: None,
+                success: true,
+            });
+        }
+        rx4::Event::PatchHunk { path, hunk } => {
+            recorder.steps.push(TrajectoryStep {
+                step: recorder.steps.len() + 1,
+                thought: None,
+                action: Some("patch".to_string()),
+                action_args: Some(path.clone()),
+                observation: Some(hunk.clone()),
+                response: None,
+                success: true,
+            });
+        }
+        rx4::Event::SelfHealing {
+            attempt,
+            max_attempts,
+            errors,
+        } => {
+            recorder.steps.push(TrajectoryStep {
+                step: recorder.steps.len() + 1,
+                thought: None,
+                action: Some("recovery".to_string()),
+                action_args: Some(format!("{attempt}/{max_attempts}")),
+                observation: Some(errors.join("; ")),
+                response: None,
+                success: false,
+            });
+        }
         _ => {}
     }
 }
@@ -653,7 +715,9 @@ impl RotaryAgentBridge {
             .pty
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("pty worker is not attached"))?;
-        worker.write_stdin(process_id, data).await
+        worker.write_stdin(process_id, data).await?;
+        let _ = self.agent.write_stdin(process_id, data);
+        Ok(())
     }
 
     /// Get a reference to the inner rx4::Agent (for advanced configuration).
@@ -1171,12 +1235,39 @@ mod tests {
             tool: "exec".into(),
             reason: "loop".into(),
         });
+        recorder.on_event(&rx4::Event::RetryReason {
+            retry_reason: "sandbox deny".into(),
+            layer: "NestedFs".into(),
+        });
+        recorder.on_event(&rx4::Event::ProcessStdin {
+            process_id: "p1".into(),
+            bytes: 4,
+        });
+        recorder.on_event(&rx4::Event::RequestPermissions {
+            tool: "write".into(),
+            paths: vec!["src/lib.rs".into()],
+        });
+        recorder.on_event(&rx4::Event::PatchHunk {
+            path: "src/lib.rs".into(),
+            hunk: "@@ -1 +1 @@".into(),
+        });
+        recorder.on_event(&rx4::Event::SelfHealing {
+            attempt: 1,
+            max_attempts: 3,
+            errors: vec!["timeout".into()],
+        });
         let (steps, iterations) = recorder.take_steps();
         assert_eq!(iterations, 2);
-        assert_eq!(steps.len(), 2);
+        assert_eq!(steps.len(), 7);
         assert_eq!(steps[0].action.as_deref(), Some("probe"));
         assert!(steps[0].success);
         assert_eq!(steps[1].action.as_deref(), Some("exec"));
         assert!(!steps[1].success);
+        assert_eq!(steps[2].action.as_deref(), Some("retry"));
+        assert_eq!(steps[2].action_args.as_deref(), Some("NestedFs"));
+        assert_eq!(steps[3].action.as_deref(), Some("stdin"));
+        assert_eq!(steps[4].action.as_deref(), Some("permissions"));
+        assert_eq!(steps[5].action.as_deref(), Some("patch"));
+        assert_eq!(steps[6].action.as_deref(), Some("recovery"));
     }
 }

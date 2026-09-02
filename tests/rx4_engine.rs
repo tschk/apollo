@@ -455,3 +455,79 @@ async fn rx4_bridge_write_stdin_uses_the_pty_worker() {
     assert!(output.stdout.contains("bridge-hi"), "{}", output.stdout);
     assert!(!id.is_empty());
 }
+
+#[test]
+fn rx4_new_events_are_recorded_on_the_trajectory() {
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::RetryReason {
+            retry_reason: "sandbox deny".into(),
+            layer: "NestedFs".into(),
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ProcessStdin {
+            process_id: "p1".into(),
+            bytes: 4,
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::RequestPermissions {
+            tool: "write".into(),
+            paths: vec!["src/lib.rs".into()],
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::PatchHunk {
+            path: "src/lib.rs".into(),
+            hunk: "@@ -1 +1 @@".into(),
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::SelfHealing {
+            attempt: 1,
+            max_attempts: 3,
+            errors: vec!["timeout".into()],
+        },
+    );
+    let (steps, _) = recorder.take_steps();
+    let actions: Vec<_> = steps
+        .iter()
+        .filter_map(|step| step.action.as_deref())
+        .collect();
+    assert_eq!(
+        actions,
+        ["retry", "stdin", "permissions", "patch", "recovery"]
+    );
+}
+
+#[test]
+fn rx4_sandbox_escalate_records_retry_and_stays_fail_closed() {
+    let deny = rx4::SandboxError::PathDenied("/etc/passwd".into());
+    let retry = rx4::escalate_on_deny(rx4::SandboxLayer::Userspace, &deny).unwrap();
+    assert_eq!(retry.to, rx4::SandboxLayer::NestedFs);
+
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::RetryReason {
+            retry_reason: retry.retry_reason,
+            layer: format!("{:?}", retry.to),
+        },
+    );
+    let (steps, _) = recorder.take_steps();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].action.as_deref(), Some("retry"));
+    assert_eq!(steps[0].action_args.as_deref(), Some("NestedFs"));
+    assert!(!steps[0].success);
+
+    assert!(
+        rx4::escalate_on_deny(rx4::SandboxLayer::GitReadOnly, &deny).is_err(),
+        "top layer must deny instead of silently passing"
+    );
+}
