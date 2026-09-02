@@ -231,8 +231,9 @@ fn find_cycles(wait_map: &HashMap<String, String>) -> Vec<Vec<String>> {
         while let Some(next) = wait_map.get(&current) {
             if path_set.contains(next) {
                 // Found a cycle
-                let cycle_start = path.iter().position(|p| p == next).unwrap();
-                cycles.push(path[cycle_start..].to_vec());
+                if let Some(cycle_start) = path.iter().position(|p| p == next) {
+                    cycles.push(path[cycle_start..].to_vec());
+                }
                 break;
             }
             if visited.contains(next) {
