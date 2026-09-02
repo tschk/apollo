@@ -3808,7 +3808,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -6556,9 +6556,9 @@ dependencies = [
 
 [[package]]
 name = "rs_ai_providers"
-version = "0.2.32"
+version = "0.2.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56c47ca3361dfd3743076f4ef6c7cfb8bc3d52218506ff613566dd638826e880"
+checksum = "4bacda6312ade1b018c12337af3b831b2148f01ecf9786b0d8e36653655b0b85"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6861,7 +6861,7 @@ dependencies = [
 [[package]]
 name = "rx4"
 version = "0.6.5"
-source = "git+https://github.com/tschk/rotary.git?rev=441ce524ef8b3ec2372227ba35b91fad0bc4389a#441ce524ef8b3ec2372227ba35b91fad0bc4389a"
+source = "git+https://github.com/tschk/rotary.git?rev=13bc1ff9150e576505cc6becedf4507ca9f90391#13bc1ff9150e576505cc6becedf4507ca9f90391"
 dependencies = [
  "async-trait",
  "cancellation-token",
@@ -8077,7 +8077,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand 2.5.0",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -9271,7 +9271,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
