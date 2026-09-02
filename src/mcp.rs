@@ -26,10 +26,10 @@ struct JsonRpcRequest {
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
-    #[allow(dead_code)]
-    jsonrpc: String,
-    #[allow(dead_code)]
-    id: u64,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
+    #[serde(rename = "id")]
+    _id: u64,
     #[serde(default)]
     result: Option<Value>,
     #[serde(default)]
@@ -41,8 +41,8 @@ struct JsonRpcError {
     code: i32,
     message: String,
     #[serde(default)]
-    #[allow(dead_code)]
-    data: Option<Value>,
+    #[serde(rename = "data")]
+    _data: Option<Value>,
 }
 
 impl McpClient {
