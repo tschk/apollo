@@ -3,9 +3,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-#[cfg(feature = "rs-ai")]
-use rs_ai_providers::catalog;
-
 use crate::config::Config;
 use crate::memory::embeddings::{create_embedding_provider, EmbeddingProvider};
 use crate::memory::search::{MemoryGetTool, MemorySearchTool, SessionSearchTool};
@@ -78,7 +75,7 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
     #[cfg(feature = "rs-ai")]
     {
         if cfg.provider.api_key.is_none() {
-            if let Some(key) = catalog::find(&cfg.provider.name).and_then(catalog::env_key) {
+            if let Some(key) = catalog_env_key(&cfg.provider.name) {
                 cfg.provider.api_key = Some(key);
             }
         }
@@ -116,7 +113,7 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
     #[cfg(feature = "rs-ai")]
     {
         if cfg.embeddings.api_key.is_none() {
-            if let Some(key) = catalog::find(&cfg.embeddings.provider).and_then(catalog::env_key) {
+            if let Some(key) = catalog_env_key(&cfg.embeddings.provider) {
                 cfg.embeddings.api_key = Some(key);
             }
         }
@@ -140,6 +137,46 @@ fn apply_default_model(cfg: &mut Config) {
     if let Some(model) = default_model_for_provider(&cfg.provider.name) {
         cfg.model = model.to_string();
     }
+}
+
+#[cfg(feature = "rs-ai")]
+fn catalog_env_key(provider: &str) -> Option<String> {
+    let query = provider.trim().to_ascii_lowercase();
+    let vars: &[&str] = match query.as_str() {
+        "openai" | "gpt" => &["OPENAI_API_KEY"],
+        "anthropic" | "claude" => &["ANTHROPIC_API_KEY"],
+        "google" | "gemini" => &["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"],
+        "xai" | "grok" => &["XAI_API_KEY"],
+        "deepseek" | "ds" => &["DEEPSEEK_API_KEY"],
+        "groq" => &["GROQ_API_KEY"],
+        "togetherai" | "together" => &["TOGETHER_API_KEY"],
+        "mistral" => &["MISTRAL_API_KEY"],
+        "fireworks-ai" | "fireworks" => &["FIREWORKS_API_KEY"],
+        "huggingface" | "hf" => &["HF_TOKEN"],
+        "openrouter" | "router" => &["OPENROUTER_API_KEY"],
+        "perplexity" | "pplx" => &["PERPLEXITY_API_KEY"],
+        "cohere" => &["COHERE_API_KEY", "CO_API_KEY"],
+        "cerebras" => &["CEREBRAS_API_KEY"],
+        "venice" => &["VENICE_API_KEY"],
+        "moonshotai" | "moonshot" | "kimi" => &["MOONSHOT_API_KEY"],
+        "minimax" | "mmax" => &["MINIMAX_API_KEY"],
+        "siliconflow" | "sf" => &["SILICONFLOW_API_KEY"],
+        "vercel" | "ai-gateway" => &["AI_GATEWAY_API_KEY"],
+        "github-copilot" | "copilot" => &["GITHUB_TOKEN"],
+        "cloudflare" | "cloudflare-workers-ai" | "workers-ai" | "cf-workers" => {
+            &["CLOUDFLARE_API_KEY"]
+        }
+        "voyage" | "voyageai" => &["VOYAGE_API_KEY"],
+        _ => return None,
+    };
+    for var in vars {
+        if let Ok(val) = std::env::var(var) {
+            if !val.trim().is_empty() {
+                return Some(val);
+            }
+        }
+    }
+    None
 }
 
 pub fn build_provider(cfg: &Config) -> Arc<dyn Provider> {
@@ -451,5 +488,32 @@ mod default_model_tests {
         let mut cfg = config_with("some-private-gateway", "");
         apply_default_model(&mut cfg);
         assert!(cfg.model.is_empty(), "must not invent a model id");
+    }
+
+    #[cfg(feature = "rs-ai")]
+    #[test]
+    fn catalog_env_key_reads_the_first_named_var() {
+        temp_env::with_vars(
+            [
+                ("GEMINI_API_KEY", Some("from-gemini")),
+                ("GOOGLE_GENERATIVE_AI_API_KEY", Some("from-google")),
+            ],
+            || {
+                assert_eq!(catalog_env_key("gemini").as_deref(), Some("from-google"));
+            },
+        );
+    }
+
+    #[cfg(feature = "rs-ai")]
+    #[test]
+    fn catalog_env_key_skips_blank_and_unknown() {
+        temp_env::with_vars(
+            [("XAI_API_KEY", Some("   ")), ("GROQ_API_KEY", None::<&str>)],
+            || {
+                assert_eq!(catalog_env_key("xai"), None);
+                assert_eq!(catalog_env_key("groq"), None);
+                assert_eq!(catalog_env_key("not-a-provider"), None);
+            },
+        );
     }
 }

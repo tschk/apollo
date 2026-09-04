@@ -16,14 +16,22 @@ use std::sync::{Arc, Mutex};
 
 use apollo::agent::hooks::PermissionHook;
 use apollo::agent::mode::NullChannel;
+use apollo::agent::rotary_bridge::{
+    record_rx4_event, runtime_pty_worker, RotaryAgentBridge, RotaryBridgeConfig,
+    Rx4TrajectoryRecorder, ToolHookContext,
+};
 use apollo::agent::AgentRunner;
 use apollo::channels::IncomingMessage;
 use apollo::memory::surreal::SurrealMemory;
 use apollo::providers::traits::{
     ChatRequest, ChatResponse, Provider, ProviderCapabilities, ToolCall,
 };
+use apollo::tools::confine::{confine, ConfineDialect, ConfinePolicy, RunnerKind};
+use apollo::tools::shell::ShellTool;
 use apollo::tools::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
+use std::path::PathBuf;
+use std::time::Duration;
 
 const FINAL_REPLY: &str = "the file says hello";
 
@@ -280,4 +288,352 @@ async fn rx4_engine_persists_the_turn() {
             .any(|(_, content)| content.contains(FINAL_REPLY)),
         "rx4 reply not persisted: {history:?}"
     );
+}
+
+#[tokio::test]
+async fn rx4_engine_records_tool_steps_on_the_trajectory() {
+    let h = harness().await;
+    h.runner
+        .handle_message(
+            &message("rx4-traj", "read hello.txt"),
+            &NullChannel::new("test"),
+        )
+        .await
+        .unwrap();
+
+    let traj = h
+        .runner
+        .get_trajectory("rx4-traj")
+        .await
+        .expect("trajectory must be collected");
+    assert!(
+        traj.tool_calls >= 1,
+        "rx4 events were not subscribed into the trajectory: {traj:?}"
+    );
+    assert!(
+        traj.steps
+            .iter()
+            .any(|step| step.action.as_deref() == Some("probe")),
+        "probe tool step missing: {:?}",
+        traj.steps
+    );
+}
+
+struct ExecThenTextProvider {
+    calls: AtomicUsize,
+}
+
+impl ExecThenTextProvider {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ExecThenTextProvider {
+    fn name(&self) -> &str {
+        "exec-then-text"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            native_tools: true,
+            streaming: false,
+            vision: false,
+            max_context: 32_000,
+            native_web_search: false,
+        }
+    }
+
+    async fn chat(&self, _request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            Ok(ChatResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_exec".to_string(),
+                    name: "exec".to_string(),
+                    arguments: r#"{"command":"printf confined-ok"}"#.to_string(),
+                }],
+                usage: None,
+            })
+        } else {
+            Ok(ChatResponse {
+                text: Some(FINAL_REPLY.to_string()),
+                tool_calls: vec![],
+                usage: None,
+            })
+        }
+    }
+}
+
+#[tokio::test]
+async fn rx4_engine_confines_exec_and_records_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let memory = SurrealMemory::new(dir.path()).await.unwrap();
+    let provider = Arc::new(ExecThenTextProvider::new());
+    let tool: Arc<dyn Tool> = Arc::new(
+        ShellTool::new(
+            dir.path().to_path_buf(),
+            Arc::new(apollo::policy::ExecutionPolicy::default()),
+        )
+        .with_confine(ConfinePolicy::host()),
+    );
+    let runner = AgentRunner::new(
+        Arc::clone(&provider) as Arc<dyn Provider>,
+        vec![tool],
+        Arc::new(memory),
+        "you are a test agent",
+        "test-model",
+    )
+    .with_workspace(dir.path().to_path_buf());
+
+    let response = runner
+        .handle_message(&message("rx4-exec", "run it"), &NullChannel::new("test"))
+        .await
+        .unwrap();
+    assert_eq!(response, FINAL_REPLY);
+
+    let traj = runner
+        .get_trajectory("rx4-exec")
+        .await
+        .expect("trajectory must be collected");
+    assert!(
+        traj.steps
+            .iter()
+            .any(|step| step.action.as_deref() == Some("exec")),
+        "exec step missing: {:?}",
+        traj.steps
+    );
+}
+
+#[test]
+fn confine_host_runner_is_not_a_silent_pass() {
+    let argv = vec!["printf".into(), "ok".into()];
+    let out = confine(&argv, &ConfinePolicy::host());
+    assert_eq!(out.dialect(), ConfineDialect::Runner(RunnerKind::Host));
+    assert_eq!(out.argv(), Some(argv.as_slice()));
+}
+
+#[test]
+fn confine_denies_instead_of_passing_an_unusable_isolator() {
+    let out = confine(
+        &["echo".into(), "hi".into()],
+        &ConfinePolicy::required(Some(PathBuf::from("/definitely/missing/boxlite"))),
+    );
+    assert_eq!(out.dialect(), ConfineDialect::Denial);
+    assert!(out.argv().is_none());
+}
+
+struct SilentProvider;
+
+#[async_trait]
+impl Provider for SilentProvider {
+    fn name(&self) -> &str {
+        "silent"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            native_tools: true,
+            streaming: false,
+            vision: false,
+            max_context: 32_000,
+            native_web_search: false,
+        }
+    }
+
+    async fn chat(&self, _request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
+        Ok(ChatResponse {
+            text: Some(String::new()),
+            tool_calls: vec![],
+            usage: None,
+        })
+    }
+}
+
+fn rotary_bridge_for_tools(tools: Vec<Arc<dyn Tool>>) -> RotaryAgentBridge {
+    RotaryAgentBridge::new(RotaryBridgeConfig {
+        provider: Arc::new(SilentProvider),
+        tools,
+        system_prompt: String::new(),
+        model: "test".into(),
+        workspace: PathBuf::from("."),
+        max_tool_iterations: 4,
+        auto_compact_after: 0,
+        cost_tracker: None,
+        hook_ctx: ToolHookContext::default(),
+    })
+}
+
+#[tokio::test]
+async fn rx4_bridge_write_stdin_uses_the_pty_worker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let shell = ShellTool::new(
+        tmp.path().to_path_buf(),
+        Arc::new(apollo::policy::ExecutionPolicy::default()),
+    )
+    .with_confine(ConfinePolicy::host());
+    let worker = shell.pty_worker();
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(shell)];
+    let attached = runtime_pty_worker(&tools);
+    assert!(
+        Arc::ptr_eq(&attached, &worker),
+        "rotary run path must attach the shell worker"
+    );
+
+    let bridge = rotary_bridge_for_tools(tools).with_pty_worker(attached);
+    assert!(
+        bridge
+            .pty_worker()
+            .is_some_and(|pty| Arc::ptr_eq(&pty, &worker)),
+        "pty must be populated on the rotary run path"
+    );
+
+    let id = worker
+        .spawn(
+            confine(
+                &["sh".into(), "-c".into(), "read x; printf %s \"$x\"".into()],
+                &ConfinePolicy::host(),
+            ),
+            tmp.path(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ToolExecutionStart(rx4::ToolCall {
+            id: id.clone(),
+            name: "exec".into(),
+            arguments: "{}".into(),
+        }),
+    );
+
+    bridge.write_stdin(&id, b"bridge-hi\n").await.unwrap();
+    worker.close_stdin(&id).await.unwrap();
+    let output = worker.wait(&id, Duration::from_secs(5)).await.unwrap();
+    assert!(output.stdout.contains("bridge-hi"), "{}", output.stdout);
+    assert!(!id.is_empty());
+}
+
+#[test]
+fn rx4_new_events_are_recorded_on_the_trajectory() {
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::RetryReason {
+            retry_reason: "sandbox deny".into(),
+            layer: "NestedFs".into(),
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ProcessStdin {
+            process_id: "p1".into(),
+            bytes: 4,
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::RequestPermissions {
+            tool: "write".into(),
+            paths: vec!["src/lib.rs".into()],
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::PatchHunk {
+            path: "src/lib.rs".into(),
+            hunk: "@@ -1 +1 @@".into(),
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::SelfHealing {
+            attempt: 1,
+            max_attempts: 3,
+            errors: vec!["timeout".into()],
+        },
+    );
+    let (steps, _) = recorder.take_steps();
+    let actions: Vec<_> = steps
+        .iter()
+        .filter_map(|step| step.action.as_deref())
+        .collect();
+    assert_eq!(
+        actions,
+        ["retry", "stdin", "permissions", "patch", "recovery"]
+    );
+}
+
+#[test]
+fn rx4_sandbox_escalate_records_retry_and_stays_fail_closed() {
+    let deny = rx4::SandboxError::PathDenied("/etc/passwd".into());
+    let retry = rx4::escalate_on_deny(rx4::SandboxLayer::Userspace, &deny).unwrap();
+    assert_eq!(retry.to, rx4::SandboxLayer::NestedFs);
+
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::RetryReason {
+            retry_reason: retry.retry_reason,
+            layer: format!("{:?}", retry.to),
+        },
+    );
+    let (steps, _) = recorder.take_steps();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].action.as_deref(), Some("retry"));
+    assert_eq!(steps[0].action_args.as_deref(), Some("NestedFs"));
+    assert!(!steps[0].success);
+
+    assert!(
+        rx4::escalate_on_deny(rx4::SandboxLayer::GitReadOnly, &deny).is_err(),
+        "top layer must deny instead of silently passing"
+    );
+}
+
+#[test]
+fn rx4_spilled_tool_result_records_a_spill_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "x".repeat(20_000);
+    let spilled = rx4::tools::spill::bound_tool_output(&body, 1024, dir.path()).unwrap();
+    assert!(spilled.spilled);
+    assert!(rx4::tools::spill::locator_is_file(&spilled.locator));
+
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ToolExecutionStart(rx4::ToolCall {
+            id: "c-spill".into(),
+            name: "exec".into(),
+            arguments: "{}".into(),
+        }),
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ToolExecutionEnd(rx4::ToolResult {
+            id: "c-spill".into(),
+            content: spilled.preview,
+            is_error: false,
+            error_kind: None,
+        }),
+    );
+    let (steps, _) = recorder.take_steps();
+    assert!(
+        steps
+            .iter()
+            .any(|step| step.action.as_deref() == Some("exec")),
+        "tool step missing: {:?}",
+        steps
+    );
+    let spill = steps
+        .iter()
+        .find(|step| step.action.as_deref() == Some("spill"))
+        .expect("spill step missing");
+    assert_eq!(spill.observation.as_deref(), Some(spilled.locator.as_str()));
 }

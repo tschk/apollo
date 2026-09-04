@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::child_proc;
+use super::confine::{confine, ConfineOutcome, ConfinePolicy};
+use super::pty_worker::PtyWorker;
 use super::traits::*;
 use crate::policy::ExecutionPolicy;
 use crate::text::truncate_chars_counted;
@@ -19,6 +21,8 @@ pub struct ShellTool {
     workspace: PathBuf,
     timeout_secs: u64,
     policy: Arc<ExecutionPolicy>,
+    confine: ConfinePolicy,
+    pty: Arc<PtyWorker>,
 }
 
 impl ShellTool {
@@ -27,12 +31,28 @@ impl ShellTool {
             workspace,
             timeout_secs: 120,
             policy,
+            confine: ConfinePolicy::runtime_default(),
+            pty: Arc::new(PtyWorker::new()),
         }
     }
 
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
         self
+    }
+
+    pub fn with_confine(mut self, confine: ConfinePolicy) -> Self {
+        self.confine = confine;
+        self
+    }
+
+    pub fn with_pty_worker(mut self, pty: Arc<PtyWorker>) -> Self {
+        self.pty = pty;
+        self
+    }
+
+    pub fn pty_worker(&self) -> Arc<PtyWorker> {
+        Arc::clone(&self.pty)
     }
 }
 
@@ -44,12 +64,19 @@ struct ShellArgs {
     cwd: Option<String>,
     /// Timeout in seconds
     timeout: Option<u64>,
+    stdin: Option<String>,
+    process_id: Option<String>,
+    pty: Option<bool>,
 }
 
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
         "exec"
+    }
+
+    fn pty_worker(&self) -> Option<Arc<PtyWorker>> {
+        Some(Arc::clone(&self.pty))
     }
 
     fn spec(&self) -> ToolSpec {
@@ -142,10 +169,64 @@ impl Tool for ShellTool {
             self.workspace.clone()
         };
 
-        let mut command = tokio::process::Command::new("bash");
+        if let Some(process_id) = args.process_id.as_deref() {
+            if let Some(stdin) = args.stdin.as_deref() {
+                self.pty.write_stdin(process_id, stdin.as_bytes()).await?;
+            }
+            return Ok(ToolResult::success(format!("wrote stdin to {process_id}")));
+        }
+
+        let raw_argv = vec!["bash".to_string(), "-c".to_string(), args.command.clone()];
+        let runner = confine(&raw_argv, &self.confine);
+        let confined = match &runner {
+            ConfineOutcome::Denial { reason } => {
+                return Ok(ToolResult::error(format!("⛔ Confined: {reason}")));
+            }
+            ConfineOutcome::Runner { argv, .. } => argv.clone(),
+        };
+
+        let use_pty = args.pty.unwrap_or(false);
+        if use_pty || args.stdin.is_some() {
+            let process_id = self.pty.spawn(runner, &cwd, use_pty).await?;
+            if let Some(stdin) = args.stdin.as_deref() {
+                self.pty.write_stdin(&process_id, stdin.as_bytes()).await?;
+                if !use_pty {
+                    self.pty.close_stdin(&process_id).await?;
+                }
+            }
+            let output = self
+                .pty
+                .wait(&process_id, Duration::from_secs(timeout))
+                .await?;
+            let result = if output.stdout.is_empty() && !output.stderr.is_empty() {
+                output.stderr
+            } else if !output.stderr.is_empty() {
+                format!("{}\n{}", output.stdout, output.stderr)
+            } else {
+                output.stdout
+            };
+            let truncated = match truncate_chars_counted(&result, 20_000) {
+                Some((head, dropped)) => format!("{}...\n[truncated {} chars]", head, dropped),
+                None => result,
+            };
+            return Ok(if output.success {
+                ToolResult::success(format!("process_id={process_id}\n{truncated}"))
+            } else {
+                ToolResult::error(format!("process_id={process_id}: {truncated}"))
+            });
+        }
+
+        let (program, rest) = match confined.split_first() {
+            Some(parts) => parts,
+            None => {
+                return Ok(ToolResult::error(
+                    "⛔ Confined: empty runner argv".to_string(),
+                ));
+            }
+        };
+        let mut command = tokio::process::Command::new(program);
         command
-            .arg("-c")
-            .arg(&args.command)
+            .args(rest)
             .current_dir(&cwd)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -350,7 +431,8 @@ mod tests {
         let tool = super::ShellTool::new(
             tmp.path().to_path_buf(),
             std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
-        );
+        )
+        .with_confine(crate::tools::confine::ConfinePolicy::host());
         let args = serde_json::json!({ "command": "env" }).to_string();
         let result = crate::tools::Tool::execute(&tool, &args).await.unwrap();
         for line in result.output.lines() {
@@ -369,7 +451,8 @@ mod tests {
         let tool = super::ShellTool::new(
             tmp.path().to_path_buf(),
             std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
-        );
+        )
+        .with_confine(crate::tools::confine::ConfinePolicy::host());
         let args = serde_json::json!({ "command": "true", "timeout": u64::MAX }).to_string();
         // Would panic inside Duration/timeout arithmetic without the clamp.
         let result = crate::tools::Tool::execute(&tool, &args).await.unwrap();
@@ -383,7 +466,8 @@ mod tests {
         let tool = super::ShellTool::new(
             tmp.path().to_path_buf(),
             std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
-        );
+        )
+        .with_confine(crate::tools::confine::ConfinePolicy::host());
         let args = serde_json::json!({
             "command": format!("sleep 3; touch {}", marker.display()),
             "timeout": 1,
@@ -408,7 +492,8 @@ mod tests {
         let tool = super::ShellTool::new(
             tmp.path().to_path_buf(),
             std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
-        );
+        )
+        .with_confine(crate::tools::confine::ConfinePolicy::host());
         let args = serde_json::json!({
             "command": "printf '日%.0s' {1..30000}"
         })
@@ -423,6 +508,88 @@ mod tests {
         assert!(
             body.contains("[truncated 10000 chars]"),
             "footer must report the real dropped char count"
+        );
+    }
+
+    #[tokio::test]
+    async fn confine_denial_never_spawns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = super::ShellTool::new(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
+        )
+        .with_confine(crate::tools::confine::ConfinePolicy::host());
+        let args = serde_json::json!({ "command": "rm -rf /" }).to_string();
+        let result = crate::tools::Tool::execute(&tool, &args).await.unwrap();
+        assert!(result.is_error, "got: {}", result.output);
+        assert!(
+            result.output.contains("Blocked") || result.output.contains("Confined"),
+            "got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn stdin_session_exposes_process_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = super::ShellTool::new(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
+        )
+        .with_confine(crate::tools::confine::ConfinePolicy::host());
+        let args = serde_json::json!({
+            "command": "cat",
+            "stdin": "from-stdin\n"
+        })
+        .to_string();
+        let result = crate::tools::Tool::execute(&tool, &args).await.unwrap();
+        assert!(!result.is_error, "got: {}", result.output);
+        assert!(result.output.contains("process_id="), "{}", result.output);
+        assert!(result.output.contains("from-stdin"), "{}", result.output);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_stdin_path_confines_the_isolator_exactly_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let isolator = tmp.path().join("fake-isolator");
+        let argv_log = tmp.path().join("isolator-argv");
+        std::fs::write(
+            &isolator,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > '{}'\nif [ \"$1\" = exec ] && [ \"$2\" = -- ]; then shift 2; fi\nexec \"$@\"\n",
+                argv_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&isolator, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let tool = super::ShellTool::new(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
+        )
+        .with_confine(crate::tools::confine::ConfinePolicy::required(Some(
+            isolator.clone(),
+        )));
+        let args = serde_json::json!({
+            "command": "cat",
+            "stdin": "once\n"
+        })
+        .to_string();
+        let result = crate::tools::Tool::execute(&tool, &args).await.unwrap();
+        assert!(!result.is_error, "got: {}", result.output);
+        assert!(result.output.contains("once"), "{}", result.output);
+
+        let recorded = std::fs::read_to_string(&argv_log).unwrap();
+        let hits = recorded
+            .lines()
+            .filter(|line| *line == isolator.to_string_lossy().as_ref())
+            .count();
+        assert_eq!(
+            hits, 1,
+            "final argv must contain the isolator exactly once, got:\n{recorded}"
         );
     }
 }

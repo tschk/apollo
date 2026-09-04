@@ -16,6 +16,7 @@ pub mod child_proc;
 #[cfg(feature = "swarm")]
 pub mod coding_swarm;
 pub mod config_tool;
+pub mod confine;
 pub mod cron_tool;
 pub mod doctor;
 pub mod dynamic;
@@ -33,6 +34,7 @@ pub mod mode_switch;
 pub mod network;
 #[cfg(feature = "computer-use-praefectus")]
 pub mod praefectus;
+pub mod pty_worker;
 pub mod sandbox;
 pub mod session;
 pub mod shell;

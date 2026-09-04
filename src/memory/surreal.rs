@@ -874,7 +874,7 @@ fn unpack_vector_into(encoded: &str, scratch: &mut Vec<u8>, out: &mut Vec<f32>) 
     }
     out.reserve(scratch.len() / 4);
     for chunk in scratch.as_chunks::<4>().0 {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        out.push(f32::from_le_bytes(*chunk));
     }
 }
 

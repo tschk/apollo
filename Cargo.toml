@@ -81,6 +81,7 @@ desktop = ["plugin-browser", "computer-use-praefectus"]
 all-plugins = ["plugin-web", "plugin-browser", "plugin-skills", "plugin-advanced", "computer-use-praefectus"]
 full = ["all-channels", "all-providers", "all-plugins", "swarm"]
 computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
+boxlite = []
 
 [dependencies]
 # Rotary (rx4) — agent harness engine providing the core agent loop, tools,
@@ -101,7 +102,7 @@ computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 # Deliberately off: `builtin-tools` (apollo registers its own tools; also
 # pulls in the fff/git2/notify stack), `mcp` (apollo has src/mcp_server.rs),
 # `zkr-memory` (gates rx4's self_improve; apollo depends on zkr directly).
-rx4 = { git = "https://github.com/tschk/rotary.git", rev = "441ce524ef8b3ec2372227ba35b91fad0bc4389a", default-features = false, features = ["providers", "skills", "graph-memory"] }
+rx4 = { git = "https://github.com/tschk/rotary.git", rev = "3aab31e794a49f9d2ae399232441439ae3f35823", default-features = false, features = ["providers", "skills", "graph-memory"] }
 
 # Async runtime (optimized features only)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }
@@ -163,7 +164,7 @@ jsonwebtoken = { version = "9", optional = true, default-features = false, featu
 tokio-tungstenite = { version = "0.29", optional = true, default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 rs_ai = { version = "0.2.31", optional = true }
 rs_ai_core = { version = "0.2.31", optional = true }
-rs_ai_providers = { version = "0.2.32", optional = true, features = ["chatgpt", "gemini", "openai-compatible", "xai", "cloudflare", "claude", "cohere", "voyage"] }
+rs_ai_providers = { version = "0.2.31", optional = true, features = ["chatgpt", "gemini", "openai-compatible", "xai", "cloudflare", "claude", "cohere", "voyage"] }
 rs_ai_oauth = { version = "0.2.31", optional = true, default-features = false }
 
 [dev-dependencies]

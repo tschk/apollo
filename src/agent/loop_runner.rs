@@ -723,7 +723,7 @@ impl AgentRunner {
         // ── rx4 engine ──
         // Context assembly above stays apollo's; from here rx4 owns the loop.
         let text = self
-            .run_via_rotary(&messages, &tools_snapshot, &main_model)
+            .run_via_rotary(&messages, &tools_snapshot, &main_model, &msg.chat_id)
             .await?;
         self.finish_execution(msg, &text, &delivery).await
     }
@@ -742,8 +742,11 @@ impl AgentRunner {
         messages: &[ChatMessage],
         tools: &[Arc<dyn Tool>],
         model: &str,
+        chat_id: &str,
     ) -> anyhow::Result<String> {
-        use crate::agent::rotary_bridge::{RotaryAgentBridge, RotaryBridgeConfig};
+        use crate::agent::rotary_bridge::{
+            RotaryAgentBridge, RotaryBridgeConfig, Rx4TrajectoryRecorder,
+        };
 
         // rx4 takes the system prompt out of band, so collapse apollo's system
         // messages (base prompt, mode injection, skills, group memory) into one.
@@ -796,23 +799,29 @@ impl AgentRunner {
                 .with_stream(self.stream_sink()),
             },
             model_registry,
-        );
+        )
+        .with_pty_worker(crate::agent::rotary_bridge::runtime_pty_worker(tools));
 
         // ── Steering queue ──
         // rx4's `messages_handle()` exposes the shared message buffer the tool
         // loop reads at the top of every iteration, so a message pushed here
         // while `prompt()` is running is visible to the next tool cycle. This
         // mirrors the legacy loop's per-round steering drain.
+        let recorder = Arc::new(std::sync::Mutex::new(Rx4TrajectoryRecorder::default()));
+        if self.agent_config.trajectory_enabled {
+            bridge.subscribe_trajectory(Arc::clone(&recorder));
+        }
+
         let messages_handle = bridge.messages_handle();
         let steering_queue = Arc::clone(&self.steering_queue);
         let prompt_fut = bridge.run_prompt_with_history(&prompt.content, &history);
         tokio::pin!(prompt_fut);
 
-        loop {
+        let outcome = loop {
             tokio::select! {
                 biased;
                 result = &mut prompt_fut => {
-                    return result;
+                    break result;
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                     let mut queue = steering_queue.lock().unwrap();
@@ -832,7 +841,17 @@ impl AgentRunner {
                     }
                 }
             }
+        };
+
+        if self.agent_config.trajectory_enabled {
+            let (steps, iterations) = recorder.lock().unwrap().take_steps();
+            let mut trajs = self.trajectories.write().await;
+            if let Some(trajectory) = trajs.get_mut(chat_id) {
+                trajectory.absorb_recorded_steps(steps, iterations);
+            }
         }
+
+        outcome
     }
 
     /// Finish execution — persist, emit events, finalize draft
