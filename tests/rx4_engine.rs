@@ -16,7 +16,10 @@ use std::sync::{Arc, Mutex};
 
 use apollo::agent::hooks::PermissionHook;
 use apollo::agent::mode::NullChannel;
-use apollo::agent::rotary_bridge::{record_rx4_event, Rx4TrajectoryRecorder};
+use apollo::agent::rotary_bridge::{
+    record_rx4_event, runtime_pty_worker, RotaryAgentBridge, RotaryBridgeConfig,
+    Rx4TrajectoryRecorder, ToolHookContext,
+};
 use apollo::agent::AgentRunner;
 use apollo::channels::IncomingMessage;
 use apollo::memory::surreal::SurrealMemory;
@@ -24,7 +27,6 @@ use apollo::providers::traits::{
     ChatRequest, ChatResponse, Provider, ProviderCapabilities, ToolCall,
 };
 use apollo::tools::confine::{confine, ConfineDialect, ConfinePolicy, RunnerKind};
-use apollo::tools::pty_worker::PtyWorker;
 use apollo::tools::shell::ShellTool;
 use apollo::tools::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
@@ -425,15 +427,78 @@ fn confine_denies_instead_of_passing_an_unusable_isolator() {
     assert!(out.argv().is_none());
 }
 
+struct SilentProvider;
+
+#[async_trait]
+impl Provider for SilentProvider {
+    fn name(&self) -> &str {
+        "silent"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            native_tools: true,
+            streaming: false,
+            vision: false,
+            max_context: 32_000,
+            native_web_search: false,
+        }
+    }
+
+    async fn chat(&self, _request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
+        Ok(ChatResponse {
+            text: Some(String::new()),
+            tool_calls: vec![],
+            usage: None,
+        })
+    }
+}
+
+fn rotary_bridge_for_tools(tools: Vec<Arc<dyn Tool>>) -> RotaryAgentBridge {
+    RotaryAgentBridge::new(RotaryBridgeConfig {
+        provider: Arc::new(SilentProvider),
+        tools,
+        system_prompt: String::new(),
+        model: "test".into(),
+        workspace: PathBuf::from("."),
+        max_tool_iterations: 4,
+        auto_compact_after: 0,
+        cost_tracker: None,
+        hook_ctx: ToolHookContext::default(),
+    })
+}
+
 #[tokio::test]
 async fn rx4_bridge_write_stdin_uses_the_pty_worker() {
-    let worker = Arc::new(PtyWorker::new());
     let tmp = tempfile::tempdir().unwrap();
+    let shell = ShellTool::new(
+        tmp.path().to_path_buf(),
+        Arc::new(apollo::policy::ExecutionPolicy::default()),
+    )
+    .with_confine(ConfinePolicy::host());
+    let worker = shell.pty_worker();
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(shell)];
+    let attached = runtime_pty_worker(&tools);
+    assert!(
+        Arc::ptr_eq(&attached, &worker),
+        "rotary run path must attach the shell worker"
+    );
+
+    let bridge = rotary_bridge_for_tools(tools).with_pty_worker(attached);
+    assert!(
+        bridge
+            .pty_worker()
+            .is_some_and(|pty| Arc::ptr_eq(&pty, &worker)),
+        "pty must be populated on the rotary run path"
+    );
+
     let id = worker
         .spawn(
-            &["sh".into(), "-c".into(), "read x; printf %s \"$x\"".into()],
+            confine(
+                &["sh".into(), "-c".into(), "read x; printf %s \"$x\"".into()],
+                &ConfinePolicy::host(),
+            ),
             tmp.path(),
-            &ConfinePolicy::host(),
             false,
         )
         .await
@@ -449,7 +514,7 @@ async fn rx4_bridge_write_stdin_uses_the_pty_worker() {
         }),
     );
 
-    worker.write_stdin(&id, b"bridge-hi\n").await.unwrap();
+    bridge.write_stdin(&id, b"bridge-hi\n").await.unwrap();
     worker.close_stdin(&id).await.unwrap();
     let output = worker.wait(&id, Duration::from_secs(5)).await.unwrap();
     assert!(output.stdout.contains("bridge-hi"), "{}", output.stdout);

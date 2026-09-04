@@ -30,6 +30,13 @@ use crate::tools::pty_worker::PtyWorker;
 use crate::tools::{Tool as UnthinkclawTool, ToolResult as UnthinkclawToolResult, ToolSpec};
 use crate::trajectory::{Trajectory, TrajectoryStep};
 
+pub fn runtime_pty_worker(tools: &[Arc<dyn UnthinkclawTool>]) -> Arc<PtyWorker> {
+    tools
+        .iter()
+        .find_map(|tool| tool.pty_worker())
+        .unwrap_or_else(|| Arc::new(PtyWorker::new()))
+}
+
 /// Everything a tool call must be wrapped in.
 ///
 /// The same sequence runs around every tool: the `BeforeToolCall` lifecycle
@@ -718,7 +725,7 @@ impl RotaryAgentBridge {
             agent,
             hook_ctx: config.hook_ctx,
             messages: Vec::new(),
-            pty: None,
+            pty: Some(runtime_pty_worker(&config.tools)),
         }
     }
 

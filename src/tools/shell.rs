@@ -75,6 +75,10 @@ impl Tool for ShellTool {
         "exec"
     }
 
+    fn pty_worker(&self) -> Option<Arc<PtyWorker>> {
+        Some(Arc::clone(&self.pty))
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "exec".to_string(),
@@ -173,19 +177,17 @@ impl Tool for ShellTool {
         }
 
         let raw_argv = vec!["bash".to_string(), "-c".to_string(), args.command.clone()];
-        let confined = match confine(&raw_argv, &self.confine) {
+        let runner = confine(&raw_argv, &self.confine);
+        let confined = match &runner {
             ConfineOutcome::Denial { reason } => {
                 return Ok(ToolResult::error(format!("⛔ Confined: {reason}")));
             }
-            ConfineOutcome::Runner { argv, .. } => argv,
+            ConfineOutcome::Runner { argv, .. } => argv.clone(),
         };
 
         let use_pty = args.pty.unwrap_or(false);
         if use_pty || args.stdin.is_some() {
-            let process_id = self
-                .pty
-                .spawn(&confined, &cwd, &self.confine, use_pty)
-                .await?;
+            let process_id = self.pty.spawn(runner, &cwd, use_pty).await?;
             if let Some(stdin) = args.stdin.as_deref() {
                 self.pty.write_stdin(&process_id, stdin.as_bytes()).await?;
                 if !use_pty {
@@ -544,5 +546,50 @@ mod tests {
         assert!(!result.is_error, "got: {}", result.output);
         assert!(result.output.contains("process_id="), "{}", result.output);
         assert!(result.output.contains("from-stdin"), "{}", result.output);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_stdin_path_confines_the_isolator_exactly_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let isolator = tmp.path().join("fake-isolator");
+        let argv_log = tmp.path().join("isolator-argv");
+        std::fs::write(
+            &isolator,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > '{}'\nif [ \"$1\" = exec ] && [ \"$2\" = -- ]; then shift 2; fi\nexec \"$@\"\n",
+                argv_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&isolator, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let tool = super::ShellTool::new(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
+        )
+        .with_confine(crate::tools::confine::ConfinePolicy::required(Some(
+            isolator.clone(),
+        )));
+        let args = serde_json::json!({
+            "command": "cat",
+            "stdin": "once\n"
+        })
+        .to_string();
+        let result = crate::tools::Tool::execute(&tool, &args).await.unwrap();
+        assert!(!result.is_error, "got: {}", result.output);
+        assert!(result.output.contains("once"), "{}", result.output);
+
+        let recorded = std::fs::read_to_string(&argv_log).unwrap();
+        let hits = recorded
+            .lines()
+            .filter(|line| *line == isolator.to_string_lossy().as_ref())
+            .count();
+        assert_eq!(
+            hits, 1,
+            "final argv must contain the isolator exactly once, got:\n{recorded}"
+        );
     }
 }

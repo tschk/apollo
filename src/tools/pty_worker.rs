@@ -9,7 +9,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use super::child_proc;
-use super::confine::{confine, ConfineOutcome, ConfinePolicy};
+use super::confine::ConfineOutcome;
 
 #[derive(Debug, Clone)]
 pub struct PtyOutput {
@@ -46,12 +46,11 @@ impl PtyWorker {
 
     pub async fn spawn(
         &self,
-        argv: &[String],
+        runner: ConfineOutcome,
         cwd: &Path,
-        policy: &ConfinePolicy,
         pty: bool,
     ) -> anyhow::Result<String> {
-        let argv = match confine(argv, policy) {
+        let argv = match runner {
             ConfineOutcome::Denial { reason } => {
                 anyhow::bail!("confine denied spawn: {reason}");
             }
@@ -248,7 +247,13 @@ fn open_pty() -> std::io::Result<(std::fs::File, std::fs::File)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::confine::ConfinePolicy;
+    use crate::tools::confine::{confine, ConfinePolicy};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    fn host_runner(argv: Vec<String>) -> ConfineOutcome {
+        confine(&argv, &ConfinePolicy::host())
+    }
 
     #[tokio::test]
     async fn write_stdin_reaches_a_pipe_child() {
@@ -256,9 +261,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let id = worker
             .spawn(
-                &["sh".into(), "-c".into(), "read x; printf %s \"$x\"".into()],
+                host_runner(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "read x; printf %s \"$x\"".into(),
+                ]),
                 tmp.path(),
-                &ConfinePolicy::host(),
                 false,
             )
             .await
@@ -285,9 +293,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = worker
             .spawn(
-                &["bash".into(), "-c".into(), "rm -rf /".into()],
+                confine(
+                    &["bash".into(), "-c".into(), "rm -rf /".into()],
+                    &ConfinePolicy::host(),
+                ),
                 tmp.path(),
-                &ConfinePolicy::host(),
                 false,
             )
             .await
@@ -302,9 +312,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let id = worker
             .spawn(
-                &["sh".into(), "-c".into(), "read x; printf %s \"$x\"".into()],
+                host_runner(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "read x; printf %s \"$x\"".into(),
+                ]),
                 tmp.path(),
-                &ConfinePolicy::host(),
                 true,
             )
             .await
@@ -318,5 +331,64 @@ mod tests {
             output.stderr
         );
         assert_eq!(output.process_id, id);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn required_isolation_wraps_the_isolator_exactly_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let isolator = tmp.path().join("fake-isolator");
+        let argv_log = tmp.path().join("isolator-argv");
+        std::fs::write(
+            &isolator,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > '{}'\nif [ \"$1\" = exec ] && [ \"$2\" = -- ]; then shift 2; fi\nexec \"$@\"\n",
+                argv_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&isolator, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let policy = ConfinePolicy::required(Some(isolator.clone()));
+        let runner = confine(
+            &["sh".into(), "-c".into(), "read x; printf %s \"$x\"".into()],
+            &policy,
+        );
+        match &runner {
+            ConfineOutcome::Runner { argv, .. } => {
+                let hits = argv
+                    .iter()
+                    .filter(|part| *part == isolator.to_string_lossy().as_ref())
+                    .count();
+                assert_eq!(hits, 1, "confine itself must wrap once: {argv:?}");
+            }
+            other => panic!("expected runner, got {other:?}"),
+        }
+
+        let worker = PtyWorker::new();
+        let id = worker.spawn(runner, tmp.path(), false).await.unwrap();
+        worker.write_stdin(&id, b"once\n").await.unwrap();
+        worker.close_stdin(&id).await.unwrap();
+        let output = worker.wait(&id, Duration::from_secs(5)).await.unwrap();
+        assert!(output.success, "{}", output.stderr);
+        assert!(output.stdout.contains("once"), "{}", output.stdout);
+
+        let recorded = std::fs::read_to_string(&argv_log).unwrap();
+        let hits = recorded
+            .lines()
+            .filter(|line| *line == isolator.to_string_lossy().as_ref())
+            .count();
+        assert_eq!(
+            hits, 1,
+            "final argv must contain the isolator exactly once, got:\n{recorded}"
+        );
+        assert!(
+            !recorded.contains(&format!(
+                "{}\nexec\n--\n{}",
+                isolator.display(),
+                isolator.display()
+            )),
+            "isolator must not be nested:\n{recorded}"
+        );
     }
 }

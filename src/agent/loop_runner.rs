@@ -799,7 +799,8 @@ impl AgentRunner {
                 .with_stream(self.stream_sink()),
             },
             model_registry,
-        );
+        )
+        .with_pty_worker(crate::agent::rotary_bridge::runtime_pty_worker(tools));
 
         // ── Steering queue ──
         // rx4's `messages_handle()` exposes the shared message buffer the tool

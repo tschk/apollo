@@ -21,7 +21,7 @@ pub use loop_runner::AgentRunner;
 pub use mode::{agent_mode_from_permission_profile, AgentMode, NullChannel};
 pub use rotary_bridge::{
     apply_recorded_steps, build_rx4_skill_engine, chat_message_to_rx4, record_rx4_event,
-    register_apollo_tools, rx4_message_to_chat, RotaryAgentBridge, RotaryBridgeConfig,
-    RotaryProviderAdapter, Rx4TrajectoryRecorder, ToolHookContext,
+    register_apollo_tools, runtime_pty_worker, rx4_message_to_chat, RotaryAgentBridge,
+    RotaryBridgeConfig, RotaryProviderAdapter, Rx4TrajectoryRecorder, ToolHookContext,
 };
 pub use streaming::{stream_channel, StreamChunk, StreamReceiver, StreamSender};
