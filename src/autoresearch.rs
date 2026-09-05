@@ -104,8 +104,9 @@ impl AutoresearchConfig {
         Ok(())
     }
 
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)
+    pub async fn load(path: &Path) -> anyhow::Result<Self> {
+        let content = tokio::fs::read_to_string(path)
+            .await
             .with_context(|| format!("reading autoresearch spec {}", path.display()))?;
         let config: Self = toml::from_str(&content)
             .with_context(|| format!("parsing autoresearch spec {}", path.display()))?;
