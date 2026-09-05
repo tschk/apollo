@@ -137,4 +137,42 @@ mod tests {
         assert!(msg.contains("Transport: telegram"));
         assert!(msg.contains("Respond even without a direct mention"));
     }
+
+    #[test]
+    fn test_is_assistant_topic_empty() {
+        assert!(!is_assistant_topic(""));
+        assert!(!is_assistant_topic("   "));
+        assert!(!is_assistant_topic("\n\t"));
+    }
+
+    #[test]
+    fn test_is_assistant_topic_matches_group_keywords() {
+        // exact matches
+        assert!(is_assistant_topic("apollo"));
+        assert!(is_assistant_topic("plugin"));
+
+        // case insensitivity
+        assert!(is_assistant_topic("ApOlLo"));
+        assert!(is_assistant_topic(" PLUGIN LAYER "));
+
+        // substring matches
+        assert!(is_assistant_topic("tell me about plugins please"));
+        assert!(is_assistant_topic("how do i configure this"));
+    }
+
+    #[test]
+    fn test_is_assistant_topic_matches_general_patterns() {
+        assert!(is_assistant_topic("what can you do?"));
+        assert!(is_assistant_topic("how does this work"));
+        assert!(is_assistant_topic("could you help me?"));
+        assert!(is_assistant_topic("we need to set up the environment"));
+    }
+
+    #[test]
+    fn test_is_assistant_topic_no_match() {
+        assert!(!is_assistant_topic("hello there"));
+        assert!(!is_assistant_topic("I went to the store today"));
+        assert!(!is_assistant_topic("let's grab some coffee"));
+        assert!(!is_assistant_topic("random chat message"));
+    }
 }
