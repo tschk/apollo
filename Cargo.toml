@@ -102,7 +102,7 @@ boxlite = []
 # Deliberately off: `builtin-tools` (apollo registers its own tools; also
 # pulls in the fff/git2/notify stack), `mcp` (apollo has src/mcp_server.rs),
 # `zkr-memory` (gates rx4's self_improve; apollo depends on zkr directly).
-rx4 = { git = "https://github.com/tschk/rotary.git", rev = "3aab31e794a49f9d2ae399232441439ae3f35823", default-features = false, features = ["providers", "skills", "graph-memory"] }
+rx4 = { git = "https://github.com/tschk/rotary.git", rev = "74698cfb8dc4654336f4710fe9d1a9a14a340699", default-features = false, features = ["providers", "skills", "graph-memory"] }
 
 # Async runtime (optimized features only)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }

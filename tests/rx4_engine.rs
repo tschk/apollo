@@ -17,8 +17,9 @@ use std::sync::{Arc, Mutex};
 use apollo::agent::hooks::PermissionHook;
 use apollo::agent::mode::NullChannel;
 use apollo::agent::rotary_bridge::{
-    record_rx4_event, runtime_pty_worker, RotaryAgentBridge, RotaryBridgeConfig,
-    Rx4TrajectoryRecorder, ToolHookContext,
+    record_recovery_action, record_rx4_event, record_rx4_event_value, record_spill_notice,
+    runtime_pty_worker, RotaryAgentBridge, RotaryBridgeConfig, Rx4TrajectoryRecorder,
+    ToolHookContext,
 };
 use apollo::agent::AgentRunner;
 use apollo::channels::IncomingMessage;
@@ -601,7 +602,7 @@ fn rx4_sandbox_escalate_records_retry_and_stays_fail_closed() {
 fn rx4_spilled_tool_result_records_a_spill_step() {
     let dir = tempfile::tempdir().unwrap();
     let body = "x".repeat(20_000);
-    let spilled = rx4::tools::spill::bound_tool_output(&body, 1024, dir.path()).unwrap();
+    let spilled = rx4::tools::spill::bound_tool_output(&body, 1024, dir.path());
     assert!(spilled.spilled);
     assert!(rx4::tools::spill::locator_is_file(&spilled.locator));
 
@@ -616,11 +617,20 @@ fn rx4_spilled_tool_result_records_a_spill_step() {
     );
     record_rx4_event(
         &mut recorder,
+        &rx4::Event::ToolSpill {
+            status: spilled.status,
+            locator: spilled.locator.clone(),
+            original_bytes: spilled.original_bytes,
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
         &rx4::Event::ToolExecutionEnd(rx4::ToolResult {
             id: "c-spill".into(),
-            content: spilled.preview,
+            content: spilled.preview.clone(),
             is_error: false,
             error_kind: None,
+            spill: Some(spilled.notice()),
         }),
     );
     let (steps, _) = recorder.take_steps();
@@ -636,4 +646,122 @@ fn rx4_spilled_tool_result_records_a_spill_step() {
         .find(|step| step.action.as_deref() == Some("spill"))
         .expect("spill step missing");
     assert_eq!(spill.observation.as_deref(), Some(spilled.locator.as_str()));
+}
+
+#[test]
+fn rx4_recovery_actions_are_recorded_on_the_trajectory() {
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_recovery_action(&mut recorder, &rx4::recover_empty_turn(0, 3), "empty_turn");
+    record_recovery_action(&mut recorder, &rx4::recover_empty_turn(1, 3), "empty_turn");
+    record_recovery_action(&mut recorder, &rx4::recover_stuck_tool(0, 3), "stuck_tool");
+    record_recovery_action(&mut recorder, &rx4::RecoveryAction::Retry, "stuck_tool");
+    let (steps, _) = recorder.take_steps();
+    let actions: Vec<_> = steps
+        .iter()
+        .filter_map(|step| step.action.as_deref())
+        .collect();
+    assert_eq!(actions, ["prefill", "nudge", "stuck_tool", "stuck_tool"]);
+    assert_eq!(steps[2].action_args.as_deref(), Some("nudge"));
+    assert_eq!(steps[3].action_args.as_deref(), Some("retry"));
+}
+
+#[test]
+fn rx4_typed_notice_values_are_recorded_on_the_trajectory() {
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_rx4_event_value(
+        &mut recorder,
+        &serde_json::json!({"type": "Prefill", "text": "continue"}),
+    );
+    record_rx4_event_value(
+        &mut recorder,
+        &serde_json::json!({"type": "Nudge", "text": "answer"}),
+    );
+    record_rx4_event_value(
+        &mut recorder,
+        &serde_json::json!({
+            "type": "StuckTool",
+            "action": "Halt",
+            "text": "stuck tool repeated 2 times (halt after 3)"
+        }),
+    );
+    record_rx4_event_value(
+        &mut recorder,
+        &serde_json::json!({"type": "SpillNotice", "locator": ".rx4/spill/out.txt"}),
+    );
+    record_rx4_event_value(
+        &mut recorder,
+        &serde_json::json!({"type": "FailureNotice", "message": "bounded write failed"}),
+    );
+    record_spill_notice(&mut recorder, "file://already-mapped");
+    let (steps, _) = recorder.take_steps();
+    let actions: Vec<_> = steps
+        .iter()
+        .filter_map(|step| step.action.as_deref())
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            "prefill",
+            "nudge",
+            "stuck_tool",
+            "spill",
+            "failure",
+            "spill"
+        ]
+    );
+    assert_eq!(steps[2].action_args.as_deref(), Some("halt"));
+    assert!(!steps[2].success);
+    assert_eq!(steps[3].observation.as_deref(), Some(".rx4/spill/out.txt"));
+}
+
+#[test]
+fn rx4_typed_recovery_spill_and_process_events_are_recorded() {
+    let mut recorder = Rx4TrajectoryRecorder::default();
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::Recovery {
+            action: rx4::RecoveryKind::Prefill,
+            reason: "Continue from where you left off.".into(),
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::Recovery {
+            action: rx4::RecoveryKind::Nudge,
+            reason: "change args".into(),
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ToolSpill {
+            status: rx4::SpillStatus::Spilled,
+            locator: ".rx4/spill/out.txt".into(),
+            original_bytes: 2048,
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ProcessStart {
+            process_id: "p1".into(),
+            program: "cat".into(),
+        },
+    );
+    record_rx4_event(
+        &mut recorder,
+        &rx4::Event::ProcessEnd {
+            process_id: "p1".into(),
+            exit_code: Some(0),
+        },
+    );
+    let (steps, _) = recorder.take_steps();
+    let actions: Vec<_> = steps
+        .iter()
+        .filter_map(|step| step.action.as_deref())
+        .collect();
+    assert_eq!(
+        actions,
+        ["prefill", "nudge", "spill", "process_start", "process_end"]
+    );
+    assert_eq!(steps[2].action_args.as_deref(), Some("spilled:2048"));
+    assert_eq!(steps[2].observation.as_deref(), Some(".rx4/spill/out.txt"));
 }
