@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Idempotent Amp orb setup for apollo (Rust + RocksDB/bindgen deps).
+set -euo pipefail
+
+step() {
+  local label="$1"
+  shift
+  echo "==> ${label}"
+  local start
+  start="$(date +%s)"
+  "$@"
+  echo "    ${label} done in $(( $(date +%s) - start ))s"
+}
+
+need_pkg() {
+  dpkg -s "$1" >/dev/null 2>&1
+}
+
+PACKAGES=(
+  ca-certificates
+  curl
+  build-essential
+  pkg-config
+  cmake
+  libssl-dev
+  clang
+  libclang-dev
+  git
+)
+
+missing=()
+for pkg in "${PACKAGES[@]}"; do
+  if ! need_pkg "$pkg"; then
+    missing+=("$pkg")
+  fi
+done
+
+if ((${#missing[@]})); then
+  step "apt-get update" sudo apt-get update
+  step "install build deps (${missing[*]})" sudo apt-get install -y "${missing[@]}"
+else
+  echo "==> apt packages already present"
+fi
+
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+
+if ! command -v rustup >/dev/null 2>&1; then
+  if [[ -f "$CARGO_HOME/env" ]]; then
+    # shellcheck disable=SC1091
+    source "$CARGO_HOME/env"
+  fi
+fi
+
+if ! command -v rustup >/dev/null 2>&1; then
+  step "install rustup (stable)" bash -c \
+    'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal'
+fi
+
+# shellcheck disable=SC1091
+source "$CARGO_HOME/env"
+
+step "ensure rustfmt + clippy" rustup component add rustfmt clippy
+step "ensure stable toolchain" rustup show
+
+profile_marker="# apollo Amp orb rust toolchain"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+$profile_marker
+if [[ -f "\$HOME/.cargo/env" ]]; then
+  # shellcheck disable=SC1091
+  source "\$HOME/.cargo/env"
+fi
+export CARGO_HOME="\${CARGO_HOME:-\$HOME/.cargo}"
+export RUSTUP_HOME="\${RUSTUP_HOME:-\$HOME/.rustup}"
+EOF
+  echo "==> appended rust env hook to ~/.bash_profile"
+else
+  echo "==> rust env hook already in ~/.bash_profile"
+fi
+
+if [[ -f Cargo.lock ]]; then
+  step "fetch cargo deps (locked)" cargo fetch --locked
+else
+  step "fetch cargo deps" cargo fetch
+fi
+
+echo "==> setup complete"
+command -v rustc
+rustc --version
+cargo --version
