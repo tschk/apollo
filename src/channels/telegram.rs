@@ -18,6 +18,32 @@ use crate::memory::MemoryBackend;
 /// Telegram message length limit
 const TELEGRAM_MAX_LEN: usize = 4096;
 
+/// Static `python3 -c` body for faster-whisper. The audio path is argv[1],
+/// never interpolated into the script (Jules #55).
+const FASTER_WHISPER_SCRIPT: &str = r#"
+import sys
+try:
+    from faster_whisper import WhisperModel
+    model = WhisperModel("tiny", device="cpu", compute_type="int8")
+    segments, _ = model.transcribe(sys.argv[1], language="en")
+    text = " ".join([segment.text for segment in segments])
+    print(text.strip())
+except ImportError:
+    print("ERROR: faster-whisper not installed")
+    sys.exit(1)
+except Exception as e:
+    print(f"ERROR: {e}")
+    sys.exit(1)
+"#;
+
+fn whisper_python_args(audio_path: &std::path::Path) -> Vec<std::ffi::OsString> {
+    vec![
+        std::ffi::OsString::from("-c"),
+        std::ffi::OsString::from(FASTER_WHISPER_SCRIPT),
+        audio_path.as_os_str().to_os_string(),
+    ]
+}
+
 #[derive(Clone, Default)]
 pub struct TelegramIngressFilter {
     pub allowed_chat_ids: Vec<String>,
@@ -209,28 +235,10 @@ impl TelegramChannel {
             );
         }
 
-        let output = tokio::process::Command::new("python3")
-            .arg("-c")
-            .arg(format!(
-                r#"
-import sys
-try:
-    from faster_whisper import WhisperModel
-    model = WhisperModel("tiny", device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(r"{}", language="en")
-    text = " ".join([segment.text for segment in segments])
-    print(text.strip())
-except ImportError:
-    print("ERROR: faster-whisper not installed")
-    sys.exit(1)
-except Exception as e:
-    print(f"ERROR: {{e}}")
-    sys.exit(1)
-"#,
-                temp_path.display()
-            ))
-            .output()
-            .await?;
+        let mut whisper = tokio::process::Command::new("python3");
+        whisper.args(whisper_python_args(&temp_path));
+        crate::tools::child_proc::scrub(&mut whisper);
+        let output = whisper.output().await?;
 
         // Clean up temp file
         let _ = tokio::fs::remove_file(&temp_path).await;
@@ -645,5 +653,20 @@ mod tests {
 
         let text = channel.sticker_text(&sticker).await.unwrap();
         assert_eq!(text, "🎨 cached sticker");
+    }
+
+    #[test]
+    fn whisper_script_takes_path_from_argv_not_interpolation() {
+        let sneaky = std::path::Path::new(r#"/tmp/apollo_voice_"); print('injected') #.ogg"#);
+        let args = whisper_python_args(sneaky);
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "-c");
+        let script = args[1].to_str().expect("script is utf-8");
+        assert!(script.contains("sys.argv[1]"));
+        assert!(
+            !script.contains(sneaky.to_str().unwrap()),
+            "audio path must not be interpolated into python -c"
+        );
+        assert_eq!(args[2], sneaky.as_os_str());
     }
 }

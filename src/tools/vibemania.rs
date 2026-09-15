@@ -87,12 +87,14 @@ impl Tool for VibemaniaTool {
         let vibemania_bin = vibemania_bin.expect("checked above");
 
         // Spawn vibemania directly instead of shelling out through bash.
+        // Flags first, then `--` + goal so a leading `-` cannot be a flag
+        // (Jules #61). Scrub secrets from the inherited environment.
         let mut cmd = tokio::process::Command::new(vibemania_bin);
         cmd.current_dir(&self.workspace)
             .arg("run")
-            .arg(&args.goal)
             .arg("--parallel")
             .arg(parallel.to_string());
+        crate::tools::child_proc::scrub(&mut cmd);
 
         if let Some(ref omodel) = args.orchestrator_model {
             cmd.arg("--orchestrator-model").arg(omodel);
@@ -100,6 +102,7 @@ impl Tool for VibemaniaTool {
         if let Some(ref rmodel) = args.runner_model {
             cmd.arg("--runner-model").arg(rmodel);
         }
+        cmd.arg("--").arg(&args.goal);
 
         let output = cmd.output().await?;
 
