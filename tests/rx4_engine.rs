@@ -601,7 +601,7 @@ fn rx4_sandbox_escalate_records_retry_and_stays_fail_closed() {
 fn rx4_spilled_tool_result_records_a_spill_step() {
     let dir = tempfile::tempdir().unwrap();
     let body = "x".repeat(20_000);
-    let spilled = rx4::tools::spill::bound_tool_output(&body, 1024, dir.path()).unwrap();
+    let spilled = rx4::tools::spill::bound_tool_output(&body, 1024, dir.path());
     assert!(spilled.spilled);
     assert!(rx4::tools::spill::locator_is_file(&spilled.locator));
 
@@ -621,6 +621,7 @@ fn rx4_spilled_tool_result_records_a_spill_step() {
             content: spilled.preview,
             is_error: false,
             error_kind: None,
+            spill: None,
         }),
     );
     let (steps, _) = recorder.take_steps();

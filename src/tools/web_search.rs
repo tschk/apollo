@@ -2,17 +2,11 @@
 //!
 //! Tries backends in order of result quality, using the first one configured:
 //!
-//! 1. **SearXNG** (`SEARXNG_URL`) — a self-hosted metasearch instance. Full web
-//!    results, no third-party key, nothing leaves the machine except the query.
-//! 2. **DuckDuckGo** — keyless, always available. Reads the lite result page
-//!    for a ranked list, and falls back to the Instant Answer API when that
-//!    page is unavailable.
+//! 1. **SearXNG** (`SEARXNG_URL`) — a self-hosted metasearch instance, queried
+//!    through [darash](https://crates.io/crates/darash).
+//! 2. **Darash local** — keyless, always available. In-process DuckDuckGo /
+//!    OpenAlex / Hacker News via `SearchClient::local()`.
 //! 3. **Perplexity** (`PERPLEXITY_API_KEY`) — paid, kept for existing setups.
-//!
-//! The lite endpoint answers 202 with a challenge stub to clients that do not
-//! look like browsers, so the request carries browser headers. That is a
-//! best-effort path by nature: when it is refused the Instant Answer API still
-//! answers "what is X", but only a SearXNG instance gives durable result lists.
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -46,8 +40,8 @@ const DDG_USER_AGENTS: &[&str] = &[
 pub enum Backend {
     /// Self-hosted SearXNG instance at this base URL.
     Searxng(String),
-    /// DuckDuckGo Instant Answer API — no configuration required.
-    DuckDuckGo,
+    /// Darash in-process search (DuckDuckGo / OpenAlex / HN). No configuration.
+    Darash,
     /// Perplexity chat completions with the given API key.
     Perplexity(String),
 }
@@ -63,7 +57,7 @@ impl WebSearchTool {
         }
     }
 
-    /// Pick a backend from the environment. DuckDuckGo is the floor, so this
+    /// Pick a backend from the environment. Darash local is the floor, so this
     /// always yields something usable.
     fn detect_backend() -> Backend {
         if let Ok(url) = std::env::var("SEARXNG_URL") {
@@ -74,7 +68,7 @@ impl WebSearchTool {
         }
         match std::env::var("PERPLEXITY_API_KEY") {
             Ok(key) if !key.trim().is_empty() => Backend::Perplexity(key),
-            _ => Backend::DuckDuckGo,
+            _ => Backend::Darash,
         }
     }
 
@@ -97,27 +91,32 @@ impl WebSearchTool {
     }
 
     async fn search_searxng(base_url: &str, query: &str) -> anyhow::Result<String> {
-        let resp = Self::client()?
-            .get(format!("{base_url}/search"))
-            .query(&[("q", query), ("format", "json")])
-            .send()
-            .await?;
+        let client = darash::SearchClient::new(base_url)
+            .map_err(|e| anyhow::anyhow!("darash searxng client: {e}"))?;
+        let response = client
+            .search(&darash::SearchQuery::new(query))
+            .await
+            .map_err(|e| anyhow::anyhow!("searxng search failed: {e}"))?;
+        Ok(format_darash(&response))
+    }
 
-        if !resp.status().is_success() {
-            anyhow::bail!("searxng returned {}", resp.status());
+    async fn search_darash(query: &str) -> anyhow::Result<String> {
+        let client = darash::SearchClient::local()
+            .map_err(|e| anyhow::anyhow!("darash local client: {e}"))?;
+        let request = darash::SearchRequest::new(query).with_mode(darash::SearchMode::Balanced);
+        let response = client
+            .search_request(&request)
+            .await
+            .map_err(|e| anyhow::anyhow!("darash search failed: {e}"))?;
+        Ok(format_darash(&response))
+    }
+
+    async fn duckduckgo_fallback(query: &str, prior: anyhow::Error) -> anyhow::Result<ToolResult> {
+        tracing::warn!("darash search failed, falling back to duckduckgo: {prior}");
+        match Self::search_duckduckgo(query).await {
+            Ok(text) => Ok(ToolResult::success(text)),
+            Err(e) => Ok(ToolResult::error(format!("search failed: {e}"))),
         }
-
-        let body: serde_json::Value = resp.json().await?;
-        let results = body
-            .get("results")
-            .and_then(|r| r.as_array())
-            .ok_or_else(|| anyhow::anyhow!("searxng response had no results array"))?;
-
-        Ok(format_results(results.iter().take(8).map(|r| SearchHit {
-            title: field(r, "title"),
-            url: field(r, "url"),
-            snippet: field(r, "content"),
-        })))
     }
 
     /// Ranked results when DuckDuckGo serves them, instant answers otherwise.
@@ -321,6 +320,41 @@ fn field(value: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
+fn format_darash(response: &darash::SearchResponse) -> String {
+    if let Some(answer) = response
+        .answer
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let mut out = answer.to_string();
+        let sources = response.cited_sources();
+        if !sources.is_empty() {
+            out.push_str("\n\nSources:\n");
+            out.push_str(&format_results(sources.into_iter().take(8).map(|c| {
+                SearchHit {
+                    title: c.title,
+                    url: c.url,
+                    snippet: c.snippet,
+                }
+            })));
+        }
+        return truncate_chars(&out, MAX_RESULT_CHARS);
+    }
+
+    format_results(
+        response
+            .cited_sources()
+            .into_iter()
+            .take(8)
+            .map(|c| SearchHit {
+                title: c.title,
+                url: c.url,
+                snippet: c.snippet,
+            }),
+    )
+}
+
 fn format_results(hits: impl Iterator<Item = SearchHit>) -> String {
     let mut out = String::new();
     for (i, hit) in hits.enumerate() {
@@ -443,20 +477,23 @@ impl Tool for WebSearchTool {
 
         let outcome = match &self.backend {
             Backend::Searxng(url) => Self::search_searxng(url, &args.query).await,
-            Backend::DuckDuckGo => Self::search_duckduckgo(&args.query).await,
+            Backend::Darash => Self::search_darash(&args.query).await,
             Backend::Perplexity(key) => Self::search_perplexity(key, &args.query).await,
         };
 
         match outcome {
             Ok(text) => Ok(ToolResult::success(text)),
             // A self-hosted instance that is down should not take search with
-            // it — fall back to the keyless backend before giving up.
+            // it — fall back to darash local, then the legacy DuckDuckGo scrape.
             Err(e) if matches!(self.backend, Backend::Searxng(_)) => {
-                tracing::warn!("searxng search failed, falling back to duckduckgo: {e}");
-                match Self::search_duckduckgo(&args.query).await {
+                tracing::warn!("searxng search failed, falling back to darash: {e}");
+                match Self::search_darash(&args.query).await {
                     Ok(text) => Ok(ToolResult::success(text)),
-                    Err(e) => Ok(ToolResult::error(format!("search failed: {e}"))),
+                    Err(e) => Self::duckduckgo_fallback(&args.query, e).await,
                 }
+            }
+            Err(e) if matches!(self.backend, Backend::Darash) => {
+                Self::duckduckgo_fallback(&args.query, e).await
             }
             Err(e) => Ok(ToolResult::error(format!("search failed: {e}"))),
         }
@@ -468,13 +505,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn duckduckgo_is_the_keyless_default() {
+    fn darash_is_the_keyless_default() {
         // Nothing configured should still leave search usable.
         assert_eq!(
             WebSearchTool::new().backend(),
-            &Backend::DuckDuckGo,
-            "expected the keyless backend when no env vars are set"
+            &Backend::Darash,
+            "expected the keyless darash backend when no env vars are set"
         );
+    }
+
+    #[test]
+    fn formats_darash_citations() {
+        let response: darash::SearchResponse = serde_json::from_value(serde_json::json!({
+            "query": "rust async",
+            "results": [{
+                "title": "Tokio",
+                "url": "https://tokio.rs/",
+                "content": "async runtime"
+            }]
+        }))
+        .unwrap();
+        let out = format_darash(&response);
+        assert!(out.contains("Tokio"));
+        assert!(out.contains("https://tokio.rs/"));
+        assert!(out.contains("async runtime"));
     }
 
     #[test]
