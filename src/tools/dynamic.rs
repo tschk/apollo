@@ -119,42 +119,23 @@ impl Tool for DynamicTool {
 
         let run_path = self.tool_dir.join(run_file);
 
-        // Build command based on language
-        let output = match self.language.as_str() {
-            "v" => {
-                // V: compile and run (fast — ~0.3s compile)
-                tokio::process::Command::new("v")
-                    .arg("run")
-                    .arg(&run_path)
-                    .arg(arguments)
-                    .current_dir(&self.tool_dir)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output()
-                    .await?
-            }
-            "python" => {
-                tokio::process::Command::new("python3")
-                    .arg(&run_path)
-                    .arg(arguments)
-                    .current_dir(&self.tool_dir)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output()
-                    .await?
-            }
-            "shell" => {
-                tokio::process::Command::new("bash")
-                    .arg(&run_path)
-                    .arg(arguments)
-                    .current_dir(&self.tool_dir)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output()
-                    .await?
-            }
+        // `--` keeps a path that starts with `-` from being parsed as a flag
+        // (Jules #71). Arguments stay on argv, not through a shell.
+        let (program, extra) = match self.language.as_str() {
+            "v" => ("v", dynamic_tool_argv("v", &run_path, arguments)),
+            "python" => ("python3", dynamic_tool_argv("python", &run_path, arguments)),
+            "shell" => ("bash", dynamic_tool_argv("shell", &run_path, arguments)),
             _ => return Ok(ToolResult::error("Unknown language")),
         };
+        let extra = extra.ok_or_else(|| anyhow::anyhow!("Unknown language"))?;
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(extra)
+            .current_dir(&self.tool_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        crate::tools::child_proc::scrub(&mut cmd);
+        let output = cmd.output().await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -387,5 +368,55 @@ impl Tool for ListCustomToolsTool {
             ));
         }
         Ok(ToolResult::success(output))
+    }
+}
+
+/// argv for executing a dynamic tool, including `--` so a leading `-` in the
+/// script path cannot be parsed as a flag.
+pub(crate) fn dynamic_tool_argv(
+    language: &str,
+    run_path: &std::path::Path,
+    arguments: &str,
+) -> Option<Vec<std::ffi::OsString>> {
+    match language {
+        "v" => Some(vec![
+            std::ffi::OsString::from("run"),
+            run_path.as_os_str().to_os_string(),
+            std::ffi::OsString::from(arguments),
+        ]),
+        "python" | "shell" => Some(vec![
+            std::ffi::OsString::from("--"),
+            run_path.as_os_str().to_os_string(),
+            std::ffi::OsString::from(arguments),
+        ]),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn shell_and_python_insert_end_of_options_before_script() {
+        let path = Path::new("-c");
+        let args = dynamic_tool_argv("shell", path, r#"{"x":1}"#).unwrap();
+        assert_eq!(args[0], "--");
+        assert_eq!(args[1], path.as_os_str());
+        assert_eq!(args[2], r#"{"x":1}"#);
+
+        let args = dynamic_tool_argv("python", path, "{}").unwrap();
+        assert_eq!(args[0], "--");
+        assert_eq!(args[1], path.as_os_str());
+    }
+
+    #[test]
+    fn v_does_not_insert_end_of_options_after_run() {
+        let path = Path::new("run.v");
+        let args = dynamic_tool_argv("v", path, "{}").unwrap();
+        assert_eq!(args[0], "run");
+        assert_eq!(args[1], path.as_os_str());
+        assert_ne!(args[1], "--");
     }
 }

@@ -222,10 +222,16 @@ fn spawn_local_message_bridge(cli_tx: tokio::sync::mpsc::Sender<IncomingMessage>
             .route("/message", post(handle_bridge_message))
             .with_state(state);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:31337")
-            .await
-            .unwrap();
-        axum::serve(listener, app).await.unwrap();
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:31337").await {
+            Ok(listener) => listener,
+            Err(err) => {
+                tracing::error!("local message bridge bind failed: {err}");
+                return;
+            }
+        };
+        if let Err(err) = axum::serve(listener, app).await {
+            tracing::error!("local message bridge exited: {err}");
+        }
     });
 }
 
