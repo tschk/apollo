@@ -51,10 +51,10 @@ and feature-gated signed desktop actions through Praefectus
 ### Web search
 `web_search` picks a backend from the environment, in order:
 
-1. `SEARXNG_URL` — a self-hosted SearXNG instance. Ranked results, no third-party
-   key, and only the query leaves the machine.
-2. DuckDuckGo — keyless and always available. Reads the lite result page, and
-   falls back to the Instant Answer API when that page is refused.
+1. `SEARXNG_URL` — a self-hosted SearXNG instance, queried through darash.
+   Ranked results, no third-party key, and only the query leaves the machine.
+2. Darash local — keyless and always available. In-process DuckDuckGo, OpenAlex,
+   and Hacker News (`SearchClient::local()`).
 3. `PERPLEXITY_API_KEY` — paid, kept for existing setups.
 
 Anthropic can also run the search itself, which replaces the tool rather than

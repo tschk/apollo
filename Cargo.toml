@@ -139,6 +139,7 @@ rocksdb = { version = "0.23" }
 
 shlex = "1.3"
 base64 = "0.22"
+darash = "0.5.2"
 
 # Crypto (credential security)
 sha2 = "0.10"

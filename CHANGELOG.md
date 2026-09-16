@@ -17,6 +17,8 @@
 
 - `rx4` is the crates.io crate again (`0.7.2`), not a git pin, so `apollo-agent`
   can be published.
+- `web_search` uses darash `0.5.2` for SearXNG and the keyless local backend
+  (DuckDuckGo scrape remains a fallback).
 
 ### Tooling
 
