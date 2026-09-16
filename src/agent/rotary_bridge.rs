@@ -596,6 +596,7 @@ pub fn register_apollo_tools(
                     content: result.output,
                     is_error: result.is_error,
                     error_kind: None,
+                    spill: None,
                 }
             })
         });
@@ -1258,6 +1259,7 @@ mod tests {
             content: "hello".into(),
             is_error: false,
             error_kind: None,
+            spill: None,
         }));
         recorder.on_event(&rx4::Event::GuardrailStop {
             tool: "exec".into(),

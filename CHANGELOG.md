@@ -13,6 +13,11 @@
 
 - Local Telegram message bridge logs bind/serve failures instead of unwrapping.
 
+### Dependencies
+
+- `rx4` is the crates.io crate again (`0.7.2`), not a git pin, so `apollo-agent`
+  can be published.
+
 ### Tooling
 
 - Amp orb `.agents/setup` / `.agents/resume` for Rust + bindgen deps.
