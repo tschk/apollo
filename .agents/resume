@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fast orb resume: restore cargo/rustup on PATH. Do not install packages here.
+set -euo pipefail
+
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+
+if [[ -f "$CARGO_HOME/env" ]]; then
+  # shellcheck disable=SC1091
+  source "$CARGO_HOME/env"
+fi
+
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+  echo "apollo resume: rust toolchain missing; run .agents/setup" >&2
+  exit 1
+fi
+
+echo "apollo resume: $(rustc --version) / $(cargo --version)"
