@@ -236,7 +236,9 @@ impl TelegramChannel {
         }
 
         let mut whisper = tokio::process::Command::new("python3");
-        whisper.args(whisper_python_args(&temp_path));
+        whisper
+            .args(whisper_python_args(&temp_path))
+            .kill_on_drop(true);
         crate::tools::child_proc::scrub(&mut whisper);
         let output = whisper.output().await?;
 

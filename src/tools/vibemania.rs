@@ -93,7 +93,8 @@ impl Tool for VibemaniaTool {
         cmd.current_dir(&self.workspace)
             .arg("run")
             .arg("--parallel")
-            .arg(parallel.to_string());
+            .arg(parallel.to_string())
+            .kill_on_drop(true);
         crate::tools::child_proc::scrub(&mut cmd);
 
         if let Some(ref omodel) = args.orchestrator_model {

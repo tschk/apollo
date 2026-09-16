@@ -132,7 +132,8 @@ impl Tool for DynamicTool {
         cmd.args(extra)
             .current_dir(&self.tool_dir)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         crate::tools::child_proc::scrub(&mut cmd);
         let output = cmd.output().await?;
 
