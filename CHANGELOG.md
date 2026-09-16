@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.6.3]
+
+### Security
+
+- Telegram faster-whisper no longer interpolates the audio path into `python3 -c`;
+  the path is `sys.argv[1]` on a static script. Dynamic tools and vibemania put
+  `--` before untrusted paths/goals so a leading `-` cannot be a flag. Child
+  processes get secret-scrubbed environments and `kill_on_drop`.
+
+### Fixed
+
+- Local Telegram message bridge logs bind/serve failures instead of unwrapping.
+
+### Tooling
+
+- Amp orb `.agents/setup` / `.agents/resume` for Rust + bindgen deps.
+- CI and release workflows pin GitHub Actions to full-length SHAs and disable
+  checkout credential persistence.
+
+
 ## [0.6.0]
 
 ### Breaking
