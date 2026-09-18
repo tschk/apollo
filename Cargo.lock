@@ -2097,9 +2097,9 @@ dependencies = [
 
 [[package]]
 name = "darash"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "099585bb059b0318c68397fd11244738bcdff9d33578755197eaa78d16cc3206"
+checksum = "6ddc42d9e597ebf050c9de217c5c834943caa83bb385c077376ed83f94fb8103"
 dependencies = [
  "futures-util",
  "log",
