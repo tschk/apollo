@@ -2,6 +2,7 @@
 //! Inspired by ZeroClaw's pluggable memory + NanoClaw's per-group isolation.
 
 pub mod brief;
+pub mod consolidation;
 pub mod context_inject;
 pub mod embeddings;
 pub mod graph;

@@ -50,7 +50,7 @@ impl Tool for ZkrTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["remember", "search", "get", "correct", "delete", "profiles"] },
+                    "action": { "type": "string", "enum": ["remember", "search", "get", "correct", "delete", "profiles", "profile_pager"] },
                     "text": { "type": "string" },
                     "source_kind": { "type": "string", "enum": ["conversation", "screen", "audio", "document", "integration", "user_correction"] },
                     "ingestion_key": { "type": "string" },
@@ -156,6 +156,9 @@ impl Tool for ZkrTool {
             "profiles" => {
                 serde_json::to_string_pretty(&self.store.profiles(args.limit.unwrap_or(20)).await?)?
             }
+            "profile_pager" => serde_json::to_string_pretty(
+                &self.store.profile_pager(args.limit.unwrap_or(20)).await?,
+            )?,
             other => anyhow::bail!("unknown zkr action: {other}"),
         };
         Ok(ToolResult::success(result))
