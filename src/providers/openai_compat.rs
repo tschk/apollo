@@ -410,7 +410,15 @@ fn parse_pricing(value: Option<&Value>) -> Option<ModelPricing> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_model_info;
+    use super::{parse_model_info, OpenAiCompatProvider};
+
+    #[test]
+    fn test_groq_constructor() {
+        let provider = OpenAiCompatProvider::groq("test_key");
+        assert_eq!(provider.api_key, "test_key");
+        assert_eq!(provider.base_url, "https://api.groq.com/openai/v1");
+        assert_eq!(provider.provider_name, "groq");
+    }
 
     #[test]
     fn parses_openrouter_limits_and_capabilities() {
