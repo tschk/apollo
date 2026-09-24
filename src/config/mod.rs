@@ -678,10 +678,16 @@ mod config_path_tests {
         let (updated_cfg, _) = original_cfg.set_path("agent.max_rounds", "999").unwrap();
 
         let original_json_after = serde_json::to_value(&original_cfg).unwrap();
-        assert_eq!(original_json, original_json_after, "original config was mutated");
+        assert_eq!(
+            original_json, original_json_after,
+            "original config was mutated"
+        );
 
         assert_eq!(updated_cfg.agent.max_rounds, 999);
-        assert_eq!(original_cfg.agent.max_rounds, 50, "original config field mutated");
+        assert_eq!(
+            original_cfg.agent.max_rounds, 50,
+            "original config field mutated"
+        );
     }
 
     #[test]
