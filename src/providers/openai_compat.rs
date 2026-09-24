@@ -413,6 +413,14 @@ mod tests {
     use super::parse_model_info;
 
     #[test]
+    fn test_mistral() {
+        let provider = super::OpenAiCompatProvider::mistral("test_key");
+        assert_eq!(provider.api_key, "test_key");
+        assert_eq!(provider.base_url, "https://api.mistral.ai/v1");
+        assert_eq!(provider.provider_name, "mistral");
+    }
+
+    #[test]
     fn parses_openrouter_limits_and_capabilities() {
         let value = serde_json::json!({
             "id": "openai/gpt-4o-mini",
