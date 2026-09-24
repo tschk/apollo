@@ -410,7 +410,36 @@ fn parse_pricing(value: Option<&Value>) -> Option<ModelPricing> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_model_info;
+    use super::{parse_model_info, OpenAiCompatProvider};
+
+    #[test]
+    fn test_provider_initializers() {
+        let key = "test_key";
+
+        let openai = OpenAiCompatProvider::openai(key);
+        assert_eq!(openai.provider_name, "openai");
+        assert_eq!(openai.base_url, "https://api.openai.com/v1");
+
+        let openrouter = OpenAiCompatProvider::openrouter(key);
+        assert_eq!(openrouter.provider_name, "openrouter");
+        assert_eq!(openrouter.base_url, "https://openrouter.ai/api/v1");
+
+        let groq = OpenAiCompatProvider::groq(key);
+        assert_eq!(groq.provider_name, "groq");
+        assert_eq!(groq.base_url, "https://api.groq.com/openai/v1");
+
+        let together = OpenAiCompatProvider::together(key);
+        assert_eq!(together.provider_name, "together");
+        assert_eq!(together.base_url, "https://api.together.xyz/v1");
+
+        let mistral = OpenAiCompatProvider::mistral(key);
+        assert_eq!(mistral.provider_name, "mistral");
+        assert_eq!(mistral.base_url, "https://api.mistral.ai/v1");
+
+        let deepseek = OpenAiCompatProvider::deepseek(key);
+        assert_eq!(deepseek.provider_name, "deepseek");
+        assert_eq!(deepseek.base_url, "https://api.deepseek.com/v1");
+    }
 
     #[test]
     fn parses_openrouter_limits_and_capabilities() {
