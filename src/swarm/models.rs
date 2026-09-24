@@ -57,8 +57,12 @@ mod tests {
 
     #[test]
     fn test_agent_link_builder() {
-        let link = AgentLink::new("source1".to_string(), "target1".to_string(), LinkDirection::Outbound)
-            .with_max_concurrent(5);
+        let link = AgentLink::new(
+            "source1".to_string(),
+            "target1".to_string(),
+            LinkDirection::Outbound,
+        )
+        .with_max_concurrent(5);
         assert_eq!(link.source_agent_id, "source1");
         assert_eq!(link.target_agent_id, "target1");
         assert_eq!(link.direction, LinkDirection::Outbound);
@@ -72,7 +76,8 @@ mod tests {
             "target1".to_string(),
             "task1".to_string(),
             DelegationMode::Async,
-        ).with_context("context1".to_string());
+        )
+        .with_context("context1".to_string());
 
         assert_eq!(record.source_agent_id, "source1");
         assert_eq!(record.target_agent_id, "target1");
@@ -97,16 +102,20 @@ mod tests {
         assert_eq!(task.status, "blocked");
 
         // Test without blocks (status should remain pending)
-        let task2 = TeamTask::new("team1".to_string(), "subject1".to_string())
-            .with_blocked_by(vec![]);
+        let task2 =
+            TeamTask::new("team1".to_string(), "subject1".to_string()).with_blocked_by(vec![]);
         assert_eq!(task2.status, "pending");
     }
 
     #[test]
     fn test_team_message_builder() {
-        let msg = TeamMessage::new("team1".to_string(), "from1".to_string(), "content1".to_string())
-            .directed("to1".to_string())
-            .with_type("alert".to_string());
+        let msg = TeamMessage::new(
+            "team1".to_string(),
+            "from1".to_string(),
+            "content1".to_string(),
+        )
+        .directed("to1".to_string())
+        .with_type("alert".to_string());
 
         assert_eq!(msg.team_id, "team1");
         assert_eq!(msg.from_agent_id, "from1");
@@ -121,8 +130,9 @@ mod tests {
             "channel1".to_string(),
             "chat1".to_string(),
             "from_key1".to_string(),
-            "to_key1".to_string()
-        ).with_context("ctx1".to_string());
+            "to_key1".to_string(),
+        )
+        .with_context("ctx1".to_string());
 
         assert_eq!(route.channel, "channel1");
         assert_eq!(route.chat_id, "chat1");
