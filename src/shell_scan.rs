@@ -1557,4 +1557,87 @@ mod tests {
     fn shell_quote(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
+
+    #[test]
+    fn test_shell_pipelines() {
+        // Basic pipelines
+        assert_eq!(
+            shell_pipelines("a | b"),
+            vec![vec!["a".to_string(), "b".to_string()]]
+        );
+        assert_eq!(
+            shell_pipelines("a | b | c"),
+            vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]]
+        );
+
+        // Different pipe operators (like |&)
+        assert_eq!(
+            shell_pipelines("a |& b"),
+            vec![vec!["a".to_string(), "b".to_string()]]
+        );
+
+        // Single stage commands should be ignored (needs 2+ stages)
+        assert!(shell_pipelines("a").is_empty());
+        assert!(shell_pipelines("a ; b").is_empty());
+        assert!(shell_pipelines("a && b").is_empty());
+
+        // Separators (semicolon, newline, ampersand)
+        assert_eq!(
+            shell_pipelines("a | b; c | d"),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+        assert_eq!(
+            shell_pipelines("a | b \n c | d"),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+        assert_eq!(
+            shell_pipelines("a | b & c | d"),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+
+        // Logical operators
+        assert_eq!(
+            shell_pipelines("a | b && c | d"),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+        assert_eq!(
+            shell_pipelines("a | b || c | d"),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+
+        // Quoted and escaped characters
+        assert!(shell_pipelines("echo 'a | b' | c").len() == 1);
+        assert_eq!(
+            shell_pipelines("echo 'a | b' | c")[0],
+            vec!["echo 'a | b'".to_string(), "c".to_string()]
+        );
+        assert_eq!(
+            shell_pipelines("echo \"a | b\" | c")[0],
+            vec!["echo \"a | b\"".to_string(), "c".to_string()]
+        );
+        assert_eq!(
+            shell_pipelines("a \\| b | c")[0],
+            vec!["a \\| b".to_string(), "c".to_string()]
+        );
+
+        // Edge cases
+        // A pipe by itself produces 2 empty stages, e.g. ["", ""] but they are trimmed and not pushed.
+        // shell_pipelines code uses `!s.trim().is_empty()` to push to pipeline. So pipeline is empty, length 0, ignored.
+        assert!(shell_pipelines(" | ").is_empty());
+    }
 }
