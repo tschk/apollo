@@ -71,3 +71,121 @@ pub fn apply_workspace_manifest(cfg: &mut Config, workspace: &Path) {
         Err(e) => tracing::warn!("plugin manifest skipped: {:#}", e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_load_manifest_disabled_plugin_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.plugin_layer.enabled = false;
+
+        let result = load_manifest(dir.path(), &cfg).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_manifest_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::default();
+
+        let result = load_manifest(dir.path(), &cfg).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_manifest_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::default();
+
+        let apollo_dir = dir.path().join(".apollo").join("plugins");
+        fs::create_dir_all(&apollo_dir).unwrap();
+        let manifest_path = apollo_dir.join("manifest.json");
+
+        let manifest_content = r#"{
+            "version": 1,
+            "packages": ["pkg1", "pkg2"],
+            "toolsets": {
+                "enabled": ["tool1"],
+                "disabled": ["tool2"]
+            },
+            "system_prompt_suffix": "test suffix"
+        }"#;
+        fs::write(&manifest_path, manifest_content).unwrap();
+
+        let result = load_manifest(dir.path(), &cfg).unwrap().unwrap();
+        assert_eq!(result.version, 1);
+        assert_eq!(result.packages, vec!["pkg1", "pkg2"]);
+        assert_eq!(result.toolsets.enabled, vec!["tool1"]);
+        assert_eq!(result.toolsets.disabled, vec!["tool2"]);
+        assert_eq!(result.system_prompt_suffix, "test suffix");
+    }
+
+    #[test]
+    fn test_load_manifest_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::default();
+
+        let apollo_dir = dir.path().join(".apollo").join("plugins");
+        fs::create_dir_all(&apollo_dir).unwrap();
+        let manifest_path = apollo_dir.join("manifest.json");
+
+        fs::write(&manifest_path, "invalid json").unwrap();
+
+        let result = load_manifest(dir.path(), &cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_merge_manifest_into_config() {
+        let mut cfg = Config::default();
+        cfg.toolsets.enabled = vec!["existing_enabled".to_string()];
+        cfg.toolsets.disabled = vec!["existing_disabled".to_string()];
+        cfg.system_prompt = "base prompt".to_string();
+
+        let manifest = PluginManifestFile {
+            version: 1,
+            packages: vec![],
+            toolsets: ToolsetPatch {
+                enabled: vec!["existing_enabled".to_string(), "new_enabled".to_string()],
+                disabled: vec!["existing_disabled".to_string(), "new_disabled".to_string()],
+            },
+            system_prompt_suffix: "added suffix".to_string(),
+        };
+
+        merge_manifest_into_config(&mut cfg, &manifest);
+
+        assert_eq!(
+            cfg.toolsets.enabled,
+            vec!["existing_enabled", "new_enabled"]
+        );
+        assert_eq!(
+            cfg.toolsets.disabled,
+            vec!["existing_disabled", "new_disabled"]
+        );
+        assert_eq!(cfg.system_prompt, "base prompt\nadded suffix");
+    }
+
+    #[test]
+    fn test_apply_workspace_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+
+        let apollo_dir = dir.path().join(".apollo").join("plugins");
+        fs::create_dir_all(&apollo_dir).unwrap();
+        let manifest_path = apollo_dir.join("manifest.json");
+
+        let manifest_content = r#"{
+            "system_prompt_suffix": "workspace suffix"
+        }"#;
+        fs::write(&manifest_path, manifest_content).unwrap();
+
+        cfg.system_prompt = "base".to_string();
+        apply_workspace_manifest(&mut cfg, dir.path());
+
+        assert_eq!(cfg.system_prompt, "base\nworkspace suffix");
+    }
+}
