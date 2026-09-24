@@ -356,6 +356,18 @@ fn config_args(argument: &str) -> (&'static str, Vec<String>) {
 /// an existing Claude Code session, shared through `rs_ai_oauth`'s store — so
 /// this reports what is there and names the command that adds one, rather
 /// than pretending to open a browser.
+/// True when `name` resolves to a file on `PATH`.
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path).any(|dir| {
+                let candidate = dir.join(name);
+                candidate.is_file()
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn login_report(doctor_json: &str, tk_present: bool) -> String {
     let checks = serde_json::from_str::<serde_json::Value>(doctor_json)
         .ok()
@@ -638,7 +650,7 @@ impl App {
             "/login" => self.spawn_note("checking logins", || {
                 let json = agent::run_apollo(&["doctor", "--json"])
                     .unwrap_or_else(|e| format!("apollo doctor failed: {e}"));
-                login_report(&json, agent::on_path("tk"))
+                login_report(&json, on_path("tk"))
             }),
             "/doctor" => {
                 self.spawn_note("running doctor", || match agent::run_apollo(&["doctor"]) {
