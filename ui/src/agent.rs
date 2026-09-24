@@ -378,21 +378,6 @@ pub fn fetch_state() -> Option<AgentState> {
     Some(parse_state(&value))
 }
 
-/// Switch the running agent's model, returning its new state.
-#[allow(dead_code)]
-pub fn set_model(model: &str) -> Result<AgentState, String> {
-    let url = format!("http://127.0.0.1:{}/v1/model", http_port());
-    let request = blocking_client(5000)?
-        .post(&url)
-        .json(&serde_json::json!({ "model": model }));
-    let response = authed(request).send().map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()));
-    }
-    let value: serde_json::Value = response.json().map_err(|e| e.to_string())?;
-    Ok(parse_state(&value))
-}
-
 /// Ask the agent to clear a chat's stored history.
 ///
 /// `path` is `/v1/clear`. `/v1/compact` was removed rather than left as a

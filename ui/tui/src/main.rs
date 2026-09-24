@@ -698,9 +698,11 @@ impl App {
     }
 
     fn apply_model(&mut self, model: String) {
-        match agent::set_model(&model) {
-            Ok(state) => {
-                self.apply_state(state);
+        match agent::run_apollo(&["model", &model]) {
+            Ok(_) => {
+                if let Some(state) = agent::fetch_state() {
+                    self.apply_state(state);
+                }
                 self.status = format!("model → {model}");
             }
             Err(e) => {
