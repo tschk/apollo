@@ -470,7 +470,11 @@ mod tests {
 
         temp_env::with_var("OPENAI_API_KEY", Some("test_key"), || {
             let findings = audit_config(&cfg);
-            assert!(findings.is_empty(), "Expected no findings, got: {:?}", findings);
+            assert!(
+                findings.is_empty(),
+                "Expected no findings, got: {:?}",
+                findings
+            );
         });
     }
 
