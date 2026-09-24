@@ -630,6 +630,39 @@ mod config_path_tests {
     use super::*;
 
     #[test]
+    fn get_path_rejects_empty_keys() {
+        let cfg = Config::default_config();
+        let err = cfg.get_path("").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+
+        let err = cfg.get_path("   ").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+    }
+
+    #[test]
+    fn get_path_rejects_unknown_top_level_keys() {
+        let cfg = Config::default_config();
+        let err = cfg.get_path("unknown_key").unwrap_err().to_string();
+        assert!(err.contains("unknown config key `unknown_key`"), "{err}");
+        assert!(err.contains("<root>"), "{err}");
+    }
+
+    #[test]
+    fn get_path_rejects_unknown_nested_keys() {
+        let cfg = Config::default_config();
+        let err = cfg.get_path("provider.unknown_key").unwrap_err().to_string();
+        assert!(err.contains("unknown config key `provider.unknown_key`"), "{err}");
+        assert!(err.contains("Available under `provider`"), "{err}");
+    }
+
+    #[test]
+    fn get_path_rejects_indexing_into_non_objects() {
+        let cfg = Config::default_config();
+        let err = cfg.get_path("provider.name.something").unwrap_err().to_string();
+        assert!(err.contains("is not a section"), "{err}");
+    }
+
+    #[test]
     fn get_reads_nested_and_top_level_keys() {
         let cfg = Config::default_config();
         assert_eq!(cfg.get_path("model").unwrap(), cfg.model.as_str());
