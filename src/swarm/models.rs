@@ -279,3 +279,63 @@ impl HandoffRoute {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_team_message_new() {
+        let msg = TeamMessage::new(
+            "team_1".to_string(),
+            "agent_a".to_string(),
+            "hello".to_string(),
+        );
+
+        assert_eq!(msg.team_id, "team_1");
+        assert_eq!(msg.from_agent_id, "agent_a");
+        assert_eq!(msg.content, "hello");
+        assert!(msg.to_agent_id.is_none());
+        assert_eq!(msg.message_type, "chat");
+        assert!(!msg.read);
+        assert!(!msg.message_id.is_empty());
+    }
+
+    #[test]
+    fn test_team_message_directed() {
+        let msg = TeamMessage::new(
+            "team_1".to_string(),
+            "agent_a".to_string(),
+            "hello".to_string(),
+        )
+        .directed("agent_b".to_string());
+
+        assert_eq!(msg.to_agent_id, Some("agent_b".to_string()));
+    }
+
+    #[test]
+    fn test_team_message_with_type() {
+        let msg = TeamMessage::new(
+            "team_1".to_string(),
+            "agent_a".to_string(),
+            "hello".to_string(),
+        )
+        .with_type("alert".to_string());
+
+        assert_eq!(msg.message_type, "alert");
+    }
+
+    #[test]
+    fn test_team_message_builder_chain() {
+        let msg = TeamMessage::new(
+            "team_1".to_string(),
+            "agent_a".to_string(),
+            "hello".to_string(),
+        )
+        .directed("agent_b".to_string())
+        .with_type("alert".to_string());
+
+        assert_eq!(msg.to_agent_id, Some("agent_b".to_string()));
+        assert_eq!(msg.message_type, "alert");
+    }
+}
