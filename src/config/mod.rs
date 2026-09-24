@@ -626,6 +626,57 @@ impl Default for GroupChatConfig {
 }
 
 #[cfg(test)]
+mod is_secret_key_tests {
+    use super::*;
+
+    #[test]
+    fn exact_matches() {
+        assert!(is_secret_key("api_key"));
+        assert!(is_secret_key("token"));
+        assert!(is_secret_key("secret"));
+        assert!(is_secret_key("password"));
+    }
+
+    #[test]
+    fn suffix_matches() {
+        assert!(is_secret_key("openai_api_key"));
+        assert!(is_secret_key("bot_token"));
+        assert!(is_secret_key("client_secret"));
+        assert!(is_secret_key("admin_password"));
+    }
+
+    #[test]
+    fn case_insensitivity() {
+        assert!(is_secret_key("API_KEY"));
+        assert!(is_secret_key("Token"));
+        assert!(is_secret_key("SeCrEt"));
+        assert!(is_secret_key("PASSWORD"));
+        assert!(is_secret_key("Bot_Token"));
+    }
+
+    #[test]
+    fn negative_matches() {
+        // Missing underscore before the secret word
+        assert!(!is_secret_key("apitoken"));
+        assert!(!is_secret_key("mysecret"));
+
+        // Secret word is not at the end
+        assert!(!is_secret_key("token_id"));
+        assert!(!is_secret_key("secret_key")); // _key is not in the list, secret is at start
+        assert!(!is_secret_key("password_hash"));
+
+        // Similar but different words
+        assert!(!is_secret_key("key"));
+        assert!(!is_secret_key("pass"));
+        assert!(!is_secret_key("passwords"));
+
+        // Empty and unrelated
+        assert!(!is_secret_key(""));
+        assert!(!is_secret_key("user_name"));
+    }
+}
+
+#[cfg(test)]
 mod config_path_tests {
     use super::*;
 
