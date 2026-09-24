@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(msg.content, "hello");
         assert!(msg.to_agent_id.is_none());
         assert_eq!(msg.message_type, "chat");
-        assert_eq!(msg.read, false);
+        assert!(!msg.read);
         assert!(!msg.message_id.is_empty());
     }
 
