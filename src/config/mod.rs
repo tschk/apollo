@@ -660,6 +660,37 @@ mod config_path_tests {
     }
 
     #[test]
+    fn set_path_rejects_empty_keys() {
+        let cfg = Config::default_config();
+
+        let err = cfg.set_path("", "value").unwrap_err().to_string();
+        assert_eq!(err, "empty config key");
+
+        let err = cfg.set_path("   ", "value").unwrap_err().to_string();
+        assert_eq!(err, "empty config key");
+    }
+
+    #[test]
+    fn set_path_does_not_mutate_original_config() {
+        let original_cfg = Config::default_config();
+        let original_json = serde_json::to_value(&original_cfg).unwrap();
+
+        let (updated_cfg, _) = original_cfg.set_path("agent.max_rounds", "999").unwrap();
+
+        let original_json_after = serde_json::to_value(&original_cfg).unwrap();
+        assert_eq!(
+            original_json, original_json_after,
+            "original config was mutated"
+        );
+
+        assert_eq!(updated_cfg.agent.max_rounds, 999);
+        assert_eq!(
+            original_cfg.agent.max_rounds, 50,
+            "original config field mutated"
+        );
+    }
+
+    #[test]
     fn unknown_keys_are_rejected_with_the_available_names() {
         let cfg = Config::default_config();
         let err = cfg.set_path("agent.nope", "1").unwrap_err().to_string();
