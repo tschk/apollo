@@ -410,7 +410,15 @@ fn parse_pricing(value: Option<&Value>) -> Option<ModelPricing> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_model_info;
+    use super::{parse_model_info, OpenAiCompatProvider};
+
+    #[test]
+    fn test_mistral_initialization() {
+        let provider = OpenAiCompatProvider::mistral("test_api_key");
+        assert_eq!(provider.api_key, "test_api_key");
+        assert_eq!(provider.base_url, "https://api.mistral.ai/v1");
+        assert_eq!(provider.provider_name, "mistral");
+    }
 
     #[test]
     fn parses_openrouter_limits_and_capabilities() {
