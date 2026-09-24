@@ -44,9 +44,8 @@ struct CronArgs {
     #[serde(default)]
     goal: String,
     /// Priority 1-10 (default 5)
-    #[serde(default = "default_priority")]
-    #[allow(dead_code)]
-    priority: u8,
+    #[serde(default = "default_priority", rename = "priority")]
+    _priority: u8,
     /// Schedule ID (required for enable/disable/delete)
     #[serde(default)]
     id: String,
