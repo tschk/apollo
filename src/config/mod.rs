@@ -630,6 +630,23 @@ mod config_path_tests {
     use super::*;
 
     #[test]
+    fn empty_keys_are_rejected() {
+        let cfg = Config::default_config();
+
+        let err = cfg.get_path("").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+
+        let err = cfg.get_path("   ").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+
+        let err = cfg.set_path("", "value").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+
+        let err = cfg.set_path("   ", "value").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+    }
+
+    #[test]
     fn get_reads_nested_and_top_level_keys() {
         let cfg = Config::default_config();
         assert_eq!(cfg.get_path("model").unwrap(), cfg.model.as_str());
