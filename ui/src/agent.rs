@@ -274,19 +274,6 @@ pub fn run_apollo(args: &[&str]) -> Result<String, String> {
     })
 }
 
-/// True when `name` resolves to a file on `PATH`.
-#[allow(dead_code)]
-pub fn on_path(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path).any(|dir| {
-                let candidate = dir.join(name);
-                candidate.is_file()
-            })
-        })
-        .unwrap_or(false)
-}
-
 fn find_apollo_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
