@@ -279,3 +279,52 @@ impl HandoffRoute {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_team_message_directed() {
+        let msg = TeamMessage::new(
+            "team_1".to_string(),
+            "agent_a".to_string(),
+            "hello".to_string(),
+        );
+
+        assert_eq!(msg.to_agent_id, None);
+
+        let msg = msg.directed("agent_b".to_string());
+
+        assert_eq!(msg.to_agent_id, Some("agent_b".to_string()));
+    }
+
+    #[test]
+    fn test_team_message_with_type() {
+        let msg = TeamMessage::new(
+            "team_1".to_string(),
+            "agent_a".to_string(),
+            "hello".to_string(),
+        );
+
+        assert_eq!(msg.message_type, "chat");
+
+        let msg = msg.with_type("alert".to_string());
+
+        assert_eq!(msg.message_type, "alert");
+    }
+
+    #[test]
+    fn test_team_message_chaining() {
+        let msg = TeamMessage::new(
+            "team_1".to_string(),
+            "agent_a".to_string(),
+            "hello".to_string(),
+        )
+        .directed("agent_b".to_string())
+        .with_type("alert".to_string());
+
+        assert_eq!(msg.to_agent_id, Some("agent_b".to_string()));
+        assert_eq!(msg.message_type, "alert");
+    }
+}
