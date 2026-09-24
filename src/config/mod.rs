@@ -650,15 +650,24 @@ mod config_path_tests {
     #[test]
     fn get_path_rejects_unknown_nested_keys() {
         let cfg = Config::default_config();
-        let err = cfg.get_path("provider.unknown_key").unwrap_err().to_string();
-        assert!(err.contains("unknown config key `provider.unknown_key`"), "{err}");
+        let err = cfg
+            .get_path("provider.unknown_key")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown config key `provider.unknown_key`"),
+            "{err}"
+        );
         assert!(err.contains("Available under `provider`"), "{err}");
     }
 
     #[test]
     fn get_path_rejects_indexing_into_non_objects() {
         let cfg = Config::default_config();
-        let err = cfg.get_path("provider.name.something").unwrap_err().to_string();
+        let err = cfg
+            .get_path("provider.name.something")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("is not a section"), "{err}");
     }
 
