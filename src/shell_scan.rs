@@ -1636,8 +1636,8 @@ mod tests {
         );
 
         // Edge cases
-        assert!(
-            shell_pipelines(" | ").is_empty()
-        );
+        // A pipe by itself produces 2 empty stages, e.g. ["", ""] but they are trimmed and not pushed.
+        // shell_pipelines code uses `!s.trim().is_empty()` to push to pipeline. So pipeline is empty, length 0, ignored.
+        assert!(shell_pipelines(" | ").is_empty());
     }
 }
