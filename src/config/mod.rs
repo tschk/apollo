@@ -731,6 +731,40 @@ mod config_path_tests {
     }
 
     #[test]
+    fn is_secret_key_matches_expected_patterns() {
+        // Exact matches
+        assert!(is_secret_key("api_key"));
+        assert!(is_secret_key("token"));
+        assert!(is_secret_key("secret"));
+        assert!(is_secret_key("password"));
+
+        // Case insensitivity
+        assert!(is_secret_key("API_KEY"));
+        assert!(is_secret_key("Token"));
+        assert!(is_secret_key("SeCrEt"));
+        assert!(is_secret_key("PASSWORD"));
+
+        // Suffix matches
+        assert!(is_secret_key("my_api_key"));
+        assert!(is_secret_key("auth_token"));
+        assert!(is_secret_key("client_secret"));
+        assert!(is_secret_key("db_password"));
+
+        // Case insensitive suffix matches
+        assert!(is_secret_key("MY_API_KEY"));
+        assert!(is_secret_key("Auth_Token"));
+
+        // Non-matches
+        assert!(!is_secret_key("api_key_id"));
+        assert!(!is_secret_key("token_value"));
+        assert!(!is_secret_key("secret_stuff"));
+        assert!(!is_secret_key("password123"));
+        assert!(!is_secret_key("my_api"));
+        assert!(!is_secret_key(""));
+        assert!(!is_secret_key("random_string"));
+    }
+
+    #[test]
     fn mask_secrets_covers_objects_arrays_and_skips_empty() {
         let mut data = serde_json::json!({
             "api_key": "secret_value",
