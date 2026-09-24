@@ -671,6 +671,17 @@ mod config_path_tests {
     }
 
     #[test]
+    fn empty_keys_are_rejected() {
+        let cfg = Config::default_config();
+
+        let err = cfg.set_path("", "value").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+
+        let err = cfg.set_path("   ", "value").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+    }
+
+    #[test]
     fn wrong_typed_values_are_rejected_before_they_reach_disk() {
         let cfg = Config::default_config();
         let err = cfg
@@ -684,6 +695,46 @@ mod config_path_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("expected `true` or `false`"), "{err}");
+    }
+
+    #[test]
+    fn arrays_can_be_updated_from_json_strings() {
+        let cfg = Config::default_config();
+        let json_arr = r#"["web", "memory"]"#;
+
+        let (cfg, written) = cfg.set_path("toolsets.enabled", json_arr).unwrap();
+        assert_eq!(
+            cfg.toolsets.enabled,
+            vec!["web".to_string(), "memory".to_string()]
+        );
+        assert_eq!(written, serde_json::json!(["web", "memory"]));
+    }
+
+    #[test]
+    fn objects_can_be_updated_from_json_strings() {
+        let cfg = Config::default_config();
+        let json_obj = r#"{"hello": "world"}"#;
+
+        let (cfg, written) = cfg.set_path("channel.settings", json_obj).unwrap();
+        assert_eq!(
+            cfg.channel.settings.get("hello").map(|s| s.as_str()),
+            Some("world")
+        );
+        assert_eq!(written, serde_json::json!({"hello": "world"}));
+    }
+
+    #[test]
+    fn invalid_json_for_arrays_is_rejected() {
+        let cfg = Config::default_config();
+
+        let err = cfg
+            .set_path("toolsets.enabled", "[invalid")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("expected JSON matching the existing value"),
+            "{err}"
+        );
     }
 
     #[test]
