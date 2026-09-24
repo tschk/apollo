@@ -458,4 +458,74 @@ mod tests {
         assert!(!check.soft_warn);
         assert!(check.detail.contains("parses OK"));
     }
+
+    #[test]
+    fn audit_config_empty_findings() {
+        let mut cfg = Config::default_config();
+        cfg.workspace = std::env::current_dir().unwrap();
+        cfg.policy.allow_shell = false;
+        cfg.policy.allow_dynamic_tools = false;
+        cfg.policy.allow_plugin_shell = false;
+        cfg.policy.allow_plugin_git = false;
+
+        temp_env::with_var("OPENAI_API_KEY", Some("test_key"), || {
+            let findings = audit_config(&cfg);
+            assert!(findings.is_empty(), "Expected no findings, got: {:?}", findings);
+        });
+    }
+
+    #[test]
+    fn audit_config_provider_credentials_missing() {
+        let mut cfg = Config::default_config();
+        cfg.workspace = std::env::current_dir().unwrap();
+        cfg.provider.api_key = None;
+        cfg.policy.allow_shell = false;
+        cfg.policy.allow_dynamic_tools = false;
+        cfg.policy.allow_plugin_shell = false;
+        cfg.policy.allow_plugin_git = false;
+
+        temp_env::with_var("OPENAI_API_KEY", None::<&str>, || {
+            let findings = audit_config(&cfg);
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].code, "provider_credentials_missing");
+        });
+    }
+
+    #[test]
+    fn audit_config_policy_findings() {
+        let mut cfg = Config::default_config();
+        cfg.workspace = std::env::current_dir().unwrap();
+
+        cfg.policy.allow_shell = true;
+        cfg.policy.allow_dynamic_tools = true;
+        cfg.policy.allow_plugin_shell = true;
+        cfg.policy.allow_plugin_git = true;
+
+        temp_env::with_var("OPENAI_API_KEY", Some("test_key"), || {
+            let findings = audit_config(&cfg);
+            assert_eq!(findings.len(), 4);
+
+            let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
+            assert!(codes.contains(&"policy_shell_enabled"));
+            assert!(codes.contains(&"policy_dynamic_tools_enabled"));
+            assert!(codes.contains(&"policy_plugin_shell_enabled"));
+            assert!(codes.contains(&"policy_plugin_git_enabled"));
+        });
+    }
+
+    #[test]
+    fn audit_config_workspace_missing() {
+        let mut cfg = Config::default_config();
+        cfg.workspace = Path::new("/does/not/exist/123456789").to_path_buf();
+        cfg.policy.allow_shell = false;
+        cfg.policy.allow_dynamic_tools = false;
+        cfg.policy.allow_plugin_shell = false;
+        cfg.policy.allow_plugin_git = false;
+
+        temp_env::with_var("OPENAI_API_KEY", Some("test_key"), || {
+            let findings = audit_config(&cfg);
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].code, "workspace_missing");
+        });
+    }
 }
