@@ -30,3 +30,32 @@ pub fn long() -> reqwest::Client {
         .get_or_init(|| build(Some(Duration::from_secs(120))))
         .clone()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    #[test]
+    fn test_clients_initialization() {
+        let _ = shared();
+        let _ = standard();
+        let _ = long();
+    }
+
+    #[test]
+    fn test_clients_thread_safety() {
+        let mut handles = vec![];
+        for _ in 0..10 {
+            handles.push(thread::spawn(|| {
+                let _ = shared();
+                let _ = standard();
+                let _ = long();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+}
