@@ -1397,6 +1397,66 @@ mod tests {
     }
 
     #[test]
+    fn test_shell_pipelines() {
+        // Simple pipeline
+        assert_eq!(
+            shell_pipelines("cmd1 | cmd2"),
+            vec![vec!["cmd1".to_string(), "cmd2".to_string()]]
+        );
+
+        // Pipeline with pipe-and
+        assert_eq!(
+            shell_pipelines("cmd1 |& cmd2"),
+            vec![vec!["cmd1".to_string(), "cmd2".to_string()]]
+        );
+
+        // Multiple pipelines separated by ;
+        assert_eq!(
+            shell_pipelines("cmd1 | cmd2 ; cmd3 | cmd4"),
+            vec![
+                vec!["cmd1".to_string(), "cmd2".to_string()],
+                vec!["cmd3".to_string(), "cmd4".to_string()]
+            ]
+        );
+
+        // Logical separators (&&, ||)
+        assert_eq!(
+            shell_pipelines("cmd1 | cmd2 && cmd3 | cmd4 || cmd5 | cmd6"),
+            vec![
+                vec!["cmd1".to_string(), "cmd2".to_string()],
+                vec!["cmd3".to_string(), "cmd4".to_string()],
+                vec!["cmd5".to_string(), "cmd6".to_string()]
+            ]
+        );
+
+        // Newline and ampersand separators
+        assert_eq!(
+            shell_pipelines("cmd1 | cmd2 \n cmd3 | cmd4 & cmd5 | cmd6"),
+            vec![
+                vec!["cmd1".to_string(), "cmd2".to_string()],
+                vec!["cmd3".to_string(), "cmd4".to_string()],
+                vec!["cmd5".to_string(), "cmd6".to_string()]
+            ]
+        );
+
+        // Quoted pipe (should not split)
+        assert_eq!(
+            shell_pipelines("cmd1 \"|\" cmd2 | cmd3"),
+            vec![vec!["cmd1 \"|\" cmd2".to_string(), "cmd3".to_string()]]
+        );
+
+        // Escaped pipe (should not split)
+        assert_eq!(
+            shell_pipelines("cmd1 \\| cmd2 | cmd3"),
+            vec![vec!["cmd1 \\| cmd2".to_string(), "cmd3".to_string()]]
+        );
+
+        // Single command (no pipeline) - should return empty list
+        assert!(shell_pipelines("cmd1").is_empty());
+        assert!(shell_pipelines("cmd1 arg1 arg2").is_empty());
+    }
+
+    #[test]
     fn known_bypasses_are_now_dangerous() {
         for command in [
             "rm -r -f /",
