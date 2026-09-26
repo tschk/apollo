@@ -135,148 +135,150 @@ impl AutonomousLoop {
     }
 
     /// Start the autonomous loop. Runs indefinitely.
-    pub async fn run(self, agent: std::sync::Arc<crate::agent::AgentRunner>) {
-        let config = self.config.clone();
-        let workspace = self.workspace.clone();
-        let mut status = self.status;
-
+    pub async fn run(mut self, agent: std::sync::Arc<crate::agent::AgentRunner>) {
         tracing::info!(
             "[autonomous] starting (interval={}s, workspace={:?})",
-            config.interval_secs,
-            workspace
+            self.config.interval_secs,
+            self.workspace
         );
 
         loop {
-            tokio::time::sleep(Duration::from_secs(config.interval_secs)).await;
+            tokio::time::sleep(Duration::from_secs(self.config.interval_secs)).await;
+            self.run_once(&agent).await;
+        }
+    }
 
-            if status.paused || status.state == AutonomousState::Paused {
-                tracing::debug!("[autonomous] paused, skipping");
-                continue;
+    async fn run_once(&mut self, agent: &crate::agent::AgentRunner) {
+        let config = self.config.clone();
+        let workspace = self.workspace.clone();
+
+        if self.status.paused || self.status.state == AutonomousState::Paused {
+            tracing::debug!("[autonomous] paused, skipping");
+            return;
+        }
+
+        // Read the task ledger
+        let todo_path = workspace.join(&config.todo_path);
+        let todo_content = match std::fs::read_to_string(&todo_path) {
+            Ok(c) => c.trim().to_string(),
+            Err(e) => {
+                tracing::debug!("[autonomous] no TODO.md ({}), skipping", e);
+                self.status.state = AutonomousState::Idle;
+                Self::save_status_to_file(&self.status, &self.status_path);
+                return;
             }
+        };
 
-            // Read the task ledger
-            let todo_path = workspace.join(&config.todo_path);
-            let todo_content = match std::fs::read_to_string(&todo_path) {
-                Ok(c) => c.trim().to_string(),
-                Err(e) => {
-                    tracing::debug!("[autonomous] no TODO.md ({}), skipping", e);
-                    status.state = AutonomousState::Idle;
-                    Self::save_status_to_file(&status, &self.status_path);
-                    continue;
-                }
-            };
+        if todo_content.is_empty() || todo_content == "## Implemented\n\n## Pending\n" {
+            self.status.state = AutonomousState::Idle;
+            Self::save_status_to_file(&self.status, &self.status_path);
+            return;
+        }
 
-            if todo_content.is_empty() || todo_content == "## Implemented\n\n## Pending\n" {
-                status.state = AutonomousState::Idle;
-                Self::save_status_to_file(&status, &self.status_path);
-                continue;
+        // Check workspace is clean before starting a new task
+        if self.status.state == AutonomousState::Idle
+            || self.status.state == AutonomousState::Succeeded
+            || self.status.state == AutonomousState::Failed
+        {
+            let workspace_changed = workspace_has_changes(&workspace).await;
+            if workspace_changed {
+                tracing::info!("[autonomous] workspace has changes, stashing before new task");
+                git_stash(&workspace).await;
             }
+        }
 
-            // Check workspace is clean before starting a new task
-            if status.state == AutonomousState::Idle
-                || status.state == AutonomousState::Succeeded
-                || status.state == AutonomousState::Failed
-            {
-                let workspace_changed = workspace_has_changes(&workspace).await;
-                if workspace_changed {
-                    tracing::info!("[autonomous] workspace has changes, stashing before new task");
-                    git_stash(&workspace).await;
-                }
-            }
+        self.status.state = AutonomousState::Running;
+        self.status.current_task = Some("processing TODO.md".into());
+        Self::save_status_to_file(&self.status, &self.status_path);
 
-            status.state = AutonomousState::Running;
-            status.current_task = Some("processing TODO.md".into());
-            Self::save_status_to_file(&status, &self.status_path);
+        tracing::info!("[autonomous] running agent on TODO.md");
+        let instruction = format!(
+            "Working autonomously. Task ledger:\n\n{}\n\n\
+             Read the TODO.md, pick the next pending item, implement it, \
+             and validate with: {}",
+            todo_content, config.test_command
+        );
 
-            tracing::info!("[autonomous] running agent on TODO.md");
-            let instruction = format!(
-                "Working autonomously. Task ledger:\n\n{}\n\n\
-                 Read the TODO.md, pick the next pending item, implement it, \
-                 and validate with: {}",
-                todo_content, config.test_command
-            );
+        let null_ch = NullChannel::new("autonomous");
+        match agent
+            .handle_message(
+                &IncomingMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    sender_id: "autonomous".into(),
+                    sender_name: Some("Autonomous".into()),
+                    chat_id: "autonomous".into(),
+                    text: instruction,
+                    is_group: false,
+                    reply_to: None,
+                    timestamp: chrono::Utc::now(),
+                },
+                &null_ch,
+            )
+            .await
+        {
+            Ok(response) => {
+                self.status.last_result =
+                    Some(response.chars().take(500).collect::<String>() + "...");
+                self.status.last_run = Some(chrono::Utc::now().to_rfc3339());
 
-            let null_ch = NullChannel::new("autonomous");
-            match agent
-                .handle_message(
-                    &IncomingMessage {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        sender_id: "autonomous".into(),
-                        sender_name: Some("Autonomous".into()),
-                        chat_id: "autonomous".into(),
-                        text: instruction,
-                        is_group: false,
-                        reply_to: None,
-                        timestamp: chrono::Utc::now(),
-                    },
-                    &null_ch,
-                )
-                .await
-            {
-                Ok(response) => {
-                    status.last_result =
-                        Some(response.chars().take(500).collect::<String>() + "...");
-                    status.last_run = Some(chrono::Utc::now().to_rfc3339());
+                // Run validation tests
+                if !config.test_command.is_empty() {
+                    match run_test_command(&config.test_command, &workspace).await {
+                        Ok(true) => {
+                            tracing::info!("[autonomous] tests passed");
+                            self.status.consecutive_failures = 0;
+                            self.status.state = AutonomousState::Succeeded;
 
-                    // Run validation tests
-                    if !config.test_command.is_empty() {
-                        match run_test_command(&config.test_command, &workspace).await {
-                            Ok(true) => {
-                                tracing::info!("[autonomous] tests passed");
-                                status.consecutive_failures = 0;
-                                status.state = AutonomousState::Succeeded;
-
-                                // Git commit + push
-                                if !config.git_remote.is_empty() {
-                                    git_commit_and_push(
-                                        "autonomous: auto-commit",
-                                        &config.git_remote,
-                                        &config.git_branch,
-                                        &workspace,
-                                    )
-                                    .await;
-                                }
-                            }
-                            Ok(false) => {
-                                tracing::warn!("[autonomous] tests failed");
-                                status.consecutive_failures += 1;
-                                status.state = AutonomousState::Failed;
-
-                                if status.consecutive_failures >= 3 {
-                                    status.paused = true;
-                                    status.state = AutonomousState::Paused;
-                                    tracing::warn!(
-                                        "[autonomous] paused after {} consecutive failures",
-                                        status.consecutive_failures
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("[autonomous] test error: {}", e);
-                                status.state = AutonomousState::Failed;
+                            // Git commit + push
+                            if !config.git_remote.is_empty() {
+                                git_commit_and_push(
+                                    "autonomous: auto-commit",
+                                    &config.git_remote,
+                                    &config.git_branch,
+                                    &workspace,
+                                )
+                                .await;
                             }
                         }
-                    } else {
-                        status.state = AutonomousState::Succeeded;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("[autonomous] agent error: {}", e);
-                    status.state = AutonomousState::Failed;
-                    status.consecutive_failures += 1;
+                        Ok(false) => {
+                            tracing::warn!("[autonomous] tests failed");
+                            self.status.consecutive_failures += 1;
+                            self.status.state = AutonomousState::Failed;
 
-                    if status.consecutive_failures >= 3 {
-                        status.paused = true;
-                        tracing::warn!(
-                            "[autonomous] paused after {} consecutive failures",
-                            status.consecutive_failures
-                        );
+                            if self.status.consecutive_failures >= 3 {
+                                self.status.paused = true;
+                                self.status.state = AutonomousState::Paused;
+                                tracing::warn!(
+                                    "[autonomous] paused after {} consecutive failures",
+                                    self.status.consecutive_failures
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("[autonomous] test error: {}", e);
+                            self.status.state = AutonomousState::Failed;
+                        }
                     }
+                } else {
+                    self.status.state = AutonomousState::Succeeded;
                 }
             }
+            Err(e) => {
+                tracing::error!("[autonomous] agent error: {}", e);
+                self.status.state = AutonomousState::Failed;
+                self.status.consecutive_failures += 1;
 
-            Self::save_status_to_file(&status, &self.status_path);
+                if self.status.consecutive_failures >= 3 {
+                    self.status.paused = true;
+                    tracing::warn!(
+                        "[autonomous] paused after {} consecutive failures",
+                        self.status.consecutive_failures
+                    );
+                }
+            }
         }
+
+        Self::save_status_to_file(&self.status, &self.status_path);
     }
 }
 
