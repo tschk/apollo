@@ -759,3 +759,44 @@ impl RocksCache {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_rockscache_delete() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let cache = RocksCache::new(temp_dir.path())?;
+
+        let cf = "chunks";
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // 1. Initially empty
+        assert_eq!(cache.get(cf, key)?, None);
+
+        // 2. Put value
+        cache.put(cf, key, value)?;
+
+        // 3. Verify it's there
+        let retrieved = cache.get(cf, key)?;
+        assert_eq!(retrieved.unwrap(), value.to_vec());
+
+        // 4. Delete value
+        cache.delete(cf, key)?;
+
+        // 5. Verify it's gone
+        assert_eq!(cache.get(cf, key)?, None);
+
+        // 6. Test invalid column family error
+        let invalid_cf = "invalid_cf";
+        let err = cache.delete(invalid_cf, key).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Column family invalid_cf not found"));
+
+        Ok(())
+    }
+}
