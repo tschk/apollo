@@ -42,14 +42,28 @@ struct PraefectusRuntime {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum PraefectusArgs {
     Capabilities {},
-    Observe {},
+    Surfaces {},
+    Observe {
+        /// Observe this background surface id (from `surfaces`) instead of the
+        /// active surface; background observation never activates the app.
+        surface: Option<String>,
+    },
     Execute {
         operation_id: String,
         deadline_at_ms: i64,
-        interaction_mode: InteractionMode,
+        /// Defaults to `background_only`: the executed routes are
+        /// target-addressed, so background is the enforced default and the
+        /// engine verifies the desktop was untouched. Pass `interactive`
+        /// explicitly only when the host policy accepts foreground risk.
+        #[serde(default = "default_interaction_mode")]
+        interaction_mode: Option<InteractionMode>,
         desktop_action: Box<Action>,
         target: Box<SemanticTargetRef>,
     },
+}
+
+fn default_interaction_mode() -> Option<InteractionMode> {
+    Some(InteractionMode::BackgroundOnly)
 }
 
 #[derive(Serialize)]
@@ -152,11 +166,26 @@ impl PraefectusRuntime {
                 output: serde_json::to_string(&self.engine.capabilities()?)?,
                 is_error: false,
             }),
-            PraefectusArgs::Observe {} => {
+            PraefectusArgs::Surfaces {} => {
                 let deadline_at_ms = now_ms()?.saturating_add(ACTION_WINDOW_MS);
-                let observation = self
-                    .observer
-                    .observe_semantic(cancellation, deadline_at_ms)?;
+                let surfaces = self.observer.list_surfaces(cancellation, deadline_at_ms)?;
+                Ok(RuntimeOutput {
+                    output: serde_json::to_string(&surfaces)?,
+                    is_error: false,
+                })
+            }
+            PraefectusArgs::Observe { surface } => {
+                let deadline_at_ms = now_ms()?.saturating_add(ACTION_WINDOW_MS);
+                let observation = match surface {
+                    Some(id) => self.observer.observe_surface(
+                        &praefectus::SurfaceRef { id },
+                        cancellation,
+                        deadline_at_ms,
+                    )?,
+                    None => self
+                        .observer
+                        .observe_semantic(cancellation, deadline_at_ms)?,
+                };
                 Ok(RuntimeOutput {
                     output: serde_json::to_string(&tool_observation(&observation)?)?,
                     is_error: false,
@@ -174,6 +203,7 @@ impl PraefectusRuntime {
                         "praefectus execution only permits semantic invoke and set_value actions"
                     );
                 }
+                let interaction_mode = interaction_mode.unwrap_or(InteractionMode::BackgroundOnly);
                 let request = signed_request(
                     *desktop_action,
                     *target,
@@ -340,7 +370,7 @@ impl Tool for PraefectusTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.name().to_string(),
-            description: "Inspect desktop capabilities, observe semantic elements, and request host-authorized fenced actions through Praefectus.".to_string(),
+            description: "Inspect desktop capabilities, list background surfaces, observe semantic elements on the active or a background surface, and request host-authorized fenced actions through Praefectus. Background interaction is the default: list surfaces, observe one without activating it, then execute with the default background_only mode. Moving the cursor or switching apps is not available through this tool and must not be improvised with shell commands.".to_string(),
             parameters: json!({
                 "oneOf": [
                     {
@@ -351,7 +381,16 @@ impl Tool for PraefectusTool {
                     },
                     {
                         "type": "object",
-                        "properties": { "action": { "const": "observe" } },
+                        "properties": { "action": { "const": "surfaces" } },
+                        "required": ["action"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": { "const": "observe" },
+                            "surface": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Background surface id from `surfaces`; observing it never activates the app" }
+                        },
                         "required": ["action"],
                         "additionalProperties": false
                     },
@@ -361,7 +400,7 @@ impl Tool for PraefectusTool {
                             "action": { "const": "execute" },
                             "operation_id": { "type": "string", "minLength": 1, "maxLength": 256 },
                             "deadline_at_ms": { "type": "integer" },
-                            "interaction_mode": { "type": "string", "enum": ["interactive", "background_only"] },
+                            "interaction_mode": { "type": "string", "enum": ["interactive", "background_only"], "default": "background_only", "description": "Defaults to background_only; the engine verifies the desktop was untouched. Pass interactive only when host policy accepts foreground risk." },
                             "desktop_action": {
                                 "oneOf": [
                                     {
@@ -394,7 +433,7 @@ impl Tool for PraefectusTool {
                                 "additionalProperties": false
                             }
                         },
-                        "required": ["action", "operation_id", "deadline_at_ms", "interaction_mode", "desktop_action", "target"],
+                        "required": ["action", "operation_id", "deadline_at_ms", "desktop_action", "target"],
                         "additionalProperties": false
                     }
                 ]
@@ -480,6 +519,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn execute_defaults_to_background_interaction() {
+        let args: PraefectusArgs = serde_json::from_str(
+            r#"{"action":"execute","operation_id":"op:1","deadline_at_ms":1,"desktop_action":{"kind":"invoke"},"target":{"observation_id":"1a","generation":1,"provenance_hash":"2b","element_id":"3c","fingerprint_hash":"4d"}}"#,
+        )
+        .expect("execute without interaction_mode should parse");
+        let interaction_mode = match args {
+            PraefectusArgs::Execute {
+                interaction_mode, ..
+            } => interaction_mode,
+            _ => panic!("execute should parse into the execute variant"),
+        };
+        assert_eq!(
+            interaction_mode,
+            Some(InteractionMode::BackgroundOnly),
+            "omitted interaction_mode must default to background_only"
+        );
+    }
+
+    #[test]
+    fn observe_action_still_parses_without_a_surface() {
+        let args: PraefectusArgs =
+            serde_json::from_str(r#"{"action":"observe"}"#).expect("observe should parse");
+        assert!(matches!(args, PraefectusArgs::Observe { surface: None }));
+    }
+
+    #[test]
+    fn observe_action_accepts_a_background_surface_id() {
+        let args: PraefectusArgs =
+            serde_json::from_str(r#"{"action":"observe","surface":"1a2b3c"}"#)
+                .expect("observe with surface should parse");
+        let surface = match args {
+            PraefectusArgs::Observe { surface } => surface,
+            _ => panic!("observe should parse into the observe variant"),
+        };
+        assert_eq!(surface.as_deref(), Some("1a2b3c"));
+    }
+
+    #[test]
+    fn surfaces_action_parses() {
+        let args: PraefectusArgs =
+            serde_json::from_str(r#"{"action":"surfaces"}"#).expect("surfaces should parse");
+        assert!(matches!(args, PraefectusArgs::Surfaces {}));
+    }
+
     #[tokio::test]
     async fn host_policy_can_disable_computer_use() {
         let dir = tempfile::tempdir().expect("temporary directory should open");
@@ -542,7 +626,7 @@ mod tests {
                     deadline_at_ms: now_ms()
                         .expect("time should resolve")
                         .saturating_add(ACTION_WINDOW_MS),
-                    interaction_mode: InteractionMode::Interactive,
+                    interaction_mode: Some(InteractionMode::Interactive),
                     desktop_action: Box::new(Action::Invoke),
                     target: Box::new(target()),
                 },
