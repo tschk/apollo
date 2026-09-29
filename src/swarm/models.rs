@@ -51,6 +51,97 @@ impl AgentLink {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_link_builder() {
+        let link = AgentLink::new(
+            "source1".to_string(),
+            "target1".to_string(),
+            LinkDirection::Outbound,
+        )
+        .with_max_concurrent(5);
+        assert_eq!(link.source_agent_id, "source1");
+        assert_eq!(link.target_agent_id, "target1");
+        assert_eq!(link.direction, LinkDirection::Outbound);
+        assert_eq!(link.max_concurrent, 5);
+    }
+
+    #[test]
+    fn test_delegation_record_builder() {
+        let record = DelegationRecord::new(
+            "source1".to_string(),
+            "target1".to_string(),
+            "task1".to_string(),
+            DelegationMode::Async,
+        )
+        .with_context("context1".to_string());
+
+        assert_eq!(record.source_agent_id, "source1");
+        assert_eq!(record.target_agent_id, "target1");
+        assert_eq!(record.task, "task1");
+        assert_eq!(record.mode, DelegationMode::Async);
+        assert_eq!(record.context, Some("context1".to_string()));
+    }
+
+    #[test]
+    fn test_team_task_builder() {
+        // Test with blocks
+        let task = TeamTask::new("team1".to_string(), "subject1".to_string())
+            .with_description("desc1".to_string())
+            .with_priority(10)
+            .with_blocked_by(vec!["task2".to_string()]);
+
+        assert_eq!(task.team_id, "team1");
+        assert_eq!(task.subject, "subject1");
+        assert_eq!(task.description, Some("desc1".to_string()));
+        assert_eq!(task.priority, 10);
+        assert_eq!(task.blocked_by, vec!["task2".to_string()]);
+        assert_eq!(task.status, "blocked");
+
+        // Test without blocks (status should remain pending)
+        let task2 =
+            TeamTask::new("team1".to_string(), "subject1".to_string()).with_blocked_by(vec![]);
+        assert_eq!(task2.status, "pending");
+    }
+
+    #[test]
+    fn test_team_message_builder() {
+        let msg = TeamMessage::new(
+            "team1".to_string(),
+            "from1".to_string(),
+            "content1".to_string(),
+        )
+        .directed("to1".to_string())
+        .with_type("alert".to_string());
+
+        assert_eq!(msg.team_id, "team1");
+        assert_eq!(msg.from_agent_id, "from1");
+        assert_eq!(msg.content, "content1");
+        assert_eq!(msg.to_agent_id, Some("to1".to_string()));
+        assert_eq!(msg.message_type, "alert");
+    }
+
+    #[test]
+    fn test_handoff_route_builder() {
+        let route = HandoffRoute::new(
+            "channel1".to_string(),
+            "chat1".to_string(),
+            "from_key1".to_string(),
+            "to_key1".to_string(),
+        )
+        .with_context("ctx1".to_string());
+
+        assert_eq!(route.channel, "channel1");
+        assert_eq!(route.chat_id, "chat1");
+        assert_eq!(route.from_agent_key, "from_key1");
+        assert_eq!(route.to_agent_key, "to_key1");
+        assert_eq!(route.context, Some("ctx1".to_string()));
+    }
+}
+
 /// Delegation record — tracks a delegation request and its outcome
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelegationRecord {
