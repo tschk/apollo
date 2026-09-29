@@ -259,7 +259,7 @@ pub fn expand_inline_shell(content: &str, cwd: Option<&Path>, _timeout_secs: u64
 
             let parts = match shlex::split(cmd) {
                 Some(p) => p,
-                None => return format!("[inline-shell error: invalid command quoting]"),
+                None => return "[inline-shell error: invalid command quoting]".to_string(),
             };
 
             if parts.is_empty() {
