@@ -469,7 +469,12 @@ pub struct Dial {
 /// Oracle, main, subagents. Empty role models fall back to the chat model,
 /// except oracle, which prefers `agent.fast_model`.
 pub fn read_dials(path: &std::path::Path, fallback_model: &str) -> [Dial; 3] {
-    let config = read_config(path);
+    dials_of(&read_config(path), fallback_model)
+}
+
+/// Dials from an already-parsed config. Rendering uses this so a frame
+/// does not read apollo.json.
+pub fn dials_of(config: &serde_json::Value, fallback_model: &str) -> [Dial; 3] {
     let agent = &config["agent"];
     let roles = &agent["roles"];
     let fast = agent["fast_model"].as_str().unwrap_or("");
@@ -781,6 +786,7 @@ fn env_line(l: &str) -> Option<(&str, bool)> {
 
 /// Does the dotenv at `path` set `var` to a non-empty value? The value
 /// itself is never read out of this function.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn env_has(path: &Path, var: &str) -> bool {
     std::fs::read_to_string(path)
         .map(|text| {
@@ -793,6 +799,24 @@ pub fn env_has(path: &Path, var: &str) -> bool {
 /// Variable NAMES of every configured `*_API_KEY` / `*_TOKEN` entry in the
 /// dotenv at `path` — names only, so the UI can list credentials without
 /// ever holding a value.
+/// Names of dotenv variables that have a non-empty value. Values stay in
+/// the file.
+pub fn env_names(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some((name, true)) = env_line(line) else {
+            continue;
+        };
+        if !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 pub fn configured_keys(env_path: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(env_path) else {
         return Vec::new();

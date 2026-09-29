@@ -11,7 +11,8 @@
 //!
 //! Lists that came from the network are cached at
 //! `~/.apollo/models/<provider>.json` so the picker is instant next time.
-//! Everything here blocks; the UI calls it on a worker thread. Keys are only
+//! Network and disk reads block. The UI paints from the in-memory catalog
+//! (`catalog_effort`) and calls the blocking functions on a worker. Keys are only
 //! ever put in request headers — never logged, cached or returned in errors.
 
 use std::path::PathBuf;
@@ -228,21 +229,72 @@ pub fn parse_listing(v: &serde_json::Value) -> Vec<String> {
     Vec::new()
 }
 
-/// Process-wide memo so opening the picker does not re-parse a multi-MB
-/// catalog on every keystroke-adjacent refresh.
-fn process_catalog() -> &'static std::sync::Mutex<Option<(u64, serde_json::Value)>> {
-    static CACHE: std::sync::Mutex<Option<(u64, serde_json::Value)>> = std::sync::Mutex::new(None);
+/// Process-wide memo of the parsed models.dev catalog, keyed by cache
+/// directory so a test's temp home cannot leak into another.
+struct CatalogMemo {
+    dir: PathBuf,
+    at: u64,
+    catalog: serde_json::Value,
+}
+
+fn process_catalog() -> &'static std::sync::Mutex<Option<CatalogMemo>> {
+    static CACHE: std::sync::Mutex<Option<CatalogMemo>> = std::sync::Mutex::new(None);
     &CACHE
+}
+
+fn fresh_catalog() -> Option<serde_json::Value> {
+    let dir = cache_dir()?;
+    let guard = process_catalog().lock().ok()?;
+    let memo = guard.as_ref()?;
+    if memo.dir == dir && now().saturating_sub(memo.at) < MODELS_DEV_TTL {
+        Some(memo.catalog.clone())
+    } else {
+        None
+    }
+}
+
+fn remember_catalog(catalog: &serde_json::Value) {
+    let Some(dir) = cache_dir() else {
+        return;
+    };
+    if let Ok(mut guard) = process_catalog().lock() {
+        *guard = Some(CatalogMemo {
+            dir,
+            at: now(),
+            catalog: catalog.clone(),
+        });
+    }
+}
+
+/// Load and parse the models.dev catalog if it is not already in memory.
+/// Blocking. Call from a worker, never from a frame.
+pub fn warm_catalog() {
+    let _ = models_dev_catalog();
+}
+
+/// What a frame may show for a model's effort dial. Never touches disk or
+/// the network: [`CatalogEffort::Pending`] means a worker has not finished
+/// [`warm_catalog`] yet.
+pub enum CatalogEffort {
+    Pending,
+    Absent,
+    Levels(Vec<String>),
+}
+
+pub fn catalog_effort(model_id: &str) -> CatalogEffort {
+    match fresh_catalog() {
+        None => CatalogEffort::Pending,
+        Some(catalog) => match effort_levels_from_catalog(&catalog, model_id) {
+            Some(levels) => CatalogEffort::Levels(levels),
+            None => CatalogEffort::Absent,
+        },
+    }
 }
 
 /// The models.dev catalog, from the day-old cache or the network.
 fn models_dev_catalog() -> Option<serde_json::Value> {
-    if let Ok(guard) = process_catalog().lock() {
-        if let Some((at, catalog)) = guard.as_ref() {
-            if now().saturating_sub(*at) < MODELS_DEV_TTL {
-                return Some(catalog.clone());
-            }
-        }
+    if let Some(catalog) = fresh_catalog() {
+        return Some(catalog);
     }
     let path = cache_dir().map(|d| d.join("models.dev.json"));
     let cached: Option<serde_json::Value> = path
@@ -252,7 +304,9 @@ fn models_dev_catalog() -> Option<serde_json::Value> {
     if let Some(c) = &cached {
         let at = c["fetched_at"].as_u64().unwrap_or(0);
         if now().saturating_sub(at) < MODELS_DEV_TTL {
-            return Some(c["catalog"].clone());
+            let catalog = c["catalog"].clone();
+            remember_catalog(&catalog);
+            return Some(catalog);
         }
     }
     let fresh = client()
@@ -275,9 +329,7 @@ fn models_dev_catalog() -> Option<serde_json::Value> {
         None => cached.map(|c| c["catalog"].clone()),
     };
     if let Some(catalog) = result.as_ref() {
-        if let Ok(mut guard) = process_catalog().lock() {
-            *guard = Some((now(), catalog.clone()));
-        }
+        remember_catalog(catalog);
     }
     result
 }
@@ -449,12 +501,17 @@ pub fn filter_models(models: &[String], query: &str) -> Vec<String> {
 /// Effort tokens models.dev lists for this model, in catalog order.
 /// `None` means the model has no reasoning dial, so the UI hides it.
 pub fn effort_levels(model_id: &str) -> Option<Vec<String>> {
-    // Cache only. Rendering must not wait on the network; a model refresh
-    // fills this file, and the next frame grows or hides the dial.
+    // Memory first. A frame must call [`catalog_effort`] instead, which
+    // refuses to touch disk. This path is for workers and tests: the first
+    // miss reads the file once and fills the process cache.
+    if let Some(catalog) = fresh_catalog() {
+        return effort_levels_from_catalog(&catalog, model_id);
+    }
     let path = cache_dir()?.join("models.dev.json");
     let text = std::fs::read_to_string(path).ok()?;
     let wrapped: serde_json::Value = serde_json::from_str(&text).ok()?;
     let catalog = wrapped.get("catalog").cloned().unwrap_or(wrapped);
+    remember_catalog(&catalog);
     effort_levels_from_catalog(&catalog, model_id)
 }
 
@@ -521,15 +578,34 @@ pub fn effort_token(value: &str) -> Option<&'static str> {
 
 /// Keep `current` when the model still offers it. Otherwise the middle option,
 /// or nothing when the model has no dial.
+fn snap_levels(levels: &[String], current: &str) -> String {
+    if levels.iter().any(|level| level == current) {
+        return current.to_string();
+    }
+    levels
+        .iter()
+        .find(|level| *level == "medium" || *level == "high")
+        .cloned()
+        .or_else(|| levels.first().cloned())
+        .unwrap_or_default()
+}
+
+/// Snap using only the in-memory catalog. `None` means the catalog is not
+/// loaded yet — the caller must not fall through to disk on the UI thread.
+pub fn snap_ready(model_id: &str, current: &str) -> Option<String> {
+    match catalog_effort(model_id) {
+        CatalogEffort::Pending => None,
+        CatalogEffort::Absent => Some(String::new()),
+        CatalogEffort::Levels(levels) => Some(snap_levels(&levels, current)),
+    }
+}
+
 pub fn snap_effort(model_id: &str, current: &str) -> String {
+    if let Some(snapped) = snap_ready(model_id, current) {
+        return snapped;
+    }
     match effort_levels(model_id) {
-        Some(levels) if levels.iter().any(|level| level == current) => current.to_string(),
-        Some(levels) => levels
-            .iter()
-            .find(|level| *level == "medium" || *level == "high")
-            .cloned()
-            .or_else(|| levels.first().cloned())
-            .unwrap_or_default(),
+        Some(levels) => snap_levels(&levels, current),
         None => String::new(),
     }
 }
@@ -633,6 +709,15 @@ mod tests {
             assert!(got.models.contains(&"glm-5.1".to_string()));
             assert!(err.is_none());
             assert_eq!(cached("zai-coding-plan").unwrap().source, Source::ModelsDev);
+
+            // The disk hit must stick in memory. Deleting the file must not
+            // force another read on the next lookup.
+            let dev = dir.join("models.dev.json");
+            std::fs::remove_file(&dev).unwrap();
+            assert!(fresh_catalog().is_some());
+            assert!(models_dev("zai-coding-plan")
+                .unwrap()
+                .contains(&"glm-5.1".into()));
 
             let (got, _) = resolve("groq", None, &[]);
             assert_eq!(got.source, Source::Catalog);

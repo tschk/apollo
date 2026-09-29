@@ -168,6 +168,11 @@ pub struct OnboardingView {
     profile: &'static ProfileInfo,
     mode: Mode,
     signed_in: [bool; 3],
+    /// False until a worker has read the credential files.
+    creds_known: bool,
+    /// The person already edited this flow; a late seed must not overwrite it.
+    touched: bool,
+    saving: bool,
     sign_in: SignIn,
     prompt: String,
     /// Instance instructions, stored as apollo.json system_prompt.
@@ -183,13 +188,121 @@ pub struct OnboardingView {
     on_finish: Option<OnFinish>,
 }
 
+struct OnboardingSeed {
+    state: DesktopState,
+    editing: Option<String>,
+    provider_id: String,
+    model: String,
+    everywhere: bool,
+    workspace: String,
+    name: String,
+    profile_id: String,
+    base_url: String,
+    custom_name: String,
+    effort: String,
+    mode: Mode,
+    signed_in: [bool; 3],
+}
+
+enum ModelsMsg {
+    Preview(ModelList),
+    Final(ModelList, Option<String>),
+}
+
+/// Everything `OnboardingView::new` used to read before the first frame.
+fn hydrate_seed(purpose: Purpose) -> OnboardingSeed {
+    let state = DesktopState::load().unwrap_or_default();
+    let active = state
+        .active
+        .as_deref()
+        .and_then(|id| state.instance(id))
+        .or_else(|| state.instances.first())
+        .cloned();
+    let editing = match purpose {
+        Purpose::FirstRun => active.as_ref().map(|i| i.id.clone()),
+        Purpose::NewInstance => None,
+    };
+    let provider = active
+        .as_ref()
+        .and_then(|i| setup::provider(&i.provider))
+        .unwrap_or(&OAUTH_PROVIDERS[0]);
+    let model = match (&active, purpose) {
+        (Some(i), Purpose::FirstRun) if !i.model.is_empty() => i.model.clone(),
+        _ => provider.default_model.to_string(),
+    };
+    let (everywhere, workspace, name) = match (&active, purpose) {
+        (Some(i), Purpose::FirstRun) => (
+            i.everywhere,
+            setup::display_path(&i.workspace),
+            i.name.clone(),
+        ),
+        _ => {
+            let names: Vec<&str> = state.instances.iter().map(|i| i.name.as_str()).collect();
+            let name = if names.is_empty() {
+                "apollo".to_string()
+            } else {
+                (2..)
+                    .map(|n| format!("apollo {n}"))
+                    .find(|n| !names.contains(&n.as_str()))
+                    .expect("unbounded")
+            };
+            let folder = setup::default_workspace().with_file_name(setup::instance_id(&name, &[]));
+            (false, setup::display_path(&folder), name)
+        }
+    };
+    let profile = active
+        .as_ref()
+        .and_then(|i| PROFILES.iter().find(|p| p.id == i.permission_profile))
+        .unwrap_or(&PROFILES[0]);
+    let (base_url, custom_name) = if provider.is_custom() {
+        let url = active
+            .as_ref()
+            .map(|i| setup::read_config(&i.config_path()))
+            .and_then(|c| c["provider"]["base_url"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        let custom_name = active
+            .as_ref()
+            .and_then(|i| i.provider.strip_prefix("custom-"))
+            .unwrap_or_default()
+            .to_string();
+        (url, custom_name)
+    } else {
+        (String::new(), String::new())
+    };
+    let effort = match (&active, purpose) {
+        (Some(instance), Purpose::FirstRun) => setup::read_config(&instance.config_path())["agent"]
+            ["reasoning_effort"]
+            .as_str()
+            .and_then(setup::normalize_effort)
+            .unwrap_or("medium")
+            .to_string(),
+        _ => "medium".to_string(),
+    };
+    let mode = state.mode;
+    OnboardingSeed {
+        state,
+        editing,
+        provider_id: provider.id.to_string(),
+        model,
+        everywhere,
+        workspace,
+        name,
+        profile_id: profile.id.to_string(),
+        base_url,
+        custom_name,
+        effort,
+        mode,
+        signed_in: OAUTH_KINDS.map(OAuthKind::signed_in),
+    }
+}
+
 impl OnboardingView {
     pub fn new(
         purpose: Purpose,
         cx: &mut Context<Self>,
         on_finish: impl FnOnce(Option<DesktopState>, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let state = DesktopState::load().unwrap_or_default();
+        let state = DesktopState::default();
         let active = state
             .active
             .as_deref()
@@ -301,7 +414,10 @@ impl OnboardingView {
             name,
             profile,
             mode,
-            signed_in: OAUTH_KINDS.map(OAuthKind::signed_in),
+            signed_in: [false; 3],
+            creds_known: false,
+            touched: false,
+            saving: false,
             sign_in: SignIn::Idle,
             prompt: "Say hello and tell me which model you are, in one sentence.".into(),
             instructions: String::new(),
@@ -313,15 +429,49 @@ impl OnboardingView {
             on_finish: Some(Box::new(on_finish)),
         };
         view.field = view.default_field();
-        view.refresh_models(cx);
-        // A flow started before this view (e.g. a cancelled new instance) is
-        // still listening: show it and pick up its result.
-        if let Auth::OAuth(kind) = view.provider.auth {
-            if kind.in_flight() {
-                view.start_sign_in(kind, cx);
+        view.schedule_seed(cx);
+        view
+    }
+
+    fn schedule_seed(&mut self, cx: &mut Context<Self>) {
+        let purpose = self.purpose;
+        crate::worker::off_ui(
+            cx,
+            move || hydrate_seed(purpose),
+            |view, seed, cx| {
+                view.apply_seed(seed, cx);
+            },
+        );
+    }
+
+    fn apply_seed(&mut self, seed: OnboardingSeed, cx: &mut Context<Self>) {
+        self.signed_in = seed.signed_in;
+        self.creds_known = true;
+        if !self.touched {
+            self.state = seed.state;
+            self.editing = seed.editing;
+            self.provider = setup::provider(&seed.provider_id).unwrap_or(&OAUTH_PROVIDERS[0]);
+            self.model = seed.model;
+            self.everywhere = seed.everywhere;
+            self.workspace = seed.workspace;
+            self.name = seed.name;
+            self.profile = PROFILES
+                .iter()
+                .find(|p| p.id == seed.profile_id)
+                .unwrap_or(&PROFILES[0]);
+            self.base_url = seed.base_url;
+            self.custom_name = seed.custom_name;
+            self.effort = seed.effort;
+            self.mode = seed.mode;
+            self.field = self.default_field();
+            if let Auth::OAuth(kind) = self.provider.auth {
+                if kind.in_flight() {
+                    self.start_sign_in(kind, cx);
+                }
             }
         }
-        view
+        self.refresh_models(cx);
+        cx.notify();
     }
 
     fn steps(&self) -> &'static [Step] {
@@ -439,7 +589,7 @@ impl OnboardingView {
         match self.step {
             Step::Welcome => self.go(Step::Provider, cx),
             Step::Provider => {
-                if self.models_loading {
+                if self.models_loading || self.saving {
                     return;
                 }
                 if let Err((e, field)) = self.check_provider() {
@@ -448,8 +598,26 @@ impl OnboardingView {
                 if self.model.trim().is_empty() {
                     self.model = self.provider.default_model.to_string();
                 }
-                self.effort = models::snap_effort(&self.model, &self.effort);
-                self.go(Step::Workspace, cx)
+                let model = self.model.clone();
+                let effort = self.effort.clone();
+                if let Some(snapped) = models::snap_ready(&model, &effort) {
+                    self.effort = snapped;
+                    self.go(Step::Workspace, cx);
+                } else {
+                    self.saving = true;
+                    crate::worker::off_ui(
+                        cx,
+                        move || {
+                            models::warm_catalog();
+                            models::snap_effort(&model, &effort)
+                        },
+                        |view, snapped, cx| {
+                            view.saving = false;
+                            view.effort = snapped;
+                            view.go(Step::Workspace, cx);
+                        },
+                    );
+                }
             }
             Step::Workspace => {
                 if self.name.trim().is_empty() {
@@ -473,14 +641,28 @@ impl OnboardingView {
                 }
                 self.go(Step::Permissions, cx)
             }
-            Step::Permissions => match setup::write_setup(&self.choices()) {
-                Ok(written) => {
-                    self.written = Some(written);
-                    self.test = TestState::Idle;
-                    self.go(Step::Test, cx);
+            Step::Permissions => {
+                if self.saving {
+                    return;
                 }
-                Err(e) => self.fail(e, None, cx),
-            },
+                self.saving = true;
+                let choices = self.choices();
+                crate::worker::off_ui(
+                    cx,
+                    move || setup::write_setup(&choices),
+                    |view, result, cx| {
+                        view.saving = false;
+                        match result {
+                            Ok(written) => {
+                                view.written = Some(written);
+                                view.test = TestState::Idle;
+                                view.go(Step::Test, cx);
+                            }
+                            Err(e) => view.fail(e, None, cx),
+                        }
+                    },
+                );
+            }
             Step::Test => {
                 if matches!(self.test, TestState::Running(_)) {
                     return;
@@ -537,14 +719,42 @@ impl OnboardingView {
         if self.purpose == Purpose::FirstRun {
             state.mode = self.mode;
         }
-        if let Err(e) = state.save() {
-            return self.fail(e, None, cx);
+        if self.saving {
+            return;
         }
-        // The key is on disk now; drop the in-memory copy.
+        self.saving = true;
         self.api_key.clear();
-        if let Some(on_finish) = self.on_finish.take() {
-            on_finish(Some(state), window, cx);
-        }
+        let handle = window.window_handle();
+        let (tx, rx) = channel();
+        crate::worker::enqueue(move || {
+            let _ = tx.send(state.save().map(|_| state));
+        });
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
+            match rx.try_recv() {
+                Ok(Ok(state)) => {
+                    cx.update_window(handle, |_root, window, app| {
+                        crate::open_chat(state, window, app);
+                    })
+                    .ok();
+                    break;
+                }
+                Ok(Err(error)) => {
+                    this.update(cx, |view, cx| {
+                        view.saving = false;
+                        view.fail(error, None, cx);
+                    })
+                    .ok();
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(40))
+                        .await;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        })
+        .detach();
     }
 
     fn on_next(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -650,6 +860,7 @@ impl OnboardingView {
     }
 
     fn pick_provider(&mut self, provider: &'static ProviderInfo, cx: &mut Context<Self>) {
+        self.touched = true;
         let changed = self.provider.id != provider.id;
         if changed {
             // A key for one provider is never valid for another.
@@ -677,7 +888,7 @@ impl OnboardingView {
         self.pick_provider(provider, cx);
         if let Auth::OAuth(kind) = provider.auth {
             let waiting = matches!(self.sign_in, SignIn::Waiting(k, _) if k == kind);
-            if !waiting && !self.signed_in[kind_index(kind)] {
+            if self.creds_known && !waiting && !self.signed_in[kind_index(kind)] {
                 self.start_sign_in(kind, cx);
             }
         }
@@ -729,37 +940,6 @@ impl OnboardingView {
         }
     }
 
-    /// Show the saved list immediately. A live refresh may replace it, but
-    /// the picker must not wait on that call.
-    fn seed_saved_models(&mut self, cache_as: &str) {
-        if self
-            .models
-            .as_ref()
-            .is_some_and(|list| !list.models.is_empty())
-        {
-            return;
-        }
-        let saved = models::cached(cache_as).filter(|list| !list.models.is_empty());
-        let list = saved.unwrap_or_else(|| {
-            let models = models::catalog_models(cache_as);
-            models::ModelList {
-                provider: cache_as.to_string(),
-                source: models::Source::Catalog,
-                fetched_at: 0,
-                models,
-            }
-        });
-        if list.models.is_empty() {
-            return;
-        }
-        if self.model.trim().is_empty() {
-            if let Some(first) = list.models.first() {
-                self.model = first.clone();
-            }
-        }
-        self.models = Some(list);
-    }
-
     /// Fetch the model list on a worker thread: live listing when there is
     /// a credential, else models.dev, else the built-in catalog.
     fn refresh_models(&mut self, cx: &mut Context<Self>) {
@@ -768,15 +948,17 @@ impl OnboardingView {
             _ if self.provider.catalog.is_empty() => self.provider.id.to_string(),
             _ => self.provider.catalog.to_string(),
         };
-        self.seed_saved_models(&cache_as);
         let live = self.live_listing();
         let current = self.model.trim().to_string();
         self.models_gen += 1;
         let gen = self.models_gen;
         self.models_loading = true;
         cx.notify();
-        let (tx, rx) = channel::<(ModelList, Option<String>)>();
+        let (tx, rx) = channel::<ModelsMsg>();
         std::thread::spawn(move || {
+            if let Some(saved) = models::cached(&cache_as).filter(|list| !list.models.is_empty()) {
+                let _ = tx.send(ModelsMsg::Preview(saved));
+            }
             let live = match live {
                 Some(LiveListing::Http(url, auth)) => Some((url, auth)),
                 Some(LiveListing::OAuth(kind)) => kind.access_token().map(|t| {
@@ -792,16 +974,36 @@ impl OnboardingView {
                 .into_iter()
                 .filter(|m| !m.is_empty())
                 .collect();
-            let out = models::resolve(
+            let (list, note) = models::resolve(
                 &cache_as,
                 live.as_ref().map(|(u, a)| (u.as_str(), a.clone())),
                 &extra,
             );
-            let _ = tx.send(out);
+            let _ = tx.send(ModelsMsg::Final(list, note));
         });
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
             match rx.try_recv() {
-                Ok((list, note)) => {
+                Ok(ModelsMsg::Preview(list)) => {
+                    this.update(cx, |view, cx| {
+                        if view.models_gen == gen
+                            && view
+                                .models
+                                .as_ref()
+                                .map(|have| have.models.is_empty())
+                                .unwrap_or(true)
+                        {
+                            if view.model.trim().is_empty() {
+                                if let Some(first) = list.models.first() {
+                                    view.model = first.clone();
+                                }
+                            }
+                            view.models = Some(list);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                }
+                Ok(ModelsMsg::Final(list, note)) => {
                     this.update(cx, |view, cx| {
                         if view.models_gen == gen {
                             view.models_loading = false;
@@ -855,10 +1057,12 @@ impl OnboardingView {
         self.sign_in = SignIn::Waiting(kind, Instant::now());
         self.error.clear();
         cx.notify();
-        let (tx, rx) = channel::<Result<(), String>>();
+        let (tx, rx) = channel::<(Result<(), String>, bool)>();
         if kind.claim() {
             std::thread::spawn(move || {
-                let _ = tx.send(kind.sign_in());
+                let outcome = kind.sign_in();
+                let signed = kind.signed_in();
+                let _ = tx.send((outcome, signed));
             });
         } else {
             // An earlier attempt is still listening on the callback port;
@@ -867,23 +1071,27 @@ impl OnboardingView {
                 while kind.in_flight() {
                     std::thread::sleep(Duration::from_millis(300));
                 }
-                let _ = tx.send(if kind.signed_in() {
+                let signed = kind.signed_in();
+                let outcome = if signed {
                     Ok(())
                 } else {
                     Err("sign-in did not complete".into())
-                });
+                };
+                let _ = tx.send((outcome, signed));
             });
         }
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
             match rx.try_recv() {
-                Ok(outcome) => {
-                    this.update(cx, |view, cx| view.sign_in_finished(kind, outcome, cx))
-                        .ok();
+                Ok((outcome, signed)) => {
+                    this.update(cx, |view, cx| {
+                        view.sign_in_finished(kind, outcome, signed, cx)
+                    })
+                    .ok();
                     break;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     this.update(cx, |view, cx| {
-                        view.sign_in_finished(kind, Err("sign-in stopped".into()), cx)
+                        view.sign_in_finished(kind, Err("sign-in stopped".into()), false, cx)
                     })
                     .ok();
                     break;
@@ -901,11 +1109,14 @@ impl OnboardingView {
         &mut self,
         kind: OAuthKind,
         outcome: Result<(), String>,
+        signed: bool,
         cx: &mut Context<Self>,
     ) {
         let i = kind_index(kind);
-        // Whatever the UI showed, the store is the truth.
-        self.signed_in[i] = kind.signed_in();
+        // The worker already read the store. Do not open the credential
+        // files again on the UI thread.
+        self.creds_known = true;
+        self.signed_in[i] = signed;
         let watching = matches!(self.sign_in, SignIn::Waiting(k, _) if k == kind);
         if watching {
             self.sign_in = match outcome {
@@ -940,6 +1151,7 @@ impl OnboardingView {
     // ── Keyboard ───────────────────────────────────────────────────────────
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.touched = true;
         let stroke = &event.keystroke;
         let key = stroke.key.as_str();
 
@@ -1161,6 +1373,9 @@ impl OnboardingView {
     /// Status line under a pinned sign-in card.
     fn oauth_status(&self, kind: OAuthKind) -> (String, u32) {
         let i = kind_index(kind);
+        if !self.creds_known {
+            return ("checking saved login…".into(), MUTED);
+        }
         if let SignIn::Waiting(k, _) = self.sign_in {
             if k == kind {
                 return ("sign-in opened in your browser".into(), WARN);
@@ -1586,8 +1801,11 @@ impl OnboardingView {
     }
 
     fn effort_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(levels) = models::effort_levels(&self.model) else {
-            return div().into_any_element();
+        let levels = match models::catalog_effort(&self.model) {
+            models::CatalogEffort::Levels(levels) => levels,
+            models::CatalogEffort::Pending | models::CatalogEffort::Absent => {
+                return div().into_any_element();
+            }
         };
         let chips = levels.iter().enumerate().map(|(i, level)| {
             let on = self.effort == *level;

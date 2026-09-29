@@ -70,7 +70,7 @@ pub(crate) enum EditField {
 /// when a credential exists and the provider is switchable.
 pub(crate) struct RailEntry {
     provider: &'static ProviderInfo,
-    reason: Option<&'static str>,
+    reason: Option<String>,
 }
 
 /// The model picker overlay: providers on the left, their models on the
@@ -135,6 +135,122 @@ impl ApolloView {
         }
     }
 
+    fn bump_config(&mut self) -> u64 {
+        self.config_gen = self.config_gen.wrapping_add(1);
+        self.config_gen
+    }
+
+    fn bump_state(&mut self) -> u64 {
+        self.state_gen = self.state_gen.wrapping_add(1);
+        self.state_gen
+    }
+
+    fn env_set(&self, var: &str) -> bool {
+        self.env_names.iter().any(|name| name == var)
+    }
+
+    /// Parsed config, key names, and which OAuth logins exist. Disk only.
+    pub(crate) fn load_snapshot(&mut self, cx: &mut Context<Self>) {
+        let config_path = self.instance.config_path();
+        let env_path = self.instance.env_path();
+        let seen = self.config_gen;
+        crate::worker::off_ui(
+            cx,
+            move || {
+                let config = setup::read_config(&config_path);
+                let env_names = setup::env_names(&env_path);
+                let keys = setup::configured_keys(&env_path);
+                let oauth = [
+                    OAuthKind::ChatGpt.signed_in(),
+                    OAuthKind::Copilot.signed_in(),
+                    OAuthKind::Claude.signed_in(),
+                ];
+                (config, env_names, keys, oauth)
+            },
+            move |view, (config, env_names, keys, oauth), cx| {
+                if view.config_gen == seen {
+                    view.config_cache = config;
+                    view.config_ready = true;
+                }
+                view.env_names = env_names;
+                view.keys_cache = keys;
+                view.oauth_signed_in = oauth;
+                view.creds_ready = true;
+                view.refresh_rail_reasons();
+                cx.notify();
+            },
+        );
+        // The catalog is multi-megabyte. Parse it off to the side so it
+        // does not sit in front of config writes on the IO thread.
+        std::thread::spawn(models::warm_catalog);
+    }
+
+    fn refresh_rail_reasons(&mut self) {
+        let current = self.instance.provider.clone();
+        let creds_ready = self.creds_ready;
+        let oauth = self.oauth_signed_in;
+        let env_names = self.env_names.clone();
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        for entry in &mut picker.rail {
+            if entry.provider.id == current {
+                entry.reason = None;
+            } else {
+                entry.reason =
+                    credential_reason_for(entry.provider, creds_ready, &oauth, &env_names);
+            }
+        }
+    }
+
+    /// Queue a config mutation. The returned document replaces the cache
+    /// when this is still the latest write.
+    fn commit_config(
+        &mut self,
+        cx: &mut Context<Self>,
+        job: impl FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
+        after: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+    ) {
+        let gen = self.bump_config();
+        crate::worker::off_ui(cx, job, move |view, result, cx| {
+            if gen == view.config_gen {
+                match result {
+                    Ok(config) => {
+                        view.config_cache = config;
+                        view.config_ready = true;
+                        after(view, cx);
+                    }
+                    Err(e) => view.notice = e,
+                }
+            }
+            cx.notify();
+        });
+    }
+
+    fn queue_state(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.clone();
+        let gen = self.bump_state();
+        crate::worker::off_ui(
+            cx,
+            move || state.save(),
+            move |view, result, cx| {
+                if gen == view.state_gen {
+                    if let Err(e) = result {
+                        view.notice = e;
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    fn restart_agent(&self) {
+        let dir = self.instance.config_dir.clone();
+        std::thread::spawn(move || {
+            let _ = agent::ensure_daemon(&dir);
+        });
+    }
+
     pub(crate) fn log_event(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::Status(s) => self.log(LogKind::Info, s.clone()),
@@ -174,13 +290,40 @@ impl ApolloView {
             return;
         }
         let mut state = self.state.clone();
-        state.active = Some(id);
-        if let Err(e) = state.save() {
-            self.notice = e;
-            cx.notify();
-            return;
-        }
-        crate::open_chat(state, window, cx);
+        state.active = Some(id.clone());
+        let handle = window.window_handle();
+        let (tx, rx) = channel();
+        crate::worker::enqueue(move || {
+            let _ = tx.send(state.save().map(|_| state));
+        });
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
+            match rx.try_recv() {
+                Ok(Ok(state)) => {
+                    cx.update_window(handle, |_root, window, app| {
+                        crate::open_chat(state, window, app);
+                    })
+                    .ok();
+                    break;
+                }
+                Ok(Err(error)) => {
+                    this.update(cx, |view, cx| {
+                        view.notice = error;
+                        cx.notify();
+                    })
+                    .ok();
+                    break;
+                }
+                Err(TryRecvError::Empty) => {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(40))
+                        .await;
+                }
+                Err(TryRecvError::Disconnected) => break,
+            }
+        })
+        .detach();
+        let _ = id;
+        cx.notify();
     }
 
     fn new_instance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -192,74 +335,93 @@ impl ApolloView {
 
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.state.mode = mode;
-        self.notice = match self.state.save() {
-            Ok(_) => format!(
-                "{} mode saved",
-                if mode == Mode::Simple {
-                    "simple"
-                } else {
-                    "advanced"
-                }
-            ),
-            Err(e) => e,
-        };
+        self.notice = format!(
+            "{} mode saved",
+            if mode == Mode::Simple {
+                "simple"
+            } else {
+                "advanced"
+            }
+        );
         if mode == Mode::Simple && matches!(self.panel, Panel::Tools | Panel::Logs) {
             self.panel = Panel::Settings;
         }
+        self.queue_state(cx);
         cx.notify();
     }
 
     fn set_profile(&mut self, profile: &'static str, cx: &mut Context<Self>) {
         let path = self.instance.config_path();
-        match setup::update_config(&path, |c| setup::apply_profile(c, profile)) {
-            Ok(_) => {
-                self.instance.permission_profile = profile.to_string();
-                self.state.upsert(self.instance.clone());
-                let _ = self.state.save();
-                self.notice = format!("permission profile → {profile} · reloading agent");
-                self.log(LogKind::Info, self.notice.clone());
-                // Stamp changed: ensure_daemon restarts serve so the new
-                // profile is what the agent runs, not only what apollo.json says.
-                let dir = self.instance.config_dir.clone();
-                std::thread::spawn(move || {
-                    let _ = agent::ensure_daemon(&dir);
-                });
-            }
-            Err(e) => self.notice = e,
+        if self.config_ready {
+            setup::apply_profile(&mut self.config_cache, profile);
         }
+        self.instance.permission_profile = profile.to_string();
+        self.state.upsert(self.instance.clone());
+        self.notice = format!("permission profile → {profile} · reloading agent");
+        self.log(LogKind::Info, self.notice.clone());
+        self.queue_state(cx);
+        // Stamp changed: ensure_daemon restarts serve so the new profile is
+        // what the agent runs, not only what apollo.json says.
+        self.commit_config(
+            cx,
+            move || setup::update_config(&path, |c| setup::apply_profile(c, profile)),
+            |view, _cx| view.restart_agent(),
+        );
         cx.notify();
     }
 
     fn param(&self, key: &str, default: u64) -> u64 {
-        setup::read_config(&self.instance.config_path())["agent"][key]
-            .as_u64()
-            .unwrap_or(default)
+        self.config_cache["agent"][key].as_u64().unwrap_or(default)
+    }
+
+    fn touch_agent(cache: &mut serde_json::Value) -> &mut serde_json::Value {
+        if !cache["agent"].is_object() {
+            cache["agent"] = serde_json::json!({});
+        }
+        &mut cache["agent"]
     }
 
     fn step_param(&mut self, key: &'static str, default: u64, delta: i64, cx: &mut Context<Self>) {
-        let current = self.param(key, default) as i64;
-        let min = if key == "auto_compact_after" { 0 } else { 1 };
-        let next = (current + delta).max(min) as u64;
         let path = self.instance.config_path();
-        let result = setup::update_config(&path, |c| {
-            if !c["agent"].is_object() {
-                c["agent"] = serde_json::json!({});
-            }
-            c["agent"][key] = serde_json::json!(next);
-        });
-        self.notice = match result {
-            Ok(_) => {
-                let msg = format!("agent.{key} = {next}");
-                self.log(LogKind::Info, format!("settings: {msg}"));
-                msg
-            }
-            Err(e) => e,
+        let next = if self.config_ready {
+            let current = self.param(key, default) as i64;
+            let min = if key == "auto_compact_after" { 0 } else { 1 };
+            let next = (current + delta).max(min) as u64;
+            Self::touch_agent(&mut self.config_cache)[key] = serde_json::json!(next);
+            let msg = format!("agent.{key} = {next}");
+            self.log(LogKind::Info, format!("settings: {msg}"));
+            self.notice = msg;
+            Some(next)
+        } else {
+            None
         };
+        self.commit_config(
+            cx,
+            move || {
+                setup::update_config(&path, |c| {
+                    let current = c["agent"][key].as_u64().unwrap_or(default) as i64;
+                    let min = if key == "auto_compact_after" { 0 } else { 1 };
+                    let computed = next.unwrap_or((current + delta).max(min) as u64);
+                    if !c["agent"].is_object() {
+                        c["agent"] = serde_json::json!({});
+                    }
+                    c["agent"][key] = serde_json::json!(computed);
+                })
+            },
+            move |view, _cx| {
+                if next.is_none() {
+                    let value = view.param(key, default);
+                    let msg = format!("agent.{key} = {value}");
+                    view.log(LogKind::Info, format!("settings: {msg}"));
+                    view.notice = msg;
+                }
+            },
+        );
         cx.notify();
     }
 
     fn current_effort(&self) -> String {
-        setup::read_config(&self.instance.config_path())["agent"]["reasoning_effort"]
+        self.config_cache["agent"]["reasoning_effort"]
             .as_str()
             .and_then(setup::normalize_effort)
             .unwrap_or("medium")
@@ -268,31 +430,48 @@ impl ApolloView {
 
     fn set_effort(&mut self, effort: &str, cx: &mut Context<Self>) {
         let path = self.instance.config_path();
-        let dir = path.parent().map(|p| p.to_path_buf());
-        self.notice = match setup::update_config(&path, |c| {
-            if !c["agent"].is_object() {
-                c["agent"] = serde_json::json!({});
+        let effort_owned = effort.to_string();
+        if self.config_ready {
+            let agent = Self::touch_agent(&mut self.config_cache);
+            agent["reasoning_effort"] = serde_json::json!(effort_owned);
+            if !agent["roles"].is_object() {
+                agent["roles"] = serde_json::json!({});
             }
-            c["agent"]["reasoning_effort"] = serde_json::json!(effort);
-        }) {
-            Ok(_) => {
-                let _ = setup::write_dial(&path, "main", None, Some(effort));
-                let _ = dir;
-                format!("effort set to {effort} · next message")
+            if !agent["roles"]["main"].is_object() {
+                agent["roles"]["main"] = serde_json::json!({});
             }
-            Err(e) => e,
-        };
+            agent["roles"]["main"]["effort"] = serde_json::json!(effort_owned);
+        }
+        self.notice = format!("effort set to {effort_owned} · next message");
+        self.commit_config(
+            cx,
+            move || {
+                setup::write_dial(&path, "main", None, Some(&effort_owned))?;
+                Ok(setup::read_config(&path))
+            },
+            |_, _| {},
+        );
         cx.notify();
     }
 
     fn effort_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.current_effort();
-        let Some(levels) = models::effort_levels(&self.model) else {
-            return div()
-                .text_xs()
-                .text_color(rgb(GHOST))
-                .child("this model has no effort dial")
-                .into_any_element();
+        let levels = match models::catalog_effort(&self.model) {
+            models::CatalogEffort::Pending => {
+                return div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child("effort…")
+                    .into_any_element();
+            }
+            models::CatalogEffort::Absent => {
+                return div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child("this model has no effort dial")
+                    .into_any_element();
+            }
+            models::CatalogEffort::Levels(levels) => levels,
         };
         let chips = levels.iter().enumerate().map(|(i, level)| {
             let on = current == *level;
@@ -334,8 +513,7 @@ impl ApolloView {
     fn field_value(&self, field: EditField) -> String {
         match field {
             EditField::Name => self.instance.name.clone(),
-            EditField::Instructions => setup::read_config(&self.instance.config_path())
-                ["system_prompt"]
+            EditField::Instructions => self.config_cache["system_prompt"]
                 .as_str()
                 .unwrap_or("")
                 .to_string(),
@@ -370,27 +548,29 @@ impl ApolloView {
                 } else {
                     self.instance.name = name.clone();
                     self.state.upsert(self.instance.clone());
-                    self.notice = match self.state.save() {
-                        Ok(_) => {
-                            self.log(LogKind::Info, format!("profile: name → {name}"));
-                            "profile saved · applies next turn".into()
-                        }
-                        Err(e) => e,
-                    };
+                    self.log(LogKind::Info, format!("profile: name → {name}"));
+                    self.notice = "profile saved · applies next turn".into();
+                    self.queue_state(cx);
                 }
             }
             EditField::Instructions => {
                 let value = self.edit_buf.clone();
                 let path = self.instance.config_path();
-                self.notice = match setup::update_config(&path, |c| {
-                    c["system_prompt"] = serde_json::json!(value);
-                }) {
-                    Ok(_) => {
-                        self.log(LogKind::Info, "profile: instructions updated");
-                        "profile saved · applies next turn".into()
-                    }
-                    Err(e) => e,
-                };
+                if self.config_ready {
+                    self.config_cache["system_prompt"] = serde_json::json!(value);
+                }
+                self.log(LogKind::Info, "profile: instructions updated");
+                self.notice = "profile saved · applies next turn".into();
+                let value2 = value.clone();
+                self.commit_config(
+                    cx,
+                    move || {
+                        setup::update_config(&path, |c| {
+                            c["system_prompt"] = serde_json::json!(value2);
+                        })
+                    },
+                    |_, _| {},
+                );
             }
         }
         self.edit_buf.clear();
@@ -400,14 +580,10 @@ impl ApolloView {
     fn set_color(&mut self, color: Option<u32>, cx: &mut Context<Self>) {
         self.instance.color = color;
         self.state.upsert(self.instance.clone());
-        self.notice = match self.state.save() {
-            Ok(_) => {
-                let what = color.map_or("default".to_string(), |c| format!("#{c:06x}"));
-                self.log(LogKind::Info, format!("profile: avatar color → {what}"));
-                "profile saved · applies next turn".into()
-            }
-            Err(e) => e,
-        };
+        let what = color.map_or("default".to_string(), |c| format!("#{c:06x}"));
+        self.log(LogKind::Info, format!("profile: avatar color → {what}"));
+        self.notice = "profile saved · applies next turn".into();
+        self.queue_state(cx);
         cx.notify();
     }
 
@@ -423,33 +599,38 @@ impl ApolloView {
         if id == self.instance.id {
             self.instance.pinned = pinned;
         }
-        self.notice = match self.state.save() {
-            Ok(_) => {
-                let verb = if pinned { "pinned to top" } else { "unpinned" };
-                self.log(LogKind::Info, format!("roster: {name} {verb}"));
-                format!("{name} {verb}")
-            }
-            Err(e) => e,
-        };
+        let verb = if pinned { "pinned to top" } else { "unpinned" };
+        self.log(LogKind::Info, format!("roster: {name} {verb}"));
+        self.notice = format!("{name} {verb}");
+        self.queue_state(cx);
         cx.notify();
     }
 
     fn duplicate_roster(&mut self, id: String, cx: &mut Context<Self>) {
         self.roster_menu = None;
-        match setup::duplicate_instance(&self.state, &id) {
-            Ok(copy) => {
-                let name = copy.name.clone();
-                self.state.instances.push(copy);
-                self.notice = match self.state.save() {
-                    Ok(_) => {
-                        self.log(LogKind::Info, format!("roster: created {name}"));
-                        format!("duplicated → {name}")
+        let state = self.state.clone();
+        self.notice = "duplicating…".into();
+        crate::worker::off_ui(
+            cx,
+            move || {
+                let copy = setup::duplicate_instance(&state, &id)?;
+                Ok::<_, String>((state, copy))
+            },
+            |view, result, cx| {
+                match result {
+                    Ok((mut state, copy)) => {
+                        let name = copy.name.clone();
+                        state.instances.push(copy);
+                        view.state = state;
+                        view.log(LogKind::Info, format!("roster: created {name}"));
+                        view.notice = format!("duplicated → {name}");
+                        view.queue_state(cx);
                     }
-                    Err(e) => e,
-                };
-            }
-            Err(e) => self.notice = e,
-        }
+                    Err(e) => view.notice = e,
+                }
+                cx.notify();
+            },
+        );
         cx.notify();
     }
 
@@ -473,16 +654,12 @@ impl ApolloView {
         if self.state.active.as_deref() == Some(id.as_str()) {
             self.state.active = self.state.instances.first().map(|i| i.id.clone());
         }
-        self.notice = match self.state.save() {
-            Ok(_) => {
-                self.log(
-                    LogKind::Info,
-                    format!("roster: removed {name} from the list (files kept)"),
-                );
-                format!("removed {name} from the list — files kept on disk")
-            }
-            Err(e) => e,
-        };
+        self.log(
+            LogKind::Info,
+            format!("roster: removed {name} from the list (files kept)"),
+        );
+        self.notice = format!("removed {name} from the list — files kept on disk");
+        self.queue_state(cx);
         cx.notify();
     }
 
@@ -490,14 +667,8 @@ impl ApolloView {
 
     /// Why this provider has no usable credential, or `None` when it has
     /// one. Only the *presence* of a key is ever read, never its value.
-    fn credential_reason(&self, p: &ProviderInfo) -> Option<&'static str> {
-        let env = self.instance.env_path();
-        match p.auth {
-            Auth::OAuth(kind) if !kind.signed_in() => Some("not signed in"),
-            Auth::ApiKey(var) if !setup::env_has(&env, var) => Some("no key saved"),
-            Auth::Custom if !setup::env_has(&env, setup::CUSTOM_KEY_VAR) => Some("no key saved"),
-            _ => None,
-        }
+    fn credential_reason(&self, p: &ProviderInfo) -> Option<String> {
+        credential_reason_for(p, self.creds_ready, &self.oauth_signed_in, &self.env_names)
     }
 
     /// Build the picker rail: the current provider, then the sign-in
@@ -617,98 +788,139 @@ impl ApolloView {
 
     /// Write the picked model to apollo.json. Picking on another provider
     /// also switches `provider.name` and `provider.base_url`.
+    fn set_role_effort(&mut self, role: &'static str, level: String, cx: &mut Context<Self>) {
+        let path = self.instance.config_path();
+        if self.config_ready {
+            if !self.config_cache["agent"].is_object() {
+                self.config_cache["agent"] = serde_json::json!({});
+            }
+            if !self.config_cache["agent"]["roles"].is_object() {
+                self.config_cache["agent"]["roles"] = serde_json::json!({});
+            }
+            if !self.config_cache["agent"]["roles"][role].is_object() {
+                self.config_cache["agent"]["roles"][role] = serde_json::json!({});
+            }
+            self.config_cache["agent"]["roles"][role]["effort"] = serde_json::json!(level);
+            if role == "main" {
+                self.config_cache["agent"]["reasoning_effort"] = serde_json::json!(level);
+            }
+        }
+        self.notice = format!("{role} effort → {level}");
+        self.commit_config(
+            cx,
+            move || {
+                setup::write_dial(&path, role, None, Some(&level))?;
+                Ok(setup::read_config(&path))
+            },
+            |_, _| {},
+        );
+        cx.notify();
+    }
+
     fn pick_model(&mut self, model: String, cx: &mut Context<Self>) {
         if let Some(role) = self.dial.take() {
             let path = self.instance.config_path();
-            let current = setup::read_dials(&path, &self.model)
-                .into_iter()
-                .nth(match role {
-                    "oracle" => 0,
-                    "subagents" => 2,
-                    _ => 1,
-                })
-                .map(|dial| dial.effort)
-                .unwrap_or_default();
-            let effort = models::snap_effort(&model, &current);
-            self.notice = match setup::write_dial(&path, role, Some(&model), Some(&effort)) {
-                Ok(_) => {
-                    if role == "main" {
-                        self.model = model.clone();
-                        self.instance.model = model.clone();
-                        self.state.upsert(self.instance.clone());
-                        let _ = self.state.save();
+            let fallback = self.model.clone();
+            let model_owned = model.clone();
+            if role == "main" {
+                self.model = model.clone();
+                self.instance.model = model.clone();
+                self.state.upsert(self.instance.clone());
+                self.queue_state(cx);
+            }
+            self.picker = None;
+            self.notice = "saving model…".into();
+            let idx = match role {
+                "oracle" => 0,
+                "subagents" => 2,
+                _ => 1,
+            };
+            self.commit_config(
+                cx,
+                move || {
+                    let current = setup::read_dials(&path, &fallback)
+                        .into_iter()
+                        .nth(idx)
+                        .map(|dial| dial.effort)
+                        .unwrap_or_default();
+                    let effort = models::snap_effort(&model_owned, &current);
+                    setup::write_dial(&path, role, Some(&model_owned), Some(&effort))?;
+                    Ok(setup::read_config(&path))
+                },
+                move |view, _cx| {
+                    view.notice = if role == "main" {
                         format!("main → {model} · next message")
                     } else if role == "oracle" {
-                        let dir = path.parent().map(|p| p.to_path_buf());
-                        if let Some(dir) = dir {
-                            std::thread::spawn(move || {
-                                let _ = agent::ensure_daemon(&dir);
-                            });
-                        }
+                        view.restart_agent();
                         format!("oracle → {model} · fast model, after the agent restarts")
                     } else {
-                        format!("subagents → {model} · stored. the engine has no separate subagent runner yet")
-                    }
-                }
-                Err(e) => e,
-            };
-            self.picker = None;
+                        "subagents → {model} · stored. the engine has no separate subagent runner yet"
+                            .replace("{model}", &model)
+                    };
+                    view.log(LogKind::Info, view.notice.clone());
+                },
+            );
             cx.notify();
             return;
         }
-        let (provider, is_current) = match self.picker.as_ref() {
+        let (provider_id, base_url, is_current) = match self.picker.as_ref() {
             Some(picker) => match picker.rail.get(picker.highlighted) {
-                // Dimmed providers are not switchable.
                 Some(entry) if entry.reason.is_none() => {
                     let is_current = setup::provider(&self.instance.provider)
                         .is_some_and(|cur| cur.id == entry.provider.id);
-                    (entry.provider, is_current)
+                    (
+                        entry.provider.id.to_string(),
+                        entry.provider.base_url.map(str::to_string),
+                        is_current,
+                    )
                 }
                 _ => return,
             },
             None => return,
         };
-        let model_write = model.clone();
-        let provider_id = provider.id;
-        let base_url = provider.base_url;
         let path = self.instance.config_path();
-        let result = setup::update_config(&path, move |c| {
-            if !is_current {
-                if !c["provider"].is_object() {
-                    c["provider"] = serde_json::json!({});
-                }
-                c["provider"]["name"] = serde_json::json!(provider_id);
-                c["provider"]["base_url"] =
-                    base_url.map_or(serde_json::Value::Null, |u| serde_json::json!(u));
-            }
-            c["model"] = serde_json::json!(model_write.clone());
-            if !c["agent"].is_object() {
-                c["agent"] = serde_json::json!({});
-            }
-            if !c["agent"]["roles"].is_object() {
-                c["agent"]["roles"] = serde_json::json!({});
-            }
-            if !c["agent"]["roles"]["main"].is_object() {
-                c["agent"]["roles"]["main"] = serde_json::json!({});
-            }
-            c["agent"]["roles"]["main"]["model"] = serde_json::json!(model_write);
-        });
-        match result {
-            Ok(_) => {
-                if !is_current {
-                    self.instance.provider = provider_id.to_string();
-                    self.log(LogKind::Info, format!("provider → {provider_id}"));
-                }
-                self.instance.model = model.clone();
-                self.model = model.clone();
-                self.state.upsert(self.instance.clone());
-                let _ = self.state.save();
-                self.notice = format!("model → {model} (next turn)");
-                self.log(LogKind::Info, self.notice.clone());
-                self.picker = None;
-            }
-            Err(e) => self.notice = e,
+        let model_write = model.clone();
+        if !is_current {
+            self.instance.provider = provider_id.clone();
+            self.log(LogKind::Info, format!("provider → {provider_id}"));
         }
+        self.instance.model = model.clone();
+        self.model = model.clone();
+        self.state.upsert(self.instance.clone());
+        self.queue_state(cx);
+        self.notice = format!("model → {model} (next turn)");
+        self.log(LogKind::Info, self.notice.clone());
+        self.picker = None;
+        let provider_for_disk = provider_id.clone();
+        self.commit_config(
+            cx,
+            move || {
+                setup::update_config(&path, move |c| {
+                    if !is_current {
+                        if !c["provider"].is_object() {
+                            c["provider"] = serde_json::json!({});
+                        }
+                        c["provider"]["name"] = serde_json::json!(provider_for_disk);
+                        c["provider"]["base_url"] = base_url
+                            .as_ref()
+                            .map(|u| serde_json::json!(u))
+                            .unwrap_or(serde_json::Value::Null);
+                    }
+                    c["model"] = serde_json::json!(model_write.clone());
+                    if !c["agent"].is_object() {
+                        c["agent"] = serde_json::json!({});
+                    }
+                    if !c["agent"]["roles"].is_object() {
+                        c["agent"]["roles"] = serde_json::json!({});
+                    }
+                    if !c["agent"]["roles"]["main"].is_object() {
+                        c["agent"]["roles"]["main"] = serde_json::json!({});
+                    }
+                    c["agent"]["roles"]["main"]["model"] = serde_json::json!(model_write);
+                })
+            },
+            |_, _| {},
+        );
         cx.notify();
     }
 
@@ -764,12 +976,14 @@ impl ApolloView {
     }
 
     fn role_dials(&self, cx: &mut Context<Self>) -> AnyElement {
-        let path = self.instance.config_path();
-        let dials = setup::read_dials(&path, &self.model);
+        let dials = setup::dials_of(&self.config_cache, &self.model);
         let roles = ["oracle", "main", "subagents"];
         let rows = roles.into_iter().enumerate().map(|(i, role)| {
             let dial = &dials[i];
-            let levels = models::effort_levels(&dial.model).unwrap_or_default();
+            let levels = match models::catalog_effort(&dial.model) {
+                models::CatalogEffort::Levels(levels) => levels,
+                models::CatalogEffort::Absent | models::CatalogEffort::Pending => Vec::new(),
+            };
             let model_label = if dial.model.is_empty() {
                 "model".to_string()
             } else {
@@ -791,11 +1005,7 @@ impl ApolloView {
                     .hover(|style| style.bg(rgb(SURFACE)))
                     .child(SharedString::from(level))
                     .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                        let path = view.instance.config_path();
-                        view.notice = setup::write_dial(&path, role, None, Some(&level_owned))
-                            .map(|_| format!("{role} effort → {level_owned}"))
-                            .unwrap_or_else(|e| e);
-                        cx.notify();
+                        view.set_role_effort(role, level_owned.clone(), cx);
                     }))
             });
             div()
@@ -1699,7 +1909,7 @@ impl ApolloView {
             let on = i == picker.highlighted;
             let p = entry.provider;
             let dimmed = entry.reason.is_some();
-            let right = entry.reason.map(|r| r.to_string()).unwrap_or_else(|| {
+            let right = entry.reason.clone().unwrap_or_else(|| {
                 if i == 0 {
                     "current".into()
                 } else {
@@ -1761,7 +1971,10 @@ impl ApolloView {
                     .text_color(rgb(GHOST))
                     .child(SharedString::from(format!(
                         "{} — sign in or add a key to switch here",
-                        picker.rail[picker.highlighted].reason.unwrap_or_default()
+                        picker.rail[picker.highlighted]
+                            .reason
+                            .clone()
+                            .unwrap_or_default()
                     )))
                     .into_any_element()],
                 String::new(),
@@ -1965,50 +2178,50 @@ impl ApolloView {
         cx: &mut Context<Self>,
     ) {
         let path = self.instance.config_path();
-        let provider_id = provider.id;
-        let base_url = provider.base_url;
+        let provider_id = provider.id.to_string();
+        let base_url = provider.base_url.map(str::to_string);
         let model = if keep_model && self.instance.provider == provider_id {
             self.model.clone()
         } else {
             provider.default_model.to_string()
         };
         let model_write = model.clone();
-        let result = setup::update_config(&path, move |c| {
-            if !c["provider"].is_object() {
-                c["provider"] = serde_json::json!({});
-            }
-            c["provider"]["name"] = serde_json::json!(provider_id);
-            c["provider"]["api_key"] = serde_json::Value::Null;
-            c["provider"]["base_url"] =
-                base_url.map_or(serde_json::Value::Null, |u| serde_json::json!(u));
-            c["model"] = serde_json::json!(model_write.clone());
-            if !c["agent"].is_object() {
-                c["agent"] = serde_json::json!({});
-            }
-            if !c["agent"]["roles"].is_object() {
-                c["agent"]["roles"] = serde_json::json!({});
-            }
-            if !c["agent"]["roles"]["main"].is_object() {
-                c["agent"]["roles"]["main"] = serde_json::json!({});
-            }
-            c["agent"]["roles"]["main"]["model"] = serde_json::json!(model_write);
-        });
-        match result {
-            Ok(_) => {
-                self.instance.provider = provider_id.to_string();
-                self.instance.model = model.clone();
-                self.model = model.clone();
-                self.state.upsert(self.instance.clone());
-                let _ = self.state.save();
-                self.notice = format!("provider → {provider_id} · {model} · next message");
-                self.log(LogKind::Info, self.notice.clone());
-                let dir = self.instance.config_dir.clone();
-                std::thread::spawn(move || {
-                    let _ = agent::ensure_daemon(&dir);
-                });
-            }
-            Err(e) => self.notice = e,
-        }
+        self.instance.provider = provider_id.clone();
+        self.instance.model = model.clone();
+        self.model = model.clone();
+        self.state.upsert(self.instance.clone());
+        self.queue_state(cx);
+        self.notice = format!("provider → {provider_id} · {model} · next message");
+        self.log(LogKind::Info, self.notice.clone());
+        let provider_for_disk = provider_id.clone();
+        self.commit_config(
+            cx,
+            move || {
+                setup::update_config(&path, move |c| {
+                    if !c["provider"].is_object() {
+                        c["provider"] = serde_json::json!({});
+                    }
+                    c["provider"]["name"] = serde_json::json!(provider_for_disk);
+                    c["provider"]["api_key"] = serde_json::Value::Null;
+                    c["provider"]["base_url"] = base_url
+                        .as_ref()
+                        .map(|u| serde_json::json!(u))
+                        .unwrap_or(serde_json::Value::Null);
+                    c["model"] = serde_json::json!(model_write.clone());
+                    if !c["agent"].is_object() {
+                        c["agent"] = serde_json::json!({});
+                    }
+                    if !c["agent"]["roles"].is_object() {
+                        c["agent"]["roles"] = serde_json::json!({});
+                    }
+                    if !c["agent"]["roles"]["main"].is_object() {
+                        c["agent"]["roles"]["main"] = serde_json::json!({});
+                    }
+                    c["agent"]["roles"]["main"]["model"] = serde_json::json!(model_write);
+                })
+            },
+            |view, _cx| view.restart_agent(),
+        );
         cx.notify();
     }
 
@@ -2026,15 +2239,20 @@ impl ApolloView {
         self.settings_sign = Some(kind);
         self.notice = "sign-in opened in your browser".into();
         cx.notify();
-        let (tx, rx) = channel::<Result<(), String>>();
+        let (tx, rx) = channel::<(Result<(), String>, bool)>();
         std::thread::spawn(move || {
-            let _ = tx.send(kind.sign_in());
+            let outcome = kind.sign_in();
+            let signed = kind.signed_in();
+            let _ = tx.send((outcome, signed));
         });
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
             match rx.try_recv() {
-                Ok(outcome) => {
+                Ok((outcome, signed)) => {
                     this.update(cx, |view, cx| {
                         view.settings_sign = None;
+                        view.oauth_signed_in[kind as usize] = signed;
+                        view.creds_ready = true;
+                        view.refresh_rail_reasons();
                         view.notice = match outcome {
                             Ok(()) => "signed in — stored for apollo".into(),
                             Err(e) => crate::fault_line(&e).to_string(),
@@ -2105,16 +2323,32 @@ impl ApolloView {
             }
         };
         let env = self.instance.env_path();
-        let result = setup::write_env_var(&env, var, &value);
         self.settings_key.clear();
         self.settings_key_for = None;
-        match result {
-            Ok(()) => {
-                self.switch_provider(provider, false, cx);
-                self.notice = format!("{var} saved · provider → {}", provider.id);
-            }
-            Err(e) => self.notice = e,
-        }
+        self.notice = "saving key…".into();
+        crate::worker::off_ui(
+            cx,
+            move || setup::write_env_var(&env, var, &value),
+            move |view, result, cx| {
+                match result {
+                    Ok(()) => {
+                        if !view.env_set(var) {
+                            view.env_names.push(var.to_string());
+                        }
+                        if (var.ends_with("_API_KEY") || var.ends_with("_TOKEN"))
+                            && !view.keys_cache.iter().any(|name| name == var)
+                        {
+                            view.keys_cache.push(var.to_string());
+                        }
+                        view.creds_ready = true;
+                        view.switch_provider(provider, false, cx);
+                        view.notice = format!("{var} saved · provider → {}", provider.id);
+                    }
+                    Err(e) => view.notice = e,
+                }
+                cx.notify();
+            },
+        );
         cx.notify();
     }
 
@@ -2267,33 +2501,44 @@ impl ApolloView {
 
     pub(crate) fn set_hotkey(&mut self, hotkey: String, cx: &mut Context<Self>) {
         self.state.hotkey = hotkey.clone();
-        self.notice = match self.state.save() {
-            Ok(_) => {
-                crate::hotkey::install(&hotkey);
-                if hotkey.is_empty() {
-                    "global hotkey off".into()
-                } else {
-                    format!("global hotkey → {hotkey}")
+        let state = self.state.clone();
+        let gen = self.bump_state();
+        crate::worker::off_ui(
+            cx,
+            move || state.save().map(|_| hotkey),
+            move |view, result, cx| {
+                if gen == view.state_gen {
+                    view.notice = match result {
+                        Ok(hotkey) => {
+                            crate::hotkey::install(&hotkey);
+                            if hotkey.is_empty() {
+                                "global hotkey off".into()
+                            } else {
+                                format!("global hotkey → {hotkey}")
+                            }
+                        }
+                        Err(e) => e,
+                    };
                 }
-            }
-            Err(e) => e,
-        };
+                cx.notify();
+            },
+        );
         cx.notify();
     }
 
     pub(crate) fn set_density(&mut self, density: &'static str, cx: &mut Context<Self>) {
         self.state.density = density.to_string();
-        self.notice = match self.state.save() {
-            Ok(_) => format!("density → {density}"),
-            Err(e) => e,
-        };
+        self.notice = format!("density → {density}");
+        self.queue_state(cx);
         cx.notify();
     }
 
     fn provider_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.instance.provider.as_str();
         let signing = self.settings_sign;
-        let env = self.instance.env_path();
+        let creds_ready = self.creds_ready;
+        let oauth = self.oauth_signed_in;
+        let env_names = self.env_names.clone();
         let rows =
             setup::OAUTH_PROVIDERS
                 .iter()
@@ -2308,9 +2553,11 @@ impl ApolloView {
                     let on = p.id == current;
                     let status = match p.auth {
                         Auth::OAuth(kind) if signing == Some(kind) => "signing in…",
-                        Auth::OAuth(kind) if kind.signed_in() => "signed in",
+                        Auth::OAuth(_) if !creds_ready => "checking…",
+                        Auth::OAuth(kind) if oauth[kind as usize] => "signed in",
                         Auth::OAuth(_) => "not signed in",
-                        Auth::ApiKey(var) if setup::env_has(&env, var) => "key set",
+                        Auth::ApiKey(_) if !creds_ready => "checking…",
+                        Auth::ApiKey(var) if env_names.iter().any(|name| name == var) => "key set",
                         Auth::ApiKey(_) => "no key",
                         Auth::Custom => "custom",
                         Auth::Local => "local",
@@ -2360,7 +2607,7 @@ impl ApolloView {
                                 .children(match p.auth {
                                     Auth::OAuth(kind) => Some(Self::link(
                                         ("settings-signin", i),
-                                        if kind.signed_in() {
+                                        if creds_ready && oauth[kind as usize] {
                                             "sign in again"
                                         } else {
                                             "sign in"
@@ -2426,13 +2673,15 @@ impl ApolloView {
         let keys: Vec<AnyElement> = {
             // Names only — the values never leave the .env (see
             // `setup::configured_keys`).
-            let mut rows: Vec<AnyElement> = setup::configured_keys(&inst.env_path())
-                .into_iter()
+            let mut rows: Vec<AnyElement> = self
+                .keys_cache
+                .iter()
+                .cloned()
                 .map(|name| Self::kv_key(name, "••••  set"))
                 .collect();
             for p in setup::OAUTH_PROVIDERS {
                 if let Auth::OAuth(kind) = p.auth {
-                    if kind.signed_in() {
+                    if self.creds_ready && self.oauth_signed_in[kind as usize] {
                         rows.push(Self::kv_key(
                             format!("{} · signed in", p.label),
                             "browser login",
@@ -2511,7 +2760,7 @@ impl ApolloView {
     }
 
     fn tools_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let config = setup::read_config(&self.instance.config_path());
+        let config = self.config_cache.clone();
         let flag = |k: &str| match config["policy"][k].as_bool() {
             Some(true) => "on",
             Some(false) => "off",
@@ -3096,5 +3345,24 @@ impl Render for ApolloView {
             .on_key_down(cx.listener(ApolloView::on_key_down))
             .on_action(cx.listener(ApolloView::submit_action))
             .on_action(cx.listener(ApolloView::clear_action))
+    }
+}
+
+fn credential_reason_for(
+    p: &ProviderInfo,
+    creds_ready: bool,
+    oauth: &[bool; 3],
+    env_names: &[String],
+) -> Option<String> {
+    match p.auth {
+        Auth::OAuth(_) | Auth::ApiKey(_) | Auth::Custom if !creds_ready => Some("checking…".into()),
+        Auth::OAuth(kind) if !oauth[kind as usize] => Some("not signed in".into()),
+        Auth::ApiKey(var) if !env_names.iter().any(|name| name == var) => {
+            Some("no key saved".into())
+        }
+        Auth::Custom if !env_names.iter().any(|name| name == setup::CUSTOM_KEY_VAR) => {
+            Some("no key saved".into())
+        }
+        _ => None,
     }
 }
