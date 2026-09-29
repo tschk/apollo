@@ -6,8 +6,8 @@
   <a class="brand" href="/">apollo</a>
   <nav class="nav-links" aria-label="page">
     <a class="quiet" href="#what">what</a>
-    <a class="quiet" href="#desk">desk</a>
-    <a class="quiet" href="#install">install</a>
+    <a class="quiet" href="#app">the app</a>
+    <a class="quiet" href="#start">get started</a>
     <LetterSwap label="github" href="https://github.com/tschk/apollo" />
   </nav>
 </header>

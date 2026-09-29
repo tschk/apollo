@@ -1,8 +1,9 @@
-# apollo
+# Apollo
 
-local-first agent host by tsc.hk. the public site is https://apollo.tsc.hk
-source: https://github.com/tschk/apollo
+Apollo is a desktop agent from tsc.hk. The public site is https://apollo.tsc.hk
+Source: https://github.com/tschk/apollo
 
-the desktop app (apollo-ui) is crepuscularity + gpui. it onboards a model,
-a workspace, and permissions, then opens simple (chat) or advanced
-(instances, tools, logs).
+You open the app, set it up in a few screens, and talk to it. Setup connects a
+model, chooses where the agent may work, and sets when it should ask. Then you
+pick simple (the conversation) or advanced (instances, tools, and a record of
+what happened). You can keep more than one instance, each with its own model.

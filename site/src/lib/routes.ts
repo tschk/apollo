@@ -10,16 +10,16 @@ export type RouteMeta = {
 
 export const routes: Record<string, RouteMeta> = {
   "/": {
-    title: "apollo — local-first agent host",
+    title: "Apollo — a desktop agent",
     description:
-      "apollo is a local-first agent host. the gpui desktop app on crepuscularity: onboarding, instances, simple or advanced.",
+      "Apollo is a desktop agent you open, set up in a few screens, and talk to, with multiple instances and a simple or advanced mode.",
     component: Home,
   },
 };
 
 export const notFound: RouteMeta = {
-  title: "apollo — missing",
-  description: "that page is not on apollo.tsc.hk.",
+  title: "Apollo — page not found",
+  description: "That page is not part of Apollo.",
   component: NotFound,
 };
 

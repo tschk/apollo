@@ -5,19 +5,14 @@
   import { reducedMotion } from "../lib/store";
 
   let canvas: HTMLCanvasElement | undefined = $state();
-  let kicker = $state("desktop · crepuscularity + gpui");
+  let kicker = $state("desktop agent");
 
   const providers = [
-    "anthropic",
-    "openai",
-    "ollama",
-    "openrouter",
-    "groq",
-    "mistral",
-    "deepseek",
-    "xai",
+    "chatgpt",
+    "claude",
     "gemini",
     "copilot",
+    "mistral",
   ];
 
   onMount(() => {
@@ -37,7 +32,7 @@
       });
     }
 
-    const final = "desktop · crepuscularity + gpui";
+    const final = "desktop agent";
     let timer = 0;
     if (!media.matches) {
       const alphabet = "abcdefghijklmnopqrstuvwxyz.+";
@@ -96,16 +91,15 @@
         <p class="kicker">{kicker}</p>
         <h1 class="word">apollo</h1>
         <p class="lede">
-          a local-first agent host. the desktop app is the desk: onboarding,
-          instances, and a simple or advanced surface on crepuscularity and gpui.
+          A desktop agent you open, set up in a few screens, and talk to, with multiple instances and a simple or advanced mode.
         </p>
         <div class="actions">
-          <LetterSwap solid label="read the source" href="https://github.com/tschk/apollo" />
-          <LetterSwap label="how to install" href="#install" />
+          <LetterSwap solid label="get started" href="#start" />
+          <LetterSwap label="view on github" href="https://github.com/tschk/apollo" />
         </div>
         <p class="meta-row">
-          <span>apollo-ui</span>
-          <span>mpl-2.0</span>
+          <span>mac and linux</span>
+          <span>desktop app</span>
           <span>tsc.hk</span>
         </p>
       </div>
@@ -125,120 +119,112 @@
       <div class="wrap">
         <div class="section-head">
           <span class="index">01</span>
-          <h2>the agent lives here, not in a tab.</h2>
+          <h2>An agent you open, not another browser tab.</h2>
         </div>
         <div class="grid-3">
           <article class="card">
-            <h3>local-first</h3>
+            <h3>On your computer</h3>
             <p>
-              one rust runtime on your computer. memory, sessions, and the http
-              api stay on localhost. browsers are refused at the origin check,
-              so a web page cannot drive the agent.
+              Apollo is a desktop app. You open it, and the conversation stays on your machine.
             </p>
           </article>
           <article class="card">
-            <h3>a real desk</h3>
+            <h3>Ready in a few screens</h3>
             <p>
-              apollo-ui is the gpui app. a few screens: sign in or a key, pick
-              a folder, set what it may do, run a test prompt, then open the desk.
+              Connect a model, choose what it can work on, decide when it should ask you, and send one test message.
             </p>
           </article>
           <article class="card">
-            <h3>simple or advanced</h3>
+            <h3>Simple or advanced</h3>
             <p>
-              simple is the chat and an instance switcher. advanced adds the
-              roster, tools, permissions, and logs. switch any time in settings.
+              Simple is the chat. Advanced adds your instances, tools, and a record of what happened. Switch any time.
             </p>
           </article>
         </div>
       </div>
     </section>
 
-    <section class="section tight" id="onboarding">
+    <section class="section tight" id="setup">
       <div class="wrap grid-2">
         <div>
           <div class="section-head">
             <span class="index">02</span>
-            <h2>meet apollo, then get out of the way.</h2>
+            <h2>Set up once. Then just talk.</h2>
           </div>
           <ol class="steps">
-            <li><span class="index">01</span><span><b>sign in, or a key.</b> an account, or a provider key kept in the instance env. owner-only. never the shared config.</span></li>
-            <li><span class="index">02</span><span><b>one folder, or everywhere.</b> the workspace the agent is allowed to touch.</span></li>
-            <li><span class="index">03</span><span><b>what it may do without asking.</b> permissions before the first real turn.</span></li>
-            <li><span class="index">04</span><span><b>a test prompt.</b> then simple or advanced. everything below is on disk.</span></li>
+            <li><span class="index">01</span><span><b>Connect a model.</b> Sign in with an account you already have, or add a key.</span></li>
+            <li><span class="index">02</span><span><b>Choose where it works.</b> One folder, or anywhere on your computer.</span></li>
+            <li><span class="index">03</span><span><b>Decide when it should ask.</b> You set what it may do on its own.</span></li>
+            <li><span class="index">04</span><span><b>Send a test message.</b> Then pick simple or advanced, and start.</span></li>
           </ol>
         </div>
         <figure class="shot">
-          <img src="/shots/welcome.png" alt="apollo-ui welcome: meet apollo, four setup steps, get started" />
-          <figcaption><span>welcome</span><span>onboarding</span></figcaption>
+          <img src="/shots/welcome.png" alt="Apollo welcome screen with four setup steps and a get started button" />
+          <figcaption><span>welcome</span><span>a few screens, then you are in</span></figcaption>
         </figure>
       </div>
     </section>
 
-    <section class="section" id="desk">
+    <section class="section" id="app">
       <div class="wrap">
         <div class="section-head">
           <span class="index">03</span>
-          <h2>two densities of the same desk.</h2>
+          <h2>Talk in simple. Open the full app when you want it.</h2>
         </div>
         <div class="shots">
           <div class="pair">
             <figure class="shot">
-              <img src="/shots/simple.png" alt="simple mode: a single chat with the instance switcher and settings" />
-              <figcaption><span>simple</span><span>chat, nothing else</span></figcaption>
+              <img src="/shots/simple.png" alt="Simple mode: a conversation with the instance switcher and settings" />
+              <figcaption><span>simple</span><span>the conversation</span></figcaption>
             </figure>
             <figure class="shot">
-              <img src="/shots/ready.png" alt="ready screen choosing simple or advanced after setup" />
-              <figcaption><span>ready</span><span>how much app</span></figcaption>
+              <img src="/shots/ready.png" alt="Setup complete, choosing simple or advanced" />
+              <figcaption><span>your choice</span><span>simple or advanced</span></figcaption>
             </figure>
           </div>
           <figure class="shot">
-            <img src="/shots/advanced.png" alt="advanced mode with the instance roster, chat, and tools, logs, settings" />
-            <figcaption><span>advanced</span><span>roster on the left, chat in the middle</span></figcaption>
+            <img src="/shots/advanced.png" alt="Advanced mode with a list of instances beside the conversation" />
+            <figcaption><span>advanced</span><span>instances on the left, the conversation in the middle</span></figcaption>
           </figure>
           <div class="pair">
             <figure class="shot">
-              <img src="/shots/instances.png" alt="instance switcher listing apollo and research" />
-              <figcaption><span>instances</span><span>named desks, each with a model</span></figcaption>
+              <img src="/shots/instances.png" alt="Switching between two named instances, Apollo and Research" />
+              <figcaption><span>instances</span><span>more than one agent, each with its own model</span></figcaption>
             </figure>
             <figure class="shot">
-              <img src="/shots/tools.png" alt="advanced tools: permission profiles auto, prompt, tools only, full" />
-              <figcaption><span>tools</span><span>auto, prompt, tools only, full</span></figcaption>
+              <img src="/shots/tools.png" alt="Choosing how much the agent can do before it asks you" />
+              <figcaption><span>permissions</span><span>you decide when it should ask</span></figcaption>
             </figure>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="section" id="install">
+    <section class="section" id="start">
       <div class="wrap">
         <div class="section-head">
           <span class="index">04</span>
-          <h2>install the runtime. build the desk.</h2>
+          <h2>Open it on your Mac or Linux machine.</h2>
         </div>
         <div class="install">
-          <pre><span class="prompt"># agent, from crates.io</span>
-cargo install apollo-agent
-apollo init
-apollo ui
-
-<span class="prompt"># desktop, from the checkout</span>
-cargo run -p apollo-ui</pre>
           <div class="card">
-            <h3>what you get</h3>
+            <h3>Get Apollo</h3>
             <p>
-              release binaries cover the agent on macos and linux.
-              the gpui desk builds from the same repo. v0.7.2 is the current tag.
+              The current release is on GitHub. Open Apollo, walk through setup, and start the conversation.
             </p>
             <p class="fine" style="margin-top: 16px">
-              <a href="https://github.com/tschk/apollo/releases/tag/v0.7.2">github.com/tschk/apollo/releases</a>
+              <a href="https://github.com/tschk/apollo/releases/tag/v0.7.2">Latest release</a>
             </p>
-            <p class="fine" style="margin-top: 10px">
+          </div>
+          <div class="card">
+            <h3>What you are opening</h3>
+            <p>
+              A desktop agent with multiple instances and two ways to use it: simple, for the chat, and advanced, for the full app.
+            </p>
+            <p class="fine" style="margin-top: 16px">
+              <a href="https://github.com/tschk/apollo">Source</a>
+              ·
               <a href="https://tsc.hk">tsc.hk</a>
-              ·
-              <a href="https://github.com/tschk/crepuscularity">crepuscularity</a>
-              ·
-              <a href="https://github.com/tschk/rotary">rotary</a>
             </p>
           </div>
         </div>
@@ -247,7 +233,7 @@ cargo run -p apollo-ui</pre>
   </main>
   <div class="wrap">
     <footer>
-      <span>apollo · local-first agent host</span>
+      <span>Apollo · a desktop agent</span>
       <span>no trackers · no cookies</span>
     </footer>
   </div>
