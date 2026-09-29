@@ -127,6 +127,19 @@ cargo build --release
 ./target/release/apollo-install install
 ```
 
+## Mobile
+
+`apps/mobile` is the iOS and Android desk, one Expo app. Crepuscularity targets GPUI, so the phone UI is React Native with the same zinc-950 field and Chivo Mono as `apollo-ui`.
+
+It records the same document the desktop keeps at `~/.apollo/desktop.json`: onboarding, simple or advanced, and instances (provider, model, permission profile, one folder or everywhere). Keys are not fields in that document. On a phone the copy lives in app storage. See `apps/mobile/README.md`.
+
+```bash
+cd apps/mobile
+npm install
+npm test
+npx expo start
+```
+
 ## Agent HTTP API
 
 `apollo chat` and `apollo serve` expose the agent on `127.0.0.1:31338`
