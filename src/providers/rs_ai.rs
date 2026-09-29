@@ -43,8 +43,8 @@ impl RsAiProvider {
             return &self.model_id;
         }
         match self.provider_name.as_str() {
-            "chatgpt" | "openai" => "gpt-4o",
-            "anthropic" | "claude" => "claude-sonnet-5",
+            "chatgpt" | "openai" => "gpt-6-luna",
+            "anthropic" | "claude" => "claude-sonnet-5-5",
             "gemini" => "gemini-2.5-flash",
             "xai" | "grok" => "grok-4.20-reasoning",
             "cloudflare" => "@cf/meta/llama-3.1-8b-instruct",

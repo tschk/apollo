@@ -16,6 +16,7 @@
 
 mod agent;
 mod catalog;
+mod hotkey;
 mod models;
 mod oauth;
 mod onboarding;
@@ -29,7 +30,7 @@ use std::time::{Duration, Instant};
 use agent::AgentEvent;
 use crepuscularity_gpui::prelude::*;
 use gpui::{
-    actions, bounds, ease_out_quint, point, px, size, Animation, Application, ClickEvent,
+    actions, bounds, point, px, size, Application, ClickEvent,
     KeyDownEvent, SharedString,
 };
 
@@ -96,7 +97,7 @@ fn now_millis() -> u128 {
 }
 
 impl Entry {
-    fn view(&self, cursor: &'static str, index: usize) -> impl IntoElement {
+    fn view(&self, cursor: &'static str, _index: usize) -> impl IntoElement {
         let row = match self {
             Entry::User(text) => div()
                 .flex()
@@ -178,11 +179,7 @@ impl Entry {
                 .child(div().text_xs().text_color(rgb(ERR)).child("error"))
                 .child(div().text_sm().text_color(rgb(ERR)).child(fault_line(text))),
         };
-        row.with_animation(
-            ("entry", index),
-            Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-            |el, delta| el.opacity(0.45 + 0.55 * delta),
-        )
+        row
     }
 }
 
@@ -227,6 +224,12 @@ struct ApolloView {
     chat_id: String,
     /// Which error row is showing its raw provider text.
     error_detail: Option<usize>,
+    /// Key being typed in settings (never logged). Cleared after save.
+    settings_key: setup::Secret,
+    /// Settings is collecting a key for this provider id.
+    settings_key_for: Option<&'static str>,
+    /// Browser sign-in started from settings.
+    settings_sign: Option<crate::oauth::OAuthKind>,
 }
 
 impl ApolloView {
@@ -235,12 +238,28 @@ impl ApolloView {
         let online = agent::agent_online();
         let config_dir = instance.config_dir.clone();
 
-        // Repaint on a timer so the spinner animates and the cursor blinks.
+        // Blink and spinner only. 500ms is enough for the caret; a busy
+        // turn still ticks every 200ms so the spinner moves. Never 120ms
+        // forever — that rebuilt the whole tree eight times a second.
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(120))
-                .await;
-            if this.update(cx, |_, cx| cx.notify()).is_err() {
+            let busy = this.update(cx, |view, _| view.busy).unwrap_or(false);
+            let wait = if busy {
+                Duration::from_millis(200)
+            } else {
+                Duration::from_millis(500)
+            };
+            cx.background_executor().timer(wait).await;
+            if this
+                .update(cx, |view, cx| {
+                    if crate::hotkey::take_pending() {
+                        cx.activate(true);
+                        view.panel = shell::Panel::Chat;
+                        view.notice = "opened via hotkey".into();
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
                 break;
             }
         })
@@ -293,8 +312,12 @@ impl ApolloView {
             dial: None,
             chat_id: format!("desktop-{}", now_millis()),
             error_detail: None,
+            settings_key: setup::Secret::default(),
+            settings_key_for: None,
+            settings_sign: None,
         };
         view.supervise_agent(config_dir, cx);
+        crate::hotkey::install(&view.state.hotkey);
         view
     }
 
@@ -388,6 +411,46 @@ impl ApolloView {
         // A profile field being edited takes over the keyboard.
         if self.edit.is_some() {
             self.edit_key_down(event, cx);
+            return;
+        }
+
+        // Settings key paste field.
+        if self.settings_key_for.is_some() {
+            let stroke = &event.keystroke;
+            let key = stroke.key.as_str();
+            if stroke.modifiers.platform || stroke.modifiers.control {
+                if key == "v" {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                        self.settings_key.push_str(text.trim());
+                        cx.notify();
+                    }
+                }
+                return;
+            }
+            match key {
+                "enter" => self.save_settings_key(cx),
+                "escape" => {
+                    self.settings_key.clear();
+                    self.settings_key_for = None;
+                    cx.notify();
+                }
+                "backspace" => {
+                    self.settings_key.pop();
+                    cx.notify();
+                }
+                "space" => {
+                    self.settings_key.push_str(" ");
+                    cx.notify();
+                }
+                _ => {
+                    if let Some(ch) = stroke.key_char.as_deref() {
+                        if !ch.is_empty() && !ch.chars().any(char::is_control) {
+                            self.settings_key.push_str(ch);
+                            cx.notify();
+                        }
+                    }
+                }
+            }
             return;
         }
 
@@ -547,12 +610,19 @@ impl ApolloView {
         if self.busy {
             return;
         }
+        self.panel = shell::Panel::Chat;
+        self.picker = None;
+        self.switcher_open = false;
+        self.roster_menu = None;
+        self.error_detail = None;
         self.chat_id = format!("desktop-{}", now_millis());
         self.entries.clear();
-        self.entries.push(Entry::Status("new chat".into()));
+        self.entries
+            .push(Entry::Status("new chat — transcript cleared".into()));
         self.turns = 0;
         self.status = "new chat".into();
-        self.log(shell::LogKind::Info, "new chat");
+        self.notice = "new chat".into();
+        self.log(shell::LogKind::Info, format!("new chat · {}", self.chat_id));
         cx.notify();
     }
 

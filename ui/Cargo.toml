@@ -24,6 +24,7 @@ rs_ai_oauth = "0.2.31"
 # the same `rs_ai_providers::catalog` telekinesis builds its picker from.
 rs_ai_providers = { version = "0.2.36", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+global-hotkey = "0.8"
 
 # gpui is pulled in without its default platform backends, so on Linux the
 # window system has to be opted into explicitly — without these the app

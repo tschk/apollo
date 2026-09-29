@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::agent::{self, AgentEvent};
 use crate::models::{self, ModelList};
+use crate::oauth::OAuthKind;
 use crate::onboarding::Purpose;
 use crate::setup::{self, Auth, Mode, ProviderInfo, PROFILES};
 use crate::theme::*;
@@ -215,8 +216,14 @@ impl ApolloView {
                 self.instance.permission_profile = profile.to_string();
                 self.state.upsert(self.instance.clone());
                 let _ = self.state.save();
-                self.notice = format!("permission profile → {profile} (next turn)");
+                self.notice = format!("permission profile → {profile} · reloading agent");
                 self.log(LogKind::Info, self.notice.clone());
+                // Stamp changed: ensure_daemon restarts serve so the new
+                // profile is what the agent runs, not only what apollo.json says.
+                let dir = self.instance.config_dir.clone();
+                std::thread::spawn(move || {
+                    let _ = agent::ensure_daemon(&dir);
+                });
             }
             Err(e) => self.notice = e,
         }
@@ -1950,6 +1957,449 @@ impl ApolloView {
             .into_any_element()
     }
 
+    /// Switch this instance to `provider` without wiping its folder or id.
+    pub(crate) fn switch_provider(
+        &mut self,
+        provider: &'static ProviderInfo,
+        keep_model: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self.instance.config_path();
+        let provider_id = provider.id;
+        let base_url = provider.base_url;
+        let model = if keep_model && self.instance.provider == provider_id {
+            self.model.clone()
+        } else {
+            provider.default_model.to_string()
+        };
+        let model_write = model.clone();
+        let result = setup::update_config(&path, move |c| {
+            if !c["provider"].is_object() {
+                c["provider"] = serde_json::json!({});
+            }
+            c["provider"]["name"] = serde_json::json!(provider_id);
+            c["provider"]["api_key"] = serde_json::Value::Null;
+            c["provider"]["base_url"] =
+                base_url.map_or(serde_json::Value::Null, |u| serde_json::json!(u));
+            c["model"] = serde_json::json!(model_write.clone());
+            if !c["agent"].is_object() {
+                c["agent"] = serde_json::json!({});
+            }
+            if !c["agent"]["roles"].is_object() {
+                c["agent"]["roles"] = serde_json::json!({});
+            }
+            if !c["agent"]["roles"]["main"].is_object() {
+                c["agent"]["roles"]["main"] = serde_json::json!({});
+            }
+            c["agent"]["roles"]["main"]["model"] = serde_json::json!(model_write);
+        });
+        match result {
+            Ok(_) => {
+                self.instance.provider = provider_id.to_string();
+                self.instance.model = model.clone();
+                self.model = model.clone();
+                self.state.upsert(self.instance.clone());
+                let _ = self.state.save();
+                self.notice = format!("provider → {provider_id} · {model} · next message");
+                self.log(LogKind::Info, self.notice.clone());
+                let dir = self.instance.config_dir.clone();
+                std::thread::spawn(move || {
+                    let _ = agent::ensure_daemon(&dir);
+                });
+            }
+            Err(e) => self.notice = e,
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn settings_sign_in(&mut self, kind: OAuthKind, cx: &mut Context<Self>) {
+        if matches!(kind.support(), crate::oauth::Support::Unsupported(_)) {
+            self.notice = "that sign-in is not available".into();
+            cx.notify();
+            return;
+        }
+        if !kind.claim() {
+            self.notice = "sign-in already running".into();
+            cx.notify();
+            return;
+        }
+        self.settings_sign = Some(kind);
+        self.notice = "sign-in opened in your browser".into();
+        cx.notify();
+        let (tx, rx) = channel::<Result<(), String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(kind.sign_in());
+        });
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
+            match rx.try_recv() {
+                Ok(outcome) => {
+                    this.update(cx, |view, cx| {
+                        view.settings_sign = None;
+                        view.notice = match outcome {
+                            Ok(()) => "signed in — stored for apollo".into(),
+                            Err(e) => crate::fault_line(&e).to_string(),
+                        };
+                        view.log(LogKind::Info, view.notice.clone());
+                        cx.notify();
+                    })
+                    .ok();
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    this.update(cx, |view, cx| {
+                        view.settings_sign = None;
+                        view.notice = "sign-in stopped".into();
+                        cx.notify();
+                    })
+                    .ok();
+                    break;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+        })
+        .detach();
+    }
+
+    pub(crate) fn begin_settings_key(
+        &mut self,
+        provider: &'static ProviderInfo,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_key.clear();
+        self.settings_key_for = Some(provider.id);
+        self.notice = format!(
+            "paste a key for {} · enter saves · esc cancels",
+            provider.label
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn save_settings_key(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.settings_key_for else {
+            return;
+        };
+        let Some(provider) = setup::provider(id) else {
+            self.settings_key_for = None;
+            self.settings_key.clear();
+            cx.notify();
+            return;
+        };
+        let value = self.settings_key.expose().trim().to_string();
+        if value.is_empty() {
+            self.notice = "no key entered".into();
+            cx.notify();
+            return;
+        }
+        let var = match provider.auth {
+            Auth::ApiKey(var) => var,
+            Auth::Custom => setup::CUSTOM_KEY_VAR,
+            Auth::OAuth(_) | Auth::Local => {
+                self.notice = "this provider uses sign-in, not a key".into();
+                self.settings_key.clear();
+                self.settings_key_for = None;
+                cx.notify();
+                return;
+            }
+        };
+        let env = self.instance.env_path();
+        let result = setup::write_env_var(&env, var, &value);
+        self.settings_key.clear();
+        self.settings_key_for = None;
+        match result {
+            Ok(()) => {
+                self.switch_provider(provider, false, cx);
+                self.notice = format!("{var} saved · provider → {}", provider.id);
+            }
+            Err(e) => self.notice = e,
+        }
+        cx.notify();
+    }
+
+    fn permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let profiles = PROFILES.iter().enumerate().map(|(i, p)| {
+            let on = p.id == self.instance.permission_profile;
+            div()
+                .id(("settings-profile", i))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(if on { MUTED } else { SURFACE_2 }))
+                .bg(rgb(if on { SURFACE } else { BG }))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(SURFACE)))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(if on { ACCENT } else { GHOST }))
+                        .child(if on { "●" } else { "○" }),
+                )
+                .child(
+                    div()
+                        .w(px(100.))
+                        .text_sm()
+                        .text_color(rgb(if on { ACCENT } else { TEXT }))
+                        .child(p.label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(p.detail),
+                )
+                .on_click(
+                    cx.listener(move |view, _: &ClickEvent, _, cx| view.set_profile(p.id, cx)),
+                )
+                .into_any_element()
+        });
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(profiles)
+            .into_any_element()
+    }
+
+    fn settings_prompt_link(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child("edit the instance instructions (apollo.json system_prompt)"),
+            )
+            .child(Self::link(
+                "settings-open-profile",
+                "open profile",
+                false,
+                cx.listener(|view, _: &ClickEvent, _, cx| view.show(Panel::Profile, cx)),
+            ))
+            .into_any_element()
+    }
+
+    fn hotkey_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = if self.state.hotkey.trim().is_empty() {
+            "off".to_string()
+        } else {
+            self.state.hotkey.clone()
+        };
+        const PRESETS: &[&str] = &["Cmd+Alt+A", "Ctrl+Cmd+Space", "Cmd+Shift+A", "off"];
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(TEXT))
+                    .child(SharedString::from(format!(
+                        "open apollo from anywhere · {current}"
+                    ))),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child("default Cmd+Alt+A. macOS may ask for Accessibility once."),
+            )
+            .child(div().flex().flex_row().flex_wrap().gap_2().children(
+                PRESETS.iter().enumerate().map(|(i, preset)| {
+                    let on = match *preset {
+                        "off" => self.state.hotkey.trim().is_empty(),
+                        other => self.state.hotkey == other,
+                    };
+                    Self::link(
+                        ("hotkey-preset", i),
+                        *preset,
+                        on,
+                        cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            view.set_hotkey(
+                                if *preset == "off" {
+                                    String::new()
+                                } else {
+                                    preset.to_string()
+                                },
+                                cx,
+                            )
+                        }),
+                    )
+                    .into_any_element()
+                }),
+            ))
+            .into_any_element()
+    }
+
+    fn density_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let cozy = self.state.density != "compact";
+        div()
+            .flex()
+            .flex_row()
+            .gap_3()
+            .child(Self::link(
+                "density-cozy",
+                "cozy",
+                cozy,
+                cx.listener(|view, _: &ClickEvent, _, cx| view.set_density("cozy", cx)),
+            ))
+            .child(Self::link(
+                "density-compact",
+                "compact",
+                !cozy,
+                cx.listener(|view, _: &ClickEvent, _, cx| view.set_density("compact", cx)),
+            ))
+            .into_any_element()
+    }
+
+    pub(crate) fn set_hotkey(&mut self, hotkey: String, cx: &mut Context<Self>) {
+        self.state.hotkey = hotkey.clone();
+        self.notice = match self.state.save() {
+            Ok(_) => {
+                crate::hotkey::install(&hotkey);
+                if hotkey.is_empty() {
+                    "global hotkey off".into()
+                } else {
+                    format!("global hotkey → {hotkey}")
+                }
+            }
+            Err(e) => e,
+        };
+        cx.notify();
+    }
+
+    pub(crate) fn set_density(&mut self, density: &'static str, cx: &mut Context<Self>) {
+        self.state.density = density.to_string();
+        self.notice = match self.state.save() {
+            Ok(_) => format!("density → {density}"),
+            Err(e) => e,
+        };
+        cx.notify();
+    }
+
+    fn provider_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.instance.provider.as_str();
+        let signing = self.settings_sign;
+        let env = self.instance.env_path();
+        let rows =
+            setup::OAUTH_PROVIDERS
+                .iter()
+                .chain(
+                    setup::PROVIDERS
+                        .iter()
+                        .filter(|p| matches!(p.auth, Auth::ApiKey(_))),
+                )
+                .take(12)
+                .enumerate()
+                .map(|(i, p)| {
+                    let on = p.id == current;
+                    let status = match p.auth {
+                        Auth::OAuth(kind) if signing == Some(kind) => "signing in…",
+                        Auth::OAuth(kind) if kind.signed_in() => "signed in",
+                        Auth::OAuth(_) => "not signed in",
+                        Auth::ApiKey(var) if setup::env_has(&env, var) => "key set",
+                        Auth::ApiKey(_) => "no key",
+                        Auth::Custom => "custom",
+                        Auth::Local => "local",
+                    };
+                    let editing = self.settings_key_for == Some(p.id);
+                    div()
+                        .id(("settings-provider", i))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(if on { MUTED } else { SURFACE_2 }))
+                        .bg(rgb(if on { SURFACE } else { BG }))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .w(px(110.))
+                                        .text_sm()
+                                        .text_color(rgb(if on { ACCENT } else { TEXT }))
+                                        .child(p.label),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(status),
+                                )
+                                .when(!on, |row| {
+                                    row.child(Self::link(
+                                        ("settings-use", i),
+                                        "use",
+                                        false,
+                                        cx.listener(move |view, _: &ClickEvent, _, cx| {
+                                            view.switch_provider(p, false, cx)
+                                        }),
+                                    ))
+                                })
+                                .children(match p.auth {
+                                    Auth::OAuth(kind) => Some(Self::link(
+                                        ("settings-signin", i),
+                                        if kind.signed_in() {
+                                            "sign in again"
+                                        } else {
+                                            "sign in"
+                                        },
+                                        false,
+                                        cx.listener(move |view, _: &ClickEvent, _, cx| {
+                                            view.settings_sign_in(kind, cx)
+                                        }),
+                                    )),
+                                    Auth::ApiKey(_) => Some(Self::link(
+                                        ("settings-key", i),
+                                        if editing { "typing…" } else { "paste key" },
+                                        editing,
+                                        cx.listener(move |view, _: &ClickEvent, _, cx| {
+                                            view.begin_settings_key(p, cx)
+                                        }),
+                                    )),
+                                    _ => None,
+                                }),
+                        )
+                        .when(editing, |col| {
+                            let n = self.settings_key.expose().chars().count();
+                            col.child(div().text_xs().text_color(rgb(WARN)).child(
+                                SharedString::from(format!(
+                                    "key · {n} chars · enter saves · esc cancels · ctrl+v pastes"
+                                )),
+                            ))
+                        })
+                        .into_any_element()
+                });
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(rows)
+            .into_any_element()
+    }
+
     fn settings_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let advanced = self.state.mode == Mode::Advanced;
         let inst = &self.instance;
@@ -2018,12 +2468,32 @@ impl ApolloView {
                     .child(Self::kv("permissions", inst.permission_profile.clone())),
             )
             .child(Self::section("effort").child(self.effort_row(cx)))
-            .child(Self::section("keys & connections").children(keys).child(
-                div().text_xs().text_color(rgb(GHOST)).child(
-                    "keys are write-only here — edit with `apollo init` or re-run \
-                                 onboarding",
-                ),
-            ))
+            .child(
+                Self::section("permissions")
+                    .child(self.permission_picker(cx))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(GHOST))
+                            .child("writes apollo.json and reloads the agent so it takes effect now."),
+                    ),
+            )
+            .child(Self::section("system prompt").child(self.settings_prompt_link(cx)))
+            .child(Self::section("global hotkey").child(self.hotkey_row(cx)))
+            .child(Self::section("density").child(self.density_row(cx)))
+            .child(
+                Self::section("provider & sign-in")
+                    .child(self.provider_settings(cx))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(GHOST))
+                            .child(
+                                "switch provider or sign in without wiping this instance. keys are write-only.",
+                            ),
+                    ),
+            )
+            .child(Self::section("keys on disk").children(keys))
             .when(advanced, |d| {
                 d.child(
                     Self::section("model parameters")
@@ -2211,6 +2681,12 @@ impl ApolloView {
                         cx,
                     )
                 }),
+            ))
+            .child(Self::link(
+                "simple-provider",
+                "provider",
+                settings_open,
+                cx.listener(|view, _: &ClickEvent, _, cx| view.show(Panel::Settings, cx)),
             ))
             .child(Self::link(
                 "simple-settings",

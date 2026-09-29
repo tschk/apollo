@@ -228,8 +228,22 @@ pub fn parse_listing(v: &serde_json::Value) -> Vec<String> {
     Vec::new()
 }
 
+/// Process-wide memo so opening the picker does not re-parse a multi-MB
+/// catalog on every keystroke-adjacent refresh.
+fn process_catalog() -> &'static std::sync::Mutex<Option<(u64, serde_json::Value)>> {
+    static CACHE: std::sync::Mutex<Option<(u64, serde_json::Value)>> = std::sync::Mutex::new(None);
+    &CACHE
+}
+
 /// The models.dev catalog, from the day-old cache or the network.
 fn models_dev_catalog() -> Option<serde_json::Value> {
+    if let Ok(guard) = process_catalog().lock() {
+        if let Some((at, catalog)) = guard.as_ref() {
+            if now().saturating_sub(*at) < MODELS_DEV_TTL {
+                return Some(catalog.clone());
+            }
+        }
+    }
     let path = cache_dir().map(|d| d.join("models.dev.json"));
     let cached: Option<serde_json::Value> = path
         .as_ref()
@@ -246,7 +260,7 @@ fn models_dev_catalog() -> Option<serde_json::Value> {
         .and_then(|c| c.get(MODELS_DEV_URL).send().ok())
         .filter(|r| r.status().is_success())
         .and_then(|r| r.json::<serde_json::Value>().ok());
-    match fresh {
+    let result = match fresh {
         Some(catalog) => {
             if let Some(p) = &path {
                 if let Some(dir) = p.parent() {
@@ -259,7 +273,13 @@ fn models_dev_catalog() -> Option<serde_json::Value> {
         }
         // Offline: a stale catalog beats none.
         None => cached.map(|c| c["catalog"].clone()),
+    };
+    if let Some(catalog) = result.as_ref() {
+        if let Ok(mut guard) = process_catalog().lock() {
+            *guard = Some((now(), catalog.clone()));
+        }
     }
+    result
 }
 
 /// Higher is a better default: a current general model outranks mini, nano,
