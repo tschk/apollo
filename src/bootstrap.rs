@@ -55,6 +55,18 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
         }
     }
 
+    // An explicit key for whatever provider the config names. This is how a
+    // custom OpenAI-compatible endpoint (`provider.name` not in the catalog,
+    // `provider.base_url` set) gets its key from `.env` instead of apollo.json.
+    // It runs before the ChatGPT-login and `OPENAI_API_KEY` probes because
+    // both of those *switch* the provider, which would silently discard the
+    // configured endpoint.
+    if cfg.provider.api_key.is_none() {
+        if let Some(key) = explicit_provider_key() {
+            cfg.provider.api_key = Some(key);
+        }
+    }
+
     if cfg.provider.api_key.is_none() {
         #[cfg(feature = "rs-ai")]
         if let Some((token, _, _)) =
@@ -122,6 +134,14 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
     apply_default_model(&mut cfg);
 
     cfg
+}
+
+/// `APOLLO_PROVIDER_API_KEY`, when set to something non-blank.
+fn explicit_provider_key() -> Option<String> {
+    std::env::var("APOLLO_PROVIDER_API_KEY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Fill in the model for the configured provider when none was chosen.
@@ -515,5 +535,62 @@ mod default_model_tests {
                 assert_eq!(catalog_env_key("not-a-provider"), None);
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod explicit_key_tests {
+    use super::*;
+
+    fn write_config(dir: &Path, json: &str) -> String {
+        let path = dir.join("apollo.json");
+        std::fs::write(&path, json).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn custom_endpoint_takes_its_key_from_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"provider":{"name":"custom","base_url":"https://llm.example/v1"},"model":"m1"}"#,
+        );
+        temp_env::with_vars(
+            [
+                ("APOLLO_PROVIDER_API_KEY", Some("sk-custom")),
+                // Must not win and flip the provider to OpenAI.
+                ("OPENAI_API_KEY", Some("sk-openai")),
+            ],
+            || {
+                let cfg = load_config_workspace(&path, None);
+                assert_eq!(cfg.provider.name, "custom");
+                assert_eq!(cfg.provider.api_key.as_deref(), Some("sk-custom"));
+                assert_eq!(
+                    cfg.provider.base_url.as_deref(),
+                    Some("https://llm.example/v1")
+                );
+                assert_eq!(cfg.model, "m1");
+            },
+        );
+    }
+
+    #[test]
+    fn a_key_in_the_config_is_not_overridden() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"provider":{"name":"custom","api_key":"from-file","base_url":"https://x/v1"}}"#,
+        );
+        temp_env::with_var("APOLLO_PROVIDER_API_KEY", Some("from-env"), || {
+            let cfg = load_config_workspace(&path, None);
+            assert_eq!(cfg.provider.api_key.as_deref(), Some("from-file"));
+        });
+    }
+
+    #[test]
+    fn a_blank_explicit_key_is_ignored() {
+        temp_env::with_var("APOLLO_PROVIDER_API_KEY", Some("  "), || {
+            assert_eq!(explicit_provider_key(), None);
+        });
     }
 }
