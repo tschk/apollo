@@ -109,7 +109,7 @@ impl Compactor for DefaultCompactor {
             .await;
 
         let mut compacted = Vec::new();
-        compacted.extend(system_msgs.into_iter().map(|m| (*m).clone()));
+        compacted.extend(system_msgs.iter().map(|m| (*m).clone()));
         compacted.push(ChatMessage {
             role: "user".into(),
             content: format!(
@@ -124,7 +124,7 @@ impl Compactor for DefaultCompactor {
             content: "Understood, continuing from summary.".into(),
             tool_use_id: None,
         });
-        compacted.extend(recent_msgs.into_iter().map(|m| (*m).clone()));
+        compacted.extend(recent_msgs.iter().map(|m| (*m).clone()));
 
         CompressResult {
             did_compact: old_msgs.len() > 2,
