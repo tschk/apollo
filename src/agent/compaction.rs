@@ -91,10 +91,8 @@ impl Compactor for DefaultCompactor {
             };
         }
 
-        let system_msgs: Vec<&ChatMessage> =
-            messages.iter().filter(|m| m.role == "system").collect();
-        let non_system: Vec<&ChatMessage> =
-            messages.iter().filter(|m| m.role != "system").collect();
+        let (system_msgs, non_system): (Vec<&ChatMessage>, Vec<&ChatMessage>) =
+            messages.iter().partition(|m| m.role == "system");
 
         if non_system.len() <= KEEP_RECENT {
             return CompressResult {
@@ -111,9 +109,7 @@ impl Compactor for DefaultCompactor {
             .await;
 
         let mut compacted = Vec::new();
-        for sm in &system_msgs {
-            compacted.push((*sm).clone());
-        }
+        compacted.extend(system_msgs.into_iter().map(|m| (*m).clone()));
         compacted.push(ChatMessage {
             role: "user".into(),
             content: format!(
@@ -128,9 +124,7 @@ impl Compactor for DefaultCompactor {
             content: "Understood, continuing from summary.".into(),
             tool_use_id: None,
         });
-        for rm in recent_msgs {
-            compacted.push((*rm).clone());
-        }
+        compacted.extend(recent_msgs.into_iter().map(|m| (*m).clone()));
 
         CompressResult {
             did_compact: old_msgs.len() > 2,
@@ -141,10 +135,10 @@ impl Compactor for DefaultCompactor {
 
 impl DefaultCompactor {
     async fn summarize(&self, task: &str, transcript: &str, old_count: usize) -> String {
-        let prompt = compact_prompt(task, transcript);
         if let Some(provider) = &self.provider {
             if !self.model.is_empty() {
-                let messages = [ChatMessage::user(prompt.clone())];
+                let prompt = compact_prompt(task, transcript);
+                let messages = [ChatMessage::user(prompt)];
                 let request = ChatRequest {
                     messages: &messages,
                     tools: None,
