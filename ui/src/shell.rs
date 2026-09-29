@@ -913,7 +913,7 @@ impl ApolloView {
         let open = self.error_detail == Some(index);
         let missing_key = matches!(crate::classify_fault(raw), crate::Fault::MissingKey);
         let line = crate::fault_line(raw);
-        let raw_owned = raw.to_string();
+        let detail = crate::fault_detail(raw);
         div()
             .flex()
             .flex_col()
@@ -972,7 +972,7 @@ impl ApolloView {
                     div()
                         .text_xs()
                         .text_color(rgb(MUTED))
-                        .child(SharedString::from(raw_owned)),
+                        .child(SharedString::from(detail)),
                 )
             })
             .into_any_element()

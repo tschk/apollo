@@ -879,8 +879,11 @@ pub(crate) fn classify_fault(err: &str) -> Fault {
         || lower.contains("403")
         || lower.contains("unauthorized")
         || lower.contains("forbidden")
+        || lower.contains("cloudflare")
+        || lower.contains("<html")
+        || lower.contains("<!doctype")
     {
-        return Fault::Sentence("The account refused that request. Check the sign-in in settings.");
+        return Fault::Sentence("The sign-in was blocked.");
     }
     if lower.contains("429") || lower.contains("rate limit") {
         return Fault::Sentence("The provider is limiting requests. Wait a moment and try again.");
@@ -898,6 +901,27 @@ pub(crate) fn fault_line(err: &str) -> &'static str {
     match classify_fault(err) {
         Fault::MissingKey => "The API key isn't set. Add it in settings.",
         Fault::Sentence(line) => line,
+    }
+}
+
+/// What may sit behind the disclosure. Never the provider's HTML or JSON.
+pub(crate) fn fault_detail(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("<html") || lower.contains("<!doctype") || lower.contains("<body") {
+        return "The provider sent an HTML page instead of an answer.".into();
+    }
+    if err.contains('{') || err.contains('}') {
+        return "The provider sent a JSON error.".into();
+    }
+    let flat = err.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = flat.chars().take(160).collect();
+    if flat.chars().count() > 160 {
+        out.push('…');
+    }
+    if out.is_empty() {
+        "No further detail.".into()
+    } else {
+        out
     }
 }
 
@@ -922,5 +946,16 @@ mod fault_tests {
             "Couldn't reach the provider. Check the connection and try again."
         );
         assert_eq!(fault_line("something odd"), "That didn't work. Try again.");
+    }
+
+    #[test]
+    fn cloudflare_403_is_one_sentence_and_the_page_is_not_shown() {
+        let raw = "provider error: api error: Authentication failed: ChatGPT Codex request failed (HTTP 403 Forbidden): <!DOCTYPE html><html><body>cloudflare</body></html>";
+        assert_eq!(fault_line(raw), "The sign-in was blocked.");
+        let detail = fault_detail(raw);
+        assert!(!detail.to_ascii_lowercase().contains("<html"));
+        assert!(!detail.contains('<'));
+        assert!(!detail.contains('{'));
+        assert!(!detail.contains("cloudflare"));
     }
 }

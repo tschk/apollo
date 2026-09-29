@@ -175,6 +175,8 @@ pub struct OnboardingView {
     /// `low` / `medium` / `high` / `xhigh`.
     effort: String,
     test: TestState,
+    /// Failure details on the test step. Closed until asked.
+    test_details: bool,
     written: Option<WrittenSetup>,
     error: String,
     cursor_start: Instant,
@@ -304,6 +306,7 @@ impl OnboardingView {
             prompt: "Say hello and tell me which model you are, in one sentence.".into(),
             instructions: String::new(),
             test: TestState::Idle,
+            test_details: false,
             written: None,
             error: String::new(),
             cursor_start: Instant::now(),
@@ -618,6 +621,7 @@ impl OnboardingView {
         let prompt = self.prompt.trim().to_string();
         let has_credential = self.has_credential();
         self.test = TestState::Running(Instant::now());
+        self.test_details = false;
         self.field = Field::None;
         cx.notify();
 
@@ -1705,7 +1709,9 @@ impl OnboardingView {
                     (SignIn::Waiting(k, _), _) if *k == kind => {
                         ("sign-in opened in your browser".to_string(), WARN)
                     }
-                    (SignIn::Failed(k, e), _) if *k == kind => (plain_failure(e), DANGER),
+                    (SignIn::Failed(k, e), _) if *k == kind => {
+                        (crate::fault_line(e).to_string(), DANGER)
+                    }
                     (_, Support::NeedsFeature(_)) if self.signed_in[i] => (
                         "signed in, but this build cannot use that login".into(),
                         WARN,
@@ -2013,7 +2019,7 @@ impl OnboardingView {
             .into_any_element()
     }
 
-    fn test_transcript(&self) -> AnyElement {
+    fn test_transcript(&self, cx: &mut Context<Self>) -> AnyElement {
         let line = |who: &'static str, color: u32, text: String| {
             div()
                 .flex()
@@ -2047,17 +2053,46 @@ impl OnboardingView {
                     .child(line("apollo", WARN, format!("{frame} thinking…")))
                     .into_any_element()
             }
-            TestState::Finished(result) => div()
+            TestState::Finished(result) if result.ok => div()
                 .flex()
                 .flex_col()
                 .gap_3()
                 .child(line("you", TEXT, self.prompt.clone()))
-                .child(line(
-                    if result.ok { "apollo" } else { "error" },
-                    if result.ok { ACCENT } else { DANGER },
-                    result.text.clone(),
-                ))
+                .child(line("apollo", ACCENT, result.text.clone()))
                 .into_any_element(),
+            TestState::Finished(result) => {
+                let sentence = crate::fault_line(&result.text).to_string();
+                let detail = crate::fault_detail(&result.text);
+                let open = self.test_details;
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(line("you", TEXT, self.prompt.clone()))
+                    .child(line("error", DANGER, sentence))
+                    .child(
+                        div()
+                            .id("test-error-detail")
+                            .text_xs()
+                            .text_color(rgb(GHOST))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(rgb(TEXT)))
+                            .child(if open { "hide details" } else { "details" })
+                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                view.test_details = !view.test_details;
+                                cx.notify();
+                            })),
+                    )
+                    .when(open, |col| {
+                        col.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(SharedString::from(detail)),
+                        )
+                    })
+                    .into_any_element()
+            }
         }
     }
 
@@ -2366,7 +2401,7 @@ impl Render for OnboardingView {
                     ),
                     TestState::Finished(r) => (r.route.label(), format!("{:.1}s", r.secs)),
                 };
-                let transcript = self.test_transcript();
+                let transcript = self.test_transcript(cx);
                 view_file!("views/test.crepus").into_any_element()
             }
             Step::Done => {
@@ -2451,21 +2486,6 @@ pub fn probe(workspace: &std::path::Path, prompt: &str, has_credential: bool) ->
         true,
         mock_reply(prompt),
     )
-}
-
-fn plain_failure(err: &str) -> String {
-    let lower = err.to_ascii_lowercase();
-    if lower.contains("403")
-        || lower.contains("401")
-        || lower.contains("forbidden")
-        || lower.contains("scope")
-    {
-        "that didn't work — the account refused the request".into()
-    } else if err.chars().count() > 120 {
-        "that didn't work".into()
-    } else {
-        err.to_string()
-    }
 }
 
 fn mock_reply(prompt: &str) -> String {

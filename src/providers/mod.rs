@@ -6,6 +6,8 @@ pub mod retry;
 pub mod traits;
 
 #[cfg(feature = "rs-ai")]
+pub mod chatgpt_login;
+#[cfg(feature = "rs-ai")]
 pub mod codex;
 #[cfg(feature = "provider-copilot")]
 pub mod copilot;
