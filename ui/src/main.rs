@@ -176,12 +176,7 @@ impl Entry {
                 .flex_col()
                 .gap_1()
                 .child(div().text_xs().text_color(rgb(ERR)).child("error"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(ERR))
-                        .child(SharedString::from(text.clone())),
-                ),
+                .child(div().text_sm().text_color(rgb(ERR)).child(fault_line(text))),
         };
         row.with_animation(
             ("entry", index),
@@ -230,6 +225,8 @@ struct ApolloView {
     /// Agent session. A new chat mints a new id so the next turn does not
     /// continue the previous conversation.
     chat_id: String,
+    /// Which error row is showing its raw provider text.
+    error_detail: Option<usize>,
 }
 
 impl ApolloView {
@@ -295,6 +292,7 @@ impl ApolloView {
             picker: None,
             dial: None,
             chat_id: format!("desktop-{}", now_millis()),
+            error_detail: None,
         };
         view.supervise_agent(config_dir, cx);
         view
@@ -854,5 +852,75 @@ impl Render for Root {
             .size_full()
             .font_family(theme::FONT)
             .child(self.0.clone())
+    }
+}
+
+/// What a person should do about a provider or agent failure.
+/// The raw body stays behind a disclosure; this is the line they see first.
+pub(crate) enum Fault {
+    /// No credential. The sentence points at settings.
+    MissingKey,
+    /// One short, static sentence.
+    Sentence(&'static str),
+}
+
+pub(crate) fn classify_fault(err: &str) -> Fault {
+    let lower = err.to_ascii_lowercase();
+    let missing_key = lower.contains("api key")
+        || lower.contains("api_key")
+        || lower.contains("didn't provide")
+        || lower.contains("did not provide")
+        || lower.contains("no key")
+        || lower.contains("missing key");
+    if missing_key {
+        return Fault::MissingKey;
+    }
+    if lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+    {
+        return Fault::Sentence("The account refused that request. Check the sign-in in settings.");
+    }
+    if lower.contains("429") || lower.contains("rate limit") {
+        return Fault::Sentence("The provider is limiting requests. Wait a moment and try again.");
+    }
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return Fault::Sentence("That took too long. Try again.");
+    }
+    if lower.contains("connection") || lower.contains("network") || lower.contains("dns") {
+        return Fault::Sentence("Couldn't reach the provider. Check the connection and try again.");
+    }
+    Fault::Sentence("That didn't work. Try again.")
+}
+
+pub(crate) fn fault_line(err: &str) -> &'static str {
+    match classify_fault(err) {
+        Fault::MissingKey => "The API key isn't set. Add it in settings.",
+        Fault::Sentence(line) => line,
+    }
+}
+
+#[cfg(test)]
+mod fault_tests {
+    use super::*;
+
+    #[test]
+    fn missing_key_is_one_sentence_not_the_body() {
+        let raw = r#"provider error: api error: openai API error 401 Unauthorized: { "error": { "message": "You didn't provide an API key." } }"#;
+        assert_eq!(
+            fault_line(raw),
+            "The API key isn't set. Add it in settings."
+        );
+        assert!(!fault_line(raw).contains('{'));
+    }
+
+    #[test]
+    fn other_failures_stay_one_sentence() {
+        assert_eq!(
+            fault_line("connection reset by peer"),
+            "Couldn't reach the provider. Check the connection and try again."
+        );
+        assert_eq!(fault_line("something odd"), "That didn't work. Try again.");
     }
 }

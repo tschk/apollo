@@ -890,14 +890,92 @@ impl ApolloView {
             .into_any_element()
     }
 
-    fn transcript(&self) -> impl IntoElement {
+    fn transcript(&self, cx: &mut Context<Self>) -> AnyElement {
         let cursor = blink_cursor(self.cursor_start);
-        div().flex().flex_col().gap_4().children(
-            self.entries
-                .iter()
-                .enumerate()
-                .map(|(i, entry)| entry.view(cursor, i)),
-        )
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .children(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, entry)| match entry {
+                        crate::Entry::Error(text) => self.error_row(i, text, cx),
+                        other => other.view(cursor, i).into_any_element(),
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The sentence first. The provider body is opt-in, and it is not red.
+    fn error_row(&self, index: usize, raw: &str, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.error_detail == Some(index);
+        let missing_key = matches!(crate::classify_fault(raw), crate::Fault::MissingKey);
+        let line = crate::fault_line(raw);
+        let raw_owned = raw.to_string();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_xs().text_color(rgb(DANGER)).child("error"))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(DANGER))
+                            .child(if missing_key {
+                                "The API key isn't set."
+                            } else {
+                                line
+                            }),
+                    )
+                    .when(missing_key, |row| {
+                        row.child(
+                            div()
+                                .id(("error-settings", index))
+                                .text_sm()
+                                .text_color(rgb(ACCENT))
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(rgb(TEXT)))
+                                .child("Add it in settings.")
+                                .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                    view.show(Panel::Settings, cx)
+                                })),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id(("error-detail", index))
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(rgb(TEXT)))
+                    .child(if open { "hide details" } else { "details" })
+                    .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                        view.error_detail = if view.error_detail == Some(index) {
+                            None
+                        } else {
+                            Some(index)
+                        };
+                        cx.notify();
+                    })),
+            )
+            .when(open, |row| {
+                row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(SharedString::from(raw_owned)),
+                )
+            })
+            .into_any_element()
     }
 
     /// True once someone has spoken. A status line alone is still the empty home.
@@ -925,7 +1003,7 @@ impl ApolloView {
                 .h_full()
                 .flex()
                 .flex_col()
-                .child(self.transcript_pane())
+                .child(self.transcript_pane(cx))
                 .child(div().w_full().pt_4().child(self.chat_dock(cx)))
                 .into_any_element()
         } else {
@@ -1029,7 +1107,7 @@ impl ApolloView {
             .into_any_element()
     }
 
-    fn transcript_pane(&self) -> AnyElement {
+    fn transcript_pane(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex_1()
             .w_full()
@@ -1038,7 +1116,7 @@ impl ApolloView {
             .flex()
             .flex_col()
             .justify_end()
-            .child(self.transcript())
+            .child(self.transcript(cx))
             .into_any_element()
     }
 
@@ -2423,7 +2501,7 @@ impl ApolloView {
                 .flex()
                 .flex_col()
                 .px_8()
-                .child(self.transcript_pane())
+                .child(self.transcript_pane(cx))
                 .child(
                     div()
                         .w_full()
