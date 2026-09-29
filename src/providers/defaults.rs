@@ -1,10 +1,10 @@
 //! Default model per provider.
 //!
-//! A provider configured with no model has to land somewhere. Picking the
-//! wrong entry is a billing decision, not a cosmetic one, so these track the
-//! defaults published by NousResearch/hermes-agent — the first entry of each
-//! provider's curated list, which is what its
-//! `get_default_model_for_provider()` returns.
+//! A provider configured with no model has to land somewhere. These are the
+//! current general models from models.dev (refreshed 2026-09-29), not the
+//! older ids still pinned in the rs_ai catalog. The desktop picker re-ranks
+//! the live models.dev list the same way, so a blank model is not stuck on
+//! gpt-5.5.
 //!
 //! Only providers apollo can actually construct appear here. An unknown
 //! provider yields `None` and the caller keeps whatever the config already
@@ -12,12 +12,12 @@
 
 /// Provider name (and common aliases) to the model it defaults to.
 const DEFAULTS: &[(&str, &str)] = &[
-    ("chatgpt", "gpt-5.5"),
-    ("anthropic", "claude-sonnet-4-6"),
-    ("claude", "claude-sonnet-4-6"),
-    ("openai", "gpt-5.4"),
-    ("copilot", "gpt-5.4"),
-    ("github-copilot", "gpt-5.4"),
+    ("chatgpt", "gpt-5.6"),
+    ("anthropic", "claude-sonnet-5"),
+    ("claude", "claude-sonnet-5"),
+    ("openai", "gpt-5.6"),
+    ("copilot", "gpt-5.6"),
+    ("github-copilot", "gpt-5.6"),
     ("xai", "grok-build-0.1"),
     ("grok", "grok-build-0.1"),
     ("gemini", "gemini-3.1-pro-preview"),
@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn oauth_providers_get_their_own_defaults() {
-        assert_eq!(default_model_for_provider("chatgpt"), Some("gpt-5.5"));
+        assert_eq!(default_model_for_provider("chatgpt"), Some("gpt-5.6"));
         assert_eq!(default_model_for_provider("xai"), Some("grok-build-0.1"));
     }
 
@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn lookup_ignores_case_and_padding() {
-        assert_eq!(default_model_for_provider("  ChatGpt "), Some("gpt-5.5"));
+        assert_eq!(default_model_for_provider("  ChatGpt "), Some("gpt-5.6"));
     }
 
     #[test]

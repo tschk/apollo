@@ -36,6 +36,22 @@ pub async fn build_restricted_system_prompt(workspace: &Path) -> String {
     build_system_prompt_from_files(workspace, &RESTRICTED_PROMPT_FILES).await
 }
 
+/// Put the instance's configured instructions in front of the file-built prompt.
+///
+/// An empty value, or the stock "You are a helpful AI assistant.", leaves the
+/// assembled prompt alone. Anything the user typed is what the model sees first.
+pub fn apply_configured(configured: &str, assembled: String) -> String {
+    let configured = configured.trim();
+    if configured.is_empty() || configured == DEFAULT_PROMPT {
+        return assembled;
+    }
+    if let Some(rest) = assembled.strip_prefix(DEFAULT_PROMPT) {
+        format!("{configured}{rest}")
+    } else {
+        format!("{configured}\n\n---\n\n{assembled}")
+    }
+}
+
 async fn build_system_prompt_from_files(workspace: &Path, files: &[(&str, &str, usize)]) -> String {
     let body = load_workspace_sections(workspace, files).await;
     let mut prompt = if body.is_empty() {

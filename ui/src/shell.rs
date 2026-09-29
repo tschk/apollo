@@ -7,12 +7,16 @@
 //! Hermes' settings layout (one column of sections), plus tools, model
 //! parameters and logs.
 
+use std::sync::mpsc::{channel, TryRecvError};
+use std::time::{Duration, Instant};
+
 use crepuscularity_gpui::prelude::*;
-use gpui::{AnyElement, ClickEvent, SharedString};
+use gpui::{AnyElement, ClickEvent, MouseButton, MouseDownEvent, SharedString};
 
 use crate::agent::{self, AgentEvent};
+use crate::models::{self, ModelList};
 use crate::onboarding::Purpose;
-use crate::setup::{self, Mode, PROFILES};
+use crate::setup::{self, Auth, Mode, ProviderInfo, PROFILES};
 use crate::theme::*;
 use crate::{blink_cursor, spinner_frame, ApolloView, CHAT_CONTEXT};
 
@@ -21,9 +25,20 @@ const SOFT: u32 = 0xa1a1aa;
 /// Between BG and SURFACE, so the roster reads as a separate column.
 const SIDEBAR: u32 = 0x0f0f11;
 
+/// Avatar colors offered on the profile panel.
+const AVATAR_COLORS: [u32; 6] = [
+    0x8b5cf6, // violet
+    0x3b82f6, // blue
+    0x10b981, // emerald
+    0xf59e0b, // amber
+    0xef4444, // red
+    0xec4899, // pink
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
     Chat,
+    Profile,
     Tools,
     Logs,
     Settings,
@@ -33,11 +48,38 @@ impl Panel {
     fn label(self) -> &'static str {
         match self {
             Panel::Chat => "chat",
+            Panel::Profile => "profile",
             Panel::Tools => "tools",
             Panel::Logs => "logs",
             Panel::Settings => "settings",
         }
     }
+}
+
+/// Which profile field the keyboard is editing (see `ApolloView::edit`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditField {
+    Name,
+    Instructions,
+}
+
+/// One provider row in the model picker's left rail. `reason` is `None`
+/// when a credential exists and the provider is switchable.
+pub(crate) struct RailEntry {
+    provider: &'static ProviderInfo,
+    reason: Option<&'static str>,
+}
+
+/// The model picker overlay: providers on the left, their models on the
+/// right. Built by `ApolloView::open_picker`.
+pub(crate) struct PickerState {
+    rail: Vec<RailEntry>,
+    highlighted: usize,
+    models: Option<ModelList>,
+    loading: bool,
+    note: Option<String>,
+    /// Bumped per fetch so a slow, stale answer is dropped.
+    gen: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,12 +154,16 @@ impl ApolloView {
     fn show(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.panel = panel;
         self.switcher_open = false;
+        self.roster_menu = None;
+        self.edit = None;
+        self.edit_buf.clear();
         self.notice.clear();
         cx.notify();
     }
 
     fn switch_to(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.switcher_open = false;
+        self.roster_menu = None;
         if id == self.instance.id || self.busy {
             cx.notify();
             return;
@@ -201,6 +247,341 @@ impl ApolloView {
         cx.notify();
     }
 
+    // ── Profile panel ──────────────────────────────────────────────────────
+
+    /// The current value of a profile field, straight from where it lives.
+    fn field_value(&self, field: EditField) -> String {
+        match field {
+            EditField::Name => self.instance.name.clone(),
+            EditField::Instructions => setup::read_config(&self.instance.config_path())
+                ["system_prompt"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+        }
+    }
+
+    fn start_edit(&mut self, field: EditField, cx: &mut Context<Self>) {
+        self.edit = Some(field);
+        self.edit_buf = self.field_value(field);
+        self.cursor_start = Instant::now();
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit = None;
+        self.edit_buf.clear();
+        cx.notify();
+    }
+
+    /// Write the edited field where apollo reads it: the name lives in
+    /// ~/.apollo/desktop.json, the instructions in apollo.json's
+    /// `system_prompt`.
+    pub(crate) fn save_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(field) = self.edit.take() else {
+            return;
+        };
+        match field {
+            EditField::Name => {
+                let name = self.edit_buf.trim().to_string();
+                if name.is_empty() {
+                    self.notice = "a name cannot be empty".into();
+                } else {
+                    self.instance.name = name.clone();
+                    self.state.upsert(self.instance.clone());
+                    self.notice = match self.state.save() {
+                        Ok(_) => {
+                            self.log(LogKind::Info, format!("profile: name → {name}"));
+                            "profile saved · applies next turn".into()
+                        }
+                        Err(e) => e,
+                    };
+                }
+            }
+            EditField::Instructions => {
+                let value = self.edit_buf.clone();
+                let path = self.instance.config_path();
+                self.notice = match setup::update_config(&path, |c| {
+                    c["system_prompt"] = serde_json::json!(value);
+                }) {
+                    Ok(_) => {
+                        self.log(LogKind::Info, "profile: instructions updated");
+                        "profile saved · applies next turn".into()
+                    }
+                    Err(e) => e,
+                };
+            }
+        }
+        self.edit_buf.clear();
+        cx.notify();
+    }
+
+    fn set_color(&mut self, color: Option<u32>, cx: &mut Context<Self>) {
+        self.instance.color = color;
+        self.state.upsert(self.instance.clone());
+        self.notice = match self.state.save() {
+            Ok(_) => {
+                let what = color.map_or("default".to_string(), |c| format!("#{c:06x}"));
+                self.log(LogKind::Info, format!("profile: avatar color → {what}"));
+                "profile saved · applies next turn".into()
+            }
+            Err(e) => e,
+        };
+        cx.notify();
+    }
+
+    // ── Roster context menu ────────────────────────────────────────────────
+
+    fn toggle_pin(&mut self, id: String, cx: &mut Context<Self>) {
+        self.roster_menu = None;
+        let Some(inst) = self.state.instances.iter_mut().find(|i| i.id == id) else {
+            return;
+        };
+        inst.pinned = !inst.pinned;
+        let (name, pinned) = (inst.name.clone(), inst.pinned);
+        if id == self.instance.id {
+            self.instance.pinned = pinned;
+        }
+        self.notice = match self.state.save() {
+            Ok(_) => {
+                let verb = if pinned { "pinned to top" } else { "unpinned" };
+                self.log(LogKind::Info, format!("roster: {name} {verb}"));
+                format!("{name} {verb}")
+            }
+            Err(e) => e,
+        };
+        cx.notify();
+    }
+
+    fn duplicate_roster(&mut self, id: String, cx: &mut Context<Self>) {
+        self.roster_menu = None;
+        match setup::duplicate_instance(&self.state, &id) {
+            Ok(copy) => {
+                let name = copy.name.clone();
+                self.state.instances.push(copy);
+                self.notice = match self.state.save() {
+                    Ok(_) => {
+                        self.log(LogKind::Info, format!("roster: created {name}"));
+                        format!("duplicated → {name}")
+                    }
+                    Err(e) => e,
+                };
+            }
+            Err(e) => self.notice = e,
+        }
+        cx.notify();
+    }
+
+    /// Drop an instance from ~/.apollo/desktop.json. Files on disk are
+    /// never touched; the active instance cannot leave the list.
+    fn remove_roster(&mut self, id: String, cx: &mut Context<Self>) {
+        self.roster_menu = None;
+        if id == self.instance.id {
+            return;
+        }
+        let Some(name) = self
+            .state
+            .instances
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.name.clone())
+        else {
+            return;
+        };
+        self.state.instances.retain(|i| i.id != id);
+        if self.state.active.as_deref() == Some(id.as_str()) {
+            self.state.active = self.state.instances.first().map(|i| i.id.clone());
+        }
+        self.notice = match self.state.save() {
+            Ok(_) => {
+                self.log(
+                    LogKind::Info,
+                    format!("roster: removed {name} from the list (files kept)"),
+                );
+                format!("removed {name} from the list — files kept on disk")
+            }
+            Err(e) => e,
+        };
+        cx.notify();
+    }
+
+    // ── Model picker ───────────────────────────────────────────────────────
+
+    /// Why this provider has no usable credential, or `None` when it has
+    /// one. Only the *presence* of a key is ever read, never its value.
+    fn credential_reason(&self, p: &ProviderInfo) -> Option<&'static str> {
+        let env = self.instance.env_path();
+        match p.auth {
+            Auth::OAuth(kind) if !kind.signed_in() => Some("not signed in"),
+            Auth::ApiKey(var) if !setup::env_has(&env, var) => Some("no key saved"),
+            Auth::Custom if !setup::env_has(&env, setup::CUSTOM_KEY_VAR) => Some("no key saved"),
+            _ => None,
+        }
+    }
+
+    /// Build the picker rail: the current provider, then the sign-in
+    /// providers (signed in live, the rest dimmed), then the catalog.
+    fn open_picker(&mut self, cx: &mut Context<Self>) {
+        let mut rail: Vec<RailEntry> = Vec::new();
+        let mut seen: Vec<&str> = Vec::new();
+        if let Some(p) = setup::provider(&self.instance.provider) {
+            seen.push(p.id);
+            // In use, so never dimmed — model switching stays possible.
+            rail.push(RailEntry {
+                provider: p,
+                reason: None,
+            });
+        }
+        for p in setup::OAUTH_PROVIDERS {
+            if seen.contains(&p.id) {
+                continue;
+            }
+            seen.push(p.id);
+            rail.push(RailEntry {
+                provider: p,
+                reason: self.credential_reason(p),
+            });
+        }
+        for p in setup::PROVIDERS.iter() {
+            if p.is_custom() || seen.contains(&p.id) {
+                continue;
+            }
+            seen.push(p.id);
+            rail.push(RailEntry {
+                provider: p,
+                reason: self.credential_reason(p),
+            });
+        }
+        self.picker = Some(PickerState {
+            rail,
+            highlighted: 0,
+            models: None,
+            loading: false,
+            note: None,
+            gen: 0,
+        });
+        self.refresh_picker_models(cx);
+        cx.notify();
+    }
+
+    fn highlight_provider(&mut self, i: usize, cx: &mut Context<Self>) {
+        let changed = match self.picker.as_mut() {
+            Some(picker) if i < picker.rail.len() && picker.highlighted != i => {
+                picker.highlighted = i;
+                picker.models = None;
+                picker.note = None;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.refresh_picker_models(cx);
+            cx.notify();
+        }
+    }
+
+    /// Resolve the highlighted provider's models on a worker thread and
+    /// poll the channel back on the foreground, the way onboarding's
+    /// `refresh_models` does. Offline sources only — no key is at hand.
+    fn refresh_picker_models(&mut self, cx: &mut Context<Self>) {
+        let (catalog, fetch) = match self.picker.as_ref() {
+            Some(picker) => {
+                let entry = &picker.rail[picker.highlighted];
+                (entry.provider.catalog.to_string(), entry.reason.is_none())
+            }
+            None => return,
+        };
+        let current = self.model.clone();
+        let gen = match self.picker.as_mut() {
+            Some(picker) => {
+                picker.gen += 1;
+                picker.loading = fetch;
+                picker.gen
+            }
+            None => return,
+        };
+        if !fetch {
+            return;
+        }
+        let (tx, rx) = channel::<(ModelList, Option<String>)>();
+        std::thread::spawn(move || {
+            let _ = tx.send(models::resolve(&catalog, None, &[current.as_str()]));
+        });
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
+            match rx.try_recv() {
+                Ok((list, note)) => {
+                    this.update(cx, |view, cx| {
+                        if let Some(picker) = view.picker.as_mut() {
+                            if picker.gen == gen {
+                                picker.loading = false;
+                                picker.note = note;
+                                picker.models = Some(list);
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {}
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+        })
+        .detach();
+    }
+
+    /// Write the picked model to apollo.json. Picking on another provider
+    /// also switches `provider.name` and `provider.base_url`.
+    fn pick_model(&mut self, model: String, cx: &mut Context<Self>) {
+        let (provider, is_current) = match self.picker.as_ref() {
+            Some(picker) => match picker.rail.get(picker.highlighted) {
+                // Dimmed providers are not switchable.
+                Some(entry) if entry.reason.is_none() => {
+                    let is_current = setup::provider(&self.instance.provider)
+                        .is_some_and(|cur| cur.id == entry.provider.id);
+                    (entry.provider, is_current)
+                }
+                _ => return,
+            },
+            None => return,
+        };
+        let model_write = model.clone();
+        let provider_id = provider.id;
+        let base_url = provider.base_url;
+        let path = self.instance.config_path();
+        let result = setup::update_config(&path, move |c| {
+            if !is_current {
+                if !c["provider"].is_object() {
+                    c["provider"] = serde_json::json!({});
+                }
+                c["provider"]["name"] = serde_json::json!(provider_id);
+                c["provider"]["base_url"] =
+                    base_url.map_or(serde_json::Value::Null, |u| serde_json::json!(u));
+            }
+            c["model"] = serde_json::json!(model_write);
+        });
+        match result {
+            Ok(_) => {
+                if !is_current {
+                    self.instance.provider = provider_id.to_string();
+                    self.log(LogKind::Info, format!("provider → {provider_id}"));
+                }
+                self.instance.model = model.clone();
+                self.model = model.clone();
+                self.state.upsert(self.instance.clone());
+                let _ = self.state.save();
+                self.notice = format!("model → {model} (next turn)");
+                self.log(LogKind::Info, self.notice.clone());
+                self.picker = None;
+            }
+            Err(e) => self.notice = e,
+        }
+        cx.notify();
+    }
+
     // ── Pieces ─────────────────────────────────────────────────────────────
 
     fn link(
@@ -219,7 +600,12 @@ impl ApolloView {
             .on_click(on_click)
     }
 
-    fn avatar(name: &str, active: bool, size: f32) -> AnyElement {
+    fn avatar(name: &str, active: bool, size: f32, color: Option<u32>) -> AnyElement {
+        let (bg, fg) = match color {
+            Some(c) => (c, BG),
+            None if active => (ACCENT, BG),
+            None => (SURFACE_2, TEXT),
+        };
         div()
             .w(px(size))
             .h(px(size))
@@ -228,10 +614,10 @@ impl ApolloView {
             .items_center()
             .justify_center()
             .rounded_md()
-            .bg(rgb(if active { ACCENT } else { SURFACE_2 }))
+            .bg(rgb(bg))
             .text_xs()
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(rgb(if active { BG } else { TEXT }))
+            .text_color(rgb(fg))
             .child(SharedString::from(initial(name)))
             .into_any_element()
     }
@@ -341,59 +727,62 @@ impl ApolloView {
 
     /// The dropdown under the instance pill (simple mode).
     fn switcher(&self, cx: &mut Context<Self>) -> AnyElement {
-        let rows = self.state.instances.iter().enumerate().map(|(i, inst)| {
-            let active = inst.id == self.instance.id;
-            let id = inst.id.clone();
-            div()
-                .id(("switch", i))
-                .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .px_3()
-                .py_2()
-                .rounded_md()
-                .cursor_pointer()
-                .bg(rgb(if active { SURFACE_2 } else { SURFACE }))
-                .hover(|s| s.bg(rgb(SURFACE_2)))
-                .child(Self::avatar(&inst.name, active, 22.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(if active { ACCENT } else { TEXT }))
-                                .child(SharedString::from(inst.name.clone())),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(rgb(MUTED))
-                                .child(SharedString::from(inst.model.clone())),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(rgb(GHOST))
-                                .child(SharedString::from(inst.scope_label())),
-                        ),
-                )
-                .child(div().text_xs().text_color(rgb(SUCCESS)).child(if active {
-                    "✓"
-                } else {
-                    ""
-                }))
-                .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
-                    view.switch_to(id.clone(), window, cx)
-                }))
-        });
+        let rows = setup::roster_order(&self.state.instances)
+            .into_iter()
+            .enumerate()
+            .map(|(i, inst)| {
+                let active = inst.id == self.instance.id;
+                let id = inst.id.clone();
+                div()
+                    .id(("switch", i))
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(rgb(if active { SURFACE_2 } else { SURFACE }))
+                    .hover(|s| s.bg(rgb(SURFACE_2)))
+                    .child(Self::avatar(&inst.name, active, 22., inst.color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(if active { ACCENT } else { TEXT }))
+                                    .child(SharedString::from(inst.name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child(SharedString::from(inst.model.clone())),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(rgb(GHOST))
+                                    .child(SharedString::from(inst.scope_label())),
+                            ),
+                    )
+                    .child(div().text_xs().text_color(rgb(SUCCESS)).child(if active {
+                        "✓"
+                    } else {
+                        ""
+                    }))
+                    .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+                        view.switch_to(id.clone(), window, cx)
+                    }))
+            });
         div()
             .absolute()
             .top(px(44.))
@@ -459,6 +848,26 @@ impl ApolloView {
                     .text_color(rgb(TEXT))
                     .child(SharedString::from(v)),
             )
+            .into_any_element()
+    }
+
+    /// Like [`Self::kv`], for rows whose label is built at runtime —
+    /// credential names and sign-ins on the keys section.
+    fn kv_key(k: impl Into<SharedString>, v: &'static str) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(220.))
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(k.into()),
+            )
+            .child(div().flex_1().text_xs().text_color(rgb(TEXT)).child(v))
             .into_any_element()
     }
 
@@ -567,6 +976,511 @@ impl ApolloView {
             .into_any_element()
     }
 
+    // ── Profile panel ──────────────────────────────────────────────────────
+
+    /// One editable profile field. Clicking starts editing; while edited
+    /// it shows the buffer with a blinking caret and save/cancel links.
+    fn profile_field(
+        &self,
+        id: &'static str,
+        field: EditField,
+        placeholder: &str,
+        multiline: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let shown = self.field_value(field);
+        let editing = self.edit == Some(field);
+        let empty = shown.is_empty();
+        let cursor = blink_cursor(self.cursor_start);
+        let text = if editing {
+            format!("{}{cursor}", self.edit_buf)
+        } else if empty {
+            placeholder.to_string()
+        } else {
+            shown
+        };
+        let (save_id, cancel_id) = match field {
+            EditField::Name => ("profile-name-save", "profile-name-cancel"),
+            EditField::Instructions => ("profile-inst-save", "profile-inst-cancel"),
+        };
+        let input = div()
+            .id(id)
+            .w_full()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(if editing { MUTED } else { SURFACE_2 }))
+            .bg(rgb(if editing { SURFACE } else { BG }))
+            .text_sm()
+            .text_color(rgb(if !editing && empty { GHOST } else { TEXT }))
+            .when(multiline, |d| d.min_h(px(96.)))
+            .cursor_text()
+            .child(SharedString::from(text))
+            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                if view.edit != Some(field) {
+                    view.start_edit(field, cx);
+                }
+            }));
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(input)
+            .when(editing, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_4()
+                        .child(Self::link(
+                            save_id,
+                            "save",
+                            true,
+                            cx.listener(|view, _: &ClickEvent, _, cx| view.save_edit(cx)),
+                        ))
+                        .child(Self::link(
+                            cancel_id,
+                            "cancel",
+                            false,
+                            cx.listener(|view, _: &ClickEvent, _, cx| view.cancel_edit(cx)),
+                        ))
+                        .child(div().text_xs().text_color(rgb(GHOST)).child(if multiline {
+                            "enter saves · shift+enter adds a line · esc cancels"
+                        } else {
+                            "enter saves · esc cancels"
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn profile_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let inst = &self.instance;
+        let swatches = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(Self::avatar(&inst.name, true, 34., inst.color))
+            .children(AVATAR_COLORS.iter().enumerate().map(|(i, c)| {
+                let on = inst.color == Some(*c);
+                div()
+                    .id(("swatch", i))
+                    .w(px(22.))
+                    .h(px(22.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(if on { TEXT } else { *c }))
+                    .bg(rgb(*c))
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(rgb(TEXT)))
+                    .on_click(
+                        cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            view.set_color(Some(*c), cx)
+                        }),
+                    )
+            }))
+            .child(
+                div()
+                    .id("swatch-none")
+                    .w(px(22.))
+                    .h(px(22.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(if inst.color.is_none() {
+                        TEXT
+                    } else {
+                        SURFACE_2
+                    }))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(rgb(MUTED)))
+                    .child("·")
+                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| view.set_color(None, cx))),
+            );
+        div()
+            .w_full()
+            .max_w(px(640.))
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(
+                Self::section("instance")
+                    .child(Self::kv("id", inst.id.clone()))
+                    .child(Self::kv("works in", inst.scope_label()))
+                    .child(Self::kv("provider", inst.provider.clone()))
+                    .child(Self::kv("model", self.model.clone())),
+            )
+            .child(Self::section("name").child(self.profile_field(
+                "profile-name",
+                EditField::Name,
+                "name this instance",
+                false,
+                cx,
+            )))
+            .child(Self::section("avatar color").child(swatches))
+            .child(
+                Self::section("instructions · saved as apollo.json system_prompt").child(
+                    self.profile_field(
+                        "profile-instructions",
+                        EditField::Instructions,
+                        "(none — apollo uses its built-in prompt)",
+                        true,
+                        cx,
+                    ),
+                ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child("changes apply from the next turn on"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(SUCCESS))
+                    .child(SharedString::from(self.notice.clone())),
+            )
+            .into_any_element()
+    }
+
+    // ── Roster context menu ────────────────────────────────────────────────
+
+    /// The menu that opens under a roster row on right-click.
+    fn roster_menu(&self, inst: &setup::Instance, cx: &mut Context<Self>) -> AnyElement {
+        let id = inst.id.clone();
+        let active = inst.id == self.instance.id;
+        let pin_id = id.clone();
+        let edit_id = id.clone();
+        let dup_id = id.clone();
+        let remove_id = id.clone();
+        let item = |label: SharedString| {
+            div()
+                .px_3()
+                .py_1p5()
+                .mx_0p5()
+                .rounded_md()
+                .text_xs()
+                .text_color(rgb(TEXT))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(SURFACE_2)))
+                .child(label)
+        };
+        let pin = item(if inst.pinned {
+            "unpin".into()
+        } else {
+            "pin to top".into()
+        })
+        .id("menu-pin")
+        .on_click(
+            cx.listener(move |view, _: &ClickEvent, _, cx| view.toggle_pin(pin_id.clone(), cx)),
+        );
+        let edit = item(if active {
+            "edit profile".into()
+        } else {
+            "edit profile · switches first".into()
+        })
+        .id("menu-edit")
+        .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+            view.roster_menu = None;
+            if active {
+                view.show(Panel::Profile, cx);
+            } else {
+                view.switch_to(edit_id.clone(), window, cx);
+            }
+        }));
+        let duplicate = item("duplicate".into())
+            .id("menu-duplicate")
+            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                view.duplicate_roster(dup_id.clone(), cx)
+            }));
+        // The active instance cannot leave the list — the window is chatting
+        // through its config dir.
+        let remove = if active {
+            div()
+                .px_3()
+                .py_1p5()
+                .mx_0p5()
+                .rounded_md()
+                .text_xs()
+                .text_color(rgb(GHOST))
+                .child("remove from list (active)")
+                .into_any_element()
+        } else {
+            item("remove from list".into())
+                .id("menu-remove")
+                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                    view.remove_roster(remove_id.clone(), cx)
+                }))
+                .into_any_element()
+        };
+        div()
+            .mx_2()
+            .mb_1()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .p_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(SURFACE_2))
+            .bg(rgb(SURFACE))
+            .shadow_lg()
+            .child(
+                div()
+                    .px_3()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child(SharedString::from(inst.name.clone())),
+            )
+            .child(pin)
+            .child(edit)
+            .child(duplicate)
+            .child(remove)
+            .into_any_element()
+    }
+
+    // ── Model picker overlay ───────────────────────────────────────────────
+
+    fn picker_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(picker) = self.picker.as_ref() else {
+            return div().into_any_element();
+        };
+        let rail = picker.rail.iter().enumerate().map(|(i, entry)| {
+            let on = i == picker.highlighted;
+            let p = entry.provider;
+            let dimmed = entry.reason.is_some();
+            let right = entry.reason.map(|r| r.to_string()).unwrap_or_else(|| {
+                if i == 0 {
+                    "current".into()
+                } else {
+                    String::new()
+                }
+            });
+            div()
+                .id(("picker-provider", i))
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .cursor_pointer()
+                .when(on, |d| d.bg(rgb(SURFACE_2)))
+                .hover(|s| s.bg(rgb(SURFACE_2)))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(if on { ACCENT } else { GHOST }))
+                        .child(if on { "●" } else { "○" }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_sm()
+                        .text_color(rgb(if dimmed {
+                            GHOST
+                        } else if on {
+                            ACCENT
+                        } else {
+                            TEXT
+                        }))
+                        .child(p.label),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(if dimmed { GHOST } else { MUTED }))
+                        .child(SharedString::from(right)),
+                )
+                .on_click(
+                    cx.listener(move |view, _: &ClickEvent, _, cx| view.highlight_provider(i, cx)),
+                )
+        });
+        let current_provider = picker.rail[picker.highlighted].provider;
+        let dimmed = picker.rail[picker.highlighted].reason.is_some();
+        let (models, footer) = if dimmed {
+            (
+                vec![div()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(rgb(GHOST))
+                    .child(SharedString::from(format!(
+                        "{} — sign in or add a key to switch here",
+                        picker.rail[picker.highlighted].reason.unwrap_or_default()
+                    )))
+                    .into_any_element()],
+                String::new(),
+            )
+        } else {
+            let models: Vec<AnyElement> = picker
+                .models
+                .as_ref()
+                .map(|m| m.models.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let selected = m == self.model;
+                    let pick = m.clone();
+                    div()
+                        .id(("picker-model", i))
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(if selected { ACCENT } else { TEXT }))
+                        .bg(rgb(if selected { SURFACE } else { BG }))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(SURFACE_2)))
+                        .child(SharedString::from(m))
+                        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            view.pick_model(pick.clone(), cx)
+                        }))
+                        .into_any_element()
+                })
+                .collect();
+            let footer = if picker.loading {
+                "fetching models…".to_string()
+            } else {
+                picker
+                    .models
+                    .as_ref()
+                    .map(|m| format!("list from {}", m.source.label()))
+                    .unwrap_or_else(|| "no list for this provider".into())
+            };
+            (models, footer)
+        };
+        div()
+            .absolute()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(BG))
+            .opacity(0.88)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _, cx| {
+                    view.picker = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("picker-panel")
+                    .w(px(720.))
+                    .max_w(px(720.))
+                    .h(px(460.))
+                    .max_h(px(460.))
+                    .flex()
+                    .flex_col()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(SURFACE_2))
+                    .bg(rgb(SURFACE))
+                    .shadow_lg()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                            // Keep clicks inside the picker from reaching
+                            // the backdrop (which closes on any click).
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgb(SURFACE_2))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(TEXT))
+                                    .child(SharedString::from(format!(
+                                        "model · {}",
+                                        current_provider.label
+                                    ))),
+                            )
+                            .child(div().flex_1())
+                            .child(Self::link(
+                                "picker-close",
+                                "close",
+                                false,
+                                cx.listener(|view, _: &ClickEvent, _, cx| {
+                                    view.picker = None;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_row()
+                            .child(
+                                div()
+                                    .id("picker-rail")
+                                    .w(px(230.))
+                                    .flex_shrink_0()
+                                    .overflow_y_scroll()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .p_2()
+                                    .border_r_1()
+                                    .border_color(rgb(SURFACE_2))
+                                    .children(rail),
+                            )
+                            .child(
+                                div()
+                                    .id("picker-models")
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .overflow_y_scroll()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .p_2()
+                                    .children(models),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(rgb(SURFACE_2))
+                            .text_xs()
+                            .text_color(rgb(GHOST))
+                            .child(SharedString::from(format!(
+                                "{footer} · written to apollo.json · applies next turn"
+                            ))),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn settings_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let advanced = self.state.mode == Mode::Advanced;
         let inst = &self.instance;
@@ -590,6 +1504,34 @@ impl ApolloView {
                     }
                 }),
             ));
+        let keys: Vec<AnyElement> = {
+            // Names only — the values never leave the .env (see
+            // `setup::configured_keys`).
+            let mut rows: Vec<AnyElement> = setup::configured_keys(&inst.env_path())
+                .into_iter()
+                .map(|name| Self::kv_key(name, "••••  set"))
+                .collect();
+            for p in setup::OAUTH_PROVIDERS {
+                if let Auth::OAuth(kind) = p.auth {
+                    if kind.signed_in() {
+                        rows.push(Self::kv_key(
+                            format!("{} · signed in", p.label),
+                            "browser login",
+                        ));
+                    }
+                }
+            }
+            if rows.is_empty() {
+                rows.push(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(GHOST))
+                        .child("none configured for this instance")
+                        .into_any_element(),
+                );
+            }
+            rows
+        };
         div()
             .w_full()
             .max_w(px(640.))
@@ -606,6 +1548,12 @@ impl ApolloView {
                     .child(Self::kv("config", setup::display_path(&inst.config_path())))
                     .child(Self::kv("permissions", inst.permission_profile.clone())),
             )
+            .child(Self::section("keys & connections").children(keys).child(
+                div().text_xs().text_color(rgb(GHOST)).child(
+                    "keys are write-only here — edit with `apollo init` or re-run \
+                                 onboarding",
+                ),
+            ))
             .when(advanced, |d| {
                 d.child(
                     Self::section("model parameters")
@@ -761,6 +1709,7 @@ impl ApolloView {
 
     fn simple_layout(&self, cx: &mut Context<Self>) -> AnyElement {
         let settings_open = self.panel == Panel::Settings;
+        let profile_open = self.panel == Panel::Profile;
         let top = div()
             .w_full()
             .h(px(44.))
@@ -772,6 +1721,21 @@ impl ApolloView {
             .gap_4()
             .px_5()
             .child(self.instance_pill(cx))
+            .child(Self::link(
+                "simple-profile",
+                "profile",
+                profile_open,
+                cx.listener(move |view, _: &ClickEvent, _, cx| {
+                    view.show(
+                        if profile_open {
+                            Panel::Chat
+                        } else {
+                            Panel::Profile
+                        },
+                        cx,
+                    )
+                }),
+            ))
             .child(Self::link(
                 "simple-settings",
                 if settings_open { "close" } else { "settings" },
@@ -796,6 +1760,15 @@ impl ApolloView {
                 .overflow_hidden()
                 .child(self.settings_panel(cx))
                 .into_any_element()
+        } else if profile_open {
+            div()
+                .flex_1()
+                .w_full()
+                .px_10()
+                .pt_6()
+                .overflow_hidden()
+                .child(self.profile_panel(cx))
+                .into_any_element()
         } else {
             div()
                 .flex_1()
@@ -813,22 +1786,36 @@ impl ApolloView {
             .flex_col()
             .child(top)
             .child(body)
-            .when(!settings_open, |d| {
+            .when(!settings_open && !profile_open, |d| {
                 d.child(div().w_full().px_8().pt_3().child(self.composer(cx)))
             })
             .child(
                 div()
                     .w_full()
                     .px_10()
-                    .py_2()
+                    .pt_2()
+                    .pb_5()
                     .flex()
                     .flex_row()
+                    .gap_2()
                     .text_xs()
                     .text_color(rgb(0x3f3f46))
-                    .child(SharedString::from(format!(
-                        "{} · {}",
-                        self.model, self.status
-                    )))
+                    .child(
+                        div()
+                            .id("simple-model")
+                            .cursor_pointer()
+                            .text_color(rgb(MUTED))
+                            .hover(|s| s.text_color(rgb(TEXT)))
+                            .child(SharedString::from(self.model.clone()))
+                            .on_click(
+                                cx.listener(|view, _: &ClickEvent, _, cx| view.open_picker(cx)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(0x3f3f46))
+                            .child(SharedString::from(format!("· {}", self.status))),
+                    )
                     .child(div().flex_1())
                     .child("↑↓ history · esc clear"),
             )
@@ -836,66 +1823,101 @@ impl ApolloView {
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let roster = self.state.instances.iter().enumerate().map(|(i, inst)| {
-            let active = inst.id == self.instance.id;
-            let id = inst.id.clone();
-            div()
-                .id(("roster", i))
-                .mx_2()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .px_2()
-                .py_2()
-                .rounded_md()
-                .cursor_pointer()
-                .when(active, |d| d.bg(rgb(SURFACE)))
-                .hover(|s| s.bg(rgb(SURFACE)))
-                .child(Self::avatar(&inst.name, active, 26.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(if active { ACCENT } else { TEXT }))
-                                .child(SharedString::from(inst.name.clone())),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(rgb(MUTED))
-                                .child(SharedString::from(inst.model.clone())),
-                        ),
-                )
-                .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
-                    view.switch_to(id.clone(), window, cx)
-                }))
-        });
-        let nav = [Panel::Chat, Panel::Tools, Panel::Logs, Panel::Settings]
+        // Pinned rows first (`setup::roster_order`); each row carries a
+        // right-click menu, rendered directly under the open row.
+        // Collected eagerly so `cx` is free for the nav links below.
+        let roster: Vec<AnyElement> = setup::roster_order(&self.state.instances)
             .into_iter()
             .enumerate()
-            .map(|(i, panel)| {
-                let on = self.panel == panel;
-                div()
-                    .id(("nav", i))
+            .flat_map(|(i, inst)| {
+                let active = inst.id == self.instance.id;
+                let id = inst.id.clone();
+                let menu_id = inst.id.clone();
+                let menu_open = self.roster_menu.as_deref() == Some(inst.id.as_str());
+                let menu = menu_open.then(|| self.roster_menu(inst, cx));
+                let row = div()
+                    .id(("roster", i))
                     .mx_2()
-                    .px_3()
-                    .py_1p5()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_2()
+                    .py_2()
                     .rounded_md()
-                    .text_sm()
                     .cursor_pointer()
-                    .text_color(rgb(if on { ACCENT } else { MUTED }))
-                    .when(on, |d| d.bg(rgb(SURFACE)))
-                    .hover(|s| s.text_color(rgb(TEXT)))
-                    .child(panel.label())
-                    .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| view.show(panel, cx)))
-            });
+                    .when(active, |d| d.bg(rgb(SURFACE)))
+                    .hover(|s| s.bg(rgb(SURFACE)))
+                    .child(Self::avatar(&inst.name, active, 26., inst.color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(rgb(if active { ACCENT } else { TEXT }))
+                                    .child(SharedString::from(if inst.pinned {
+                                        format!("{} ⌃", inst.name)
+                                    } else {
+                                        inst.name.clone()
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child(SharedString::from(inst.model.clone())),
+                            ),
+                    )
+                    .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+                        view.roster_menu = None;
+                        view.switch_to(id.clone(), window, cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |view, _: &MouseDownEvent, _, cx| {
+                            view.roster_menu = Some(menu_id.clone());
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element();
+                let mut out = vec![row];
+                if let Some(menu) = menu {
+                    out.push(menu);
+                }
+                out
+            })
+            .collect();
+        let nav = [
+            Panel::Chat,
+            Panel::Profile,
+            Panel::Tools,
+            Panel::Logs,
+            Panel::Settings,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, panel)| {
+            let on = self.panel == panel;
+            div()
+                .id(("nav", i))
+                .mx_2()
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .text_sm()
+                .cursor_pointer()
+                .text_color(rgb(if on { ACCENT } else { MUTED }))
+                .when(on, |d| d.bg(rgb(SURFACE)))
+                .hover(|s| s.text_color(rgb(TEXT)))
+                .child(panel.label())
+                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| view.show(panel, cx)))
+        });
         div()
             .w(px(220.))
             .h_full()
@@ -987,9 +2009,13 @@ impl ApolloView {
             .child(div().flex_1())
             .child(
                 div()
+                    .id("top-model")
                     .text_xs()
+                    .cursor_pointer()
                     .text_color(rgb(MUTED))
-                    .child(SharedString::from(self.model.clone())),
+                    .hover(|s| s.text_color(rgb(TEXT)))
+                    .child(SharedString::from(self.model.clone()))
+                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| view.open_picker(cx))),
             )
             .child(
                 div()
@@ -1039,6 +2065,14 @@ impl ApolloView {
                 .overflow_hidden()
                 .child(self.tools_panel(cx))
                 .into_any_element(),
+            Panel::Profile => div()
+                .flex_1()
+                .w_full()
+                .px_8()
+                .pt_4()
+                .overflow_hidden()
+                .child(self.profile_panel(cx))
+                .into_any_element(),
             Panel::Logs => div()
                 .flex_1()
                 .w_full()
@@ -1060,8 +2094,8 @@ impl ApolloView {
             .then(|| div().w_full().px_6().pt_3().child(self.composer(cx)));
         let status = div()
             .w_full()
-            .h(px(28.))
             .mt_3()
+            .pb_5()
             .flex_shrink_0()
             .flex()
             .flex_row()
@@ -1075,7 +2109,6 @@ impl ApolloView {
             .child(div().text_color(rgb(MUTED)).child(self.status.clone()))
             .child(div().flex_1())
             .child(SharedString::from(format!("{} turns", self.turns)))
-            .child(SharedString::from(format!("engine {}", self.engine)))
             .child(SharedString::from(self.instance.permission_profile.clone()));
         div()
             .size_full()
@@ -1106,6 +2139,7 @@ impl Render for ApolloView {
         };
         let switcher =
             (self.switcher_open && self.state.mode == Mode::Simple).then(|| self.switcher(cx));
+        let picker = self.picker.is_some().then(|| self.picker_overlay(cx));
         div()
             .size_full()
             .relative()
@@ -1114,6 +2148,7 @@ impl Render for ApolloView {
             .font_family(FONT)
             .child(layout)
             .children(switcher)
+            .children(picker)
             .track_focus(&self.focus)
             .key_context(CHAT_CONTEXT)
             .on_key_down(cx.listener(ApolloView::on_key_down))

@@ -80,7 +80,7 @@ pub const OAUTH_PROVIDERS: &[ProviderInfo] = &[
         id: "chatgpt",
         label: "ChatGPT",
         auth: Auth::OAuth(crate::oauth::OAuthKind::ChatGpt),
-        default_model: "gpt-5.5",
+        default_model: "gpt-5.6",
         blurb: "sign in with your chatgpt plan",
         catalog: "openai",
         base_url: None,
@@ -98,7 +98,7 @@ pub const OAUTH_PROVIDERS: &[ProviderInfo] = &[
         id: "claude",
         label: "Claude",
         auth: Auth::OAuth(crate::oauth::OAuthKind::Claude),
-        default_model: "claude-sonnet-4-6",
+        default_model: "claude-sonnet-5",
         blurb: "sign in with your claude plan",
         catalog: "anthropic",
         base_url: None,
@@ -218,6 +218,8 @@ pub struct SetupChoices {
     pub model: String,
     pub scope: Scope,
     pub profile: &'static ProfileInfo,
+    /// Written to apollo.json `system_prompt`. Empty keeps the existing one.
+    pub system_prompt: String,
 }
 
 impl SetupChoices {
@@ -462,6 +464,10 @@ pub fn apply_choices(config: &mut serde_json::Value, choices: &SetupChoices, wor
 
     root.insert("model".into(), json!(choices.resolved_model()));
     root.insert("workspace".into(), json!(workspace));
+    let instructions = choices.system_prompt.trim();
+    if !instructions.is_empty() {
+        root.insert("system_prompt".into(), json!(instructions));
+    }
 
     apply_profile(config, choices.profile.id);
 }
@@ -579,7 +585,7 @@ pub fn remove_env_line(existing: &str, key: &str) -> String {
     body
 }
 
-fn write_private(path: &Path, content: &str) -> Result<(), String> {
+pub(crate) fn write_private(path: &Path, content: &str) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -615,6 +621,99 @@ pub enum Mode {
     Advanced,
 }
 
+// ── Roster helpers (pin, duplicate) and .env inspection ─────────────────────
+
+/// Pinned instances first, otherwise in list order (a stable sort, so
+/// pinning never reshuffles the rest of the roster).
+pub fn roster_order(instances: &[Instance]) -> Vec<&Instance> {
+    let mut ordered: Vec<&Instance> = instances.iter().collect();
+    ordered.sort_by_key(|i| !i.pinned);
+    ordered
+}
+
+/// Parse one dotenv line into (name, non-empty value), skipping comments
+/// and empty assignments. The value is compared, never returned.
+fn env_line(l: &str) -> Option<(&str, bool)> {
+    let t = l.trim_start().trim_start_matches("export ").trim_start();
+    if t.starts_with('#') {
+        return None;
+    }
+    let (k, v) = t.split_once('=')?;
+    let value = v.trim().trim_matches('"').trim();
+    Some((k.trim(), !value.is_empty()))
+}
+
+/// Does the dotenv at `path` set `var` to a non-empty value? The value
+/// itself is never read out of this function.
+pub fn env_has(path: &Path, var: &str) -> bool {
+    std::fs::read_to_string(path)
+        .map(|text| {
+            text.lines()
+                .any(|l| env_line(l).is_some_and(|(k, set)| k == var && set))
+        })
+        .unwrap_or(false)
+}
+
+/// Variable NAMES of every configured `*_API_KEY` / `*_TOKEN` entry in the
+/// dotenv at `path` — names only, so the UI can list credentials without
+/// ever holding a value.
+pub fn configured_keys(env_path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(env_path) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for l in text.lines() {
+        let Some((name, set)) = env_line(l) else {
+            continue;
+        };
+        if set
+            && (name.ends_with("_API_KEY") || name.ends_with("_TOKEN"))
+            && !out.iter().any(|n| n == name)
+        {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// Copy an instance as "<name> copy": its `apollo.json` and `.env` land in
+/// a fresh config dir under `~/.apollo/instances/<new-id>/`, owner-only for
+/// the `.env`. Nothing in the source is touched.
+///
+/// A folder-scoped instance keeps its workspace but is detached from the
+/// folder's config (the copy no longer lives in it); an "everywhere"
+/// instance stays everywhere. The copy is never pinned.
+pub fn duplicate_instance(state: &DesktopState, id: &str) -> Result<Instance, String> {
+    let src = state
+        .instance(id)
+        .ok_or_else(|| format!("no instance \"{id}\""))?;
+    let name = format!("{} copy", src.name);
+    let new_id = instance_id(&name, &state.ids());
+    let config_dir = instances_root().join(&new_id);
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("could not create {}: {e}", config_dir.display()))?;
+
+    let config = std::fs::read_to_string(src.config_path())
+        .map_err(|e| format!("could not read {}: {e}", src.config_path().display()))?;
+    write_private(&config_dir.join("apollo.json"), &config)?;
+    if let Ok(env) = std::fs::read_to_string(src.env_path()) {
+        write_private(&config_dir.join(".env"), &env)?;
+    }
+
+    Ok(Instance {
+        id: new_id,
+        name,
+        everywhere: src.everywhere,
+        workspace: src.workspace.clone(),
+        config_dir,
+        provider: src.provider.clone(),
+        model: src.model.clone(),
+        permission_profile: src.permission_profile.clone(),
+        color: src.color,
+        pinned: false,
+    })
+}
+
 /// One apollo agent the app knows about.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Instance {
@@ -629,6 +728,13 @@ pub struct Instance {
     pub provider: String,
     pub model: String,
     pub permission_profile: String,
+    /// Avatar color for the roster, as a 0xRRGGBB the UI picks from a
+    /// swatch row. `None` keeps the default look.
+    #[serde(default)]
+    pub color: Option<u32>,
+    /// Pinned instances sort first in the roster.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl Instance {
@@ -642,11 +748,18 @@ impl Instance {
             provider: choices.provider_name(),
             model: choices.resolved_model(),
             permission_profile: choices.profile.id.to_string(),
+            color: None,
+            pinned: false,
         }
     }
 
     pub fn config_path(&self) -> PathBuf {
         self.config_dir.join("apollo.json")
+    }
+
+    /// The `.env` next to `apollo.json`, where this instance's keys live.
+    pub fn env_path(&self) -> PathBuf {
+        self.config_dir.join(".env")
     }
 
     pub fn scope_label(&self) -> String {
@@ -713,6 +826,8 @@ impl DesktopState {
                     .permission_profile
                     .take()
                     .unwrap_or_else(|| "auto".into()),
+                color: None,
+                pinned: false,
             });
             self.active = Some("apollo".into());
         }
@@ -791,6 +906,7 @@ mod tests {
             model: String::new(),
             scope: Scope::Folder(dir.to_path_buf()),
             profile: PROFILES.iter().find(|p| p.id == profile).unwrap(),
+            system_prompt: String::new(),
         }
     }
 
@@ -896,7 +1012,7 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(written.config_path).unwrap()).unwrap();
         assert_eq!(v["provider"]["name"], "chatgpt");
-        assert_eq!(v["model"], "gpt-5.5");
+        assert_eq!(v["model"], "gpt-5.6");
     }
 
     #[test]
@@ -1006,6 +1122,8 @@ mod tests {
             provider: "gemini".into(),
             model: "m".into(),
             permission_profile: "auto".into(),
+            color: None,
+            pinned: false,
         });
         state.save_to(&path).unwrap();
         let loaded = DesktopState::load_from(&path).unwrap();
@@ -1031,5 +1149,176 @@ mod tests {
         assert_eq!(state.instances.len(), 1);
         assert_eq!(state.instances[0].config_dir, PathBuf::from("/w"));
         assert_eq!(state.active.as_deref(), Some("apollo"));
+    }
+
+    #[test]
+    fn roster_order_pins_first_and_is_otherwise_stable() {
+        let inst = |id: &str, pinned: bool| Instance {
+            id: id.into(),
+            name: id.into(),
+            everywhere: false,
+            workspace: PathBuf::new(),
+            config_dir: PathBuf::new(),
+            provider: String::new(),
+            model: String::new(),
+            permission_profile: "auto".into(),
+            color: None,
+            pinned,
+        };
+        let list = vec![inst("a", false), inst("b", true), inst("c", false)];
+        let order: Vec<&str> = roster_order(&list).iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(order, ["b", "a", "c"]);
+        // Several pinned keep their relative order.
+        let list = vec![inst("a", false), inst("b", true), inst("c", true)];
+        let order: Vec<&str> = roster_order(&list).iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(order, ["b", "c", "a"]);
+    }
+
+    #[test]
+    fn env_has_requires_a_non_empty_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(".env");
+        std::fs::write(
+            &p,
+            "XAI_API_KEY=\"xai-live\"\nEMPTY=\"\"\nexport GROQ_API_KEY=\"g\"\n#COMMENTED=\"c\"\nBARE=\n",
+        )
+        .unwrap();
+        assert!(env_has(&p, "XAI_API_KEY"));
+        assert!(env_has(&p, "GROQ_API_KEY"));
+        assert!(!env_has(&p, "EMPTY"));
+        assert!(!env_has(&p, "BARE"));
+        assert!(!env_has(&p, "COMMENTED"));
+        assert!(!env_has(&p, "MISSING"));
+        assert!(!env_has(&dir.path().join("no.env"), "XAI_API_KEY"));
+    }
+
+    #[test]
+    fn configured_keys_lists_names_and_never_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(".env");
+        std::fs::write(
+            &p,
+            concat!(
+                "ANTHROPIC_API_KEY=\"sk-super-secret-9\"\n",
+                "GITHUB_TOKEN=\"gh-not-for-screen\"\n",
+                "APOLLO_PROVIDER_API_KEY=\"zk-also-secret\"\n",
+                "EMPTY_API_KEY=\"\"\n",
+                "SOME_OTHER_VAR=\"not-a-credential\"\n",
+                "#COMMENT_TOKEN=\"nope\"\n",
+            ),
+        )
+        .unwrap();
+        let keys = configured_keys(&p);
+        assert_eq!(
+            keys,
+            vec![
+                "ANTHROPIC_API_KEY".to_string(),
+                "GITHUB_TOKEN".to_string(),
+                "APOLLO_PROVIDER_API_KEY".to_string(),
+            ]
+        );
+        // The proof the task asks for: no value ever leaves this function.
+        let shown = keys.join(" ");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(!shown.contains("not-for-screen"), "{shown}");
+        assert!(configured_keys(&dir.path().join("missing.env")).is_empty());
+    }
+
+    #[test]
+    fn duplicate_instance_copies_files_under_a_new_id() {
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("HOME", Some(home.path()), || {
+            let folder = tempfile::tempdir().unwrap();
+            std::fs::write(
+                folder.path().join("apollo.json"),
+                r#"{"provider":{"name":"xai"},"model":"grok","workspace":"/w"}"#,
+            )
+            .unwrap();
+            std::fs::write(folder.path().join(".env"), "XAI_API_KEY=\"xai-1\"\n").unwrap();
+            let mut state = DesktopState {
+                onboarded: true,
+                ..Default::default()
+            };
+            state.upsert(Instance {
+                id: "t".into(),
+                name: "t".into(),
+                everywhere: false,
+                workspace: folder.path().to_path_buf(),
+                config_dir: folder.path().to_path_buf(),
+                provider: "xai".into(),
+                model: "grok".into(),
+                permission_profile: "auto".into(),
+                color: Some(0x2550eb),
+                pinned: true,
+            });
+
+            let copy = duplicate_instance(&state, "t").unwrap();
+            assert_eq!(copy.id, "t-copy");
+            assert_eq!(copy.name, "t copy");
+            assert!(!copy.everywhere, "folder-scoped copy is detached");
+            assert_eq!(copy.workspace, folder.path(), "workspace is kept");
+            let home = home.path().canonicalize().unwrap();
+            assert_eq!(
+                copy.config_dir,
+                home.join(".apollo").join("instances").join("t-copy")
+            );
+            assert_eq!(
+                std::fs::read_to_string(copy.config_path()).unwrap(),
+                r#"{"provider":{"name":"xai"},"model":"grok","workspace":"/w"}"#
+            );
+            assert_eq!(
+                std::fs::read_to_string(copy.env_path()).unwrap(),
+                "XAI_API_KEY=\"xai-1\"\n"
+            );
+            assert_eq!(copy.color, Some(0x2550eb));
+            assert!(!copy.pinned, "the copy starts unpinned");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(copy.env_path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o600);
+            }
+            assert!(folder.path().join("apollo.json").is_file(), "source intact");
+
+            // The second copy gets a numbered id.
+            let mut two = state.clone();
+            two.instances.push(copy);
+            assert_eq!(duplicate_instance(&two, "t").unwrap().id, "t-copy-2");
+            assert!(duplicate_instance(&two, "nope").is_err());
+        });
+    }
+
+    #[test]
+    fn duplicate_everywhere_instance_stays_everywhere() {
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("HOME", Some(home.path()), || {
+            let config = home.path().join(".apollo").join("instances").join("e");
+            std::fs::create_dir_all(&config).unwrap();
+            std::fs::write(config.join("apollo.json"), "{}").unwrap();
+            let mut state = DesktopState::default();
+            state.upsert(Instance {
+                id: "e".into(),
+                name: "e".into(),
+                everywhere: true,
+                workspace: home.path().to_path_buf(),
+                config_dir: config.clone(),
+                provider: "chatgpt".into(),
+                model: "gpt-5.5".into(),
+                permission_profile: "auto".into(),
+                color: None,
+                pinned: false,
+            });
+            let copy = duplicate_instance(&state, "e").unwrap();
+            assert!(copy.everywhere);
+            assert_eq!(copy.workspace, home.path());
+            assert_eq!(
+                copy.config_dir,
+                home.path().join(".apollo").join("instances").join("e-copy")
+            );
+        });
     }
 }

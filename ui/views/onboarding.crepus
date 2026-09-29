@@ -13,7 +13,7 @@ div w-full h-full flex flex-col bg-[#09090b] text-[#d4d4d8] font-[Chivo_Mono] @k
           "{lede}"
       {body}
 
-  div h-14 w-full flex flex-row items-center px-10 gap-3 shrink-0
+  div w-full flex flex-row items-center px-10 pt-3 pb-6 gap-3 shrink-0
     if {can_back}
       button text-[#71717a] text-sm px-2 py-2 rounded-md hover:text-[#d4d4d8] @click=on_back
         "{back_label}"

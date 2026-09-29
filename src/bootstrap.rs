@@ -721,7 +721,7 @@ mod anthropic_tests {
             ],
             || {
                 let cfg = load_config_workspace(&path, None);
-                assert_eq!(cfg.model, "claude-sonnet-4-6");
+                assert_eq!(cfg.model, "claude-sonnet-5");
             },
         );
     }

@@ -250,6 +250,57 @@ fn models_dev_catalog() -> Option<serde_json::Value> {
     }
 }
 
+/// Higher is a better default: a current general model outranks mini, nano,
+/// image and preview variants, then a higher version outranks an older one.
+fn model_rank(id: &str) -> (i32, i32, i32, i32) {
+    let lower = id.to_ascii_lowercase();
+    let general = if [
+        "mini",
+        "nano",
+        "lite",
+        "preview",
+        "image",
+        "tts",
+        "live",
+        "luna",
+        "terra",
+        "sol",
+        "spark",
+        "codex",
+        "embed",
+        "audio",
+        "realtime",
+        "transcribe",
+        "search",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+    {
+        0
+    } else {
+        1
+    };
+    let mut nums = Vec::new();
+    let mut cur = String::new();
+    for c in lower.chars() {
+        if c.is_ascii_digit() {
+            cur.push(c);
+        } else if !cur.is_empty() {
+            nums.push(cur.parse::<i32>().unwrap_or(0));
+            cur.clear();
+        }
+    }
+    if !cur.is_empty() {
+        nums.push(cur.parse::<i32>().unwrap_or(0));
+    }
+    (
+        general,
+        *nums.first().unwrap_or(&0),
+        nums.get(1).copied().unwrap_or(0),
+        nums.get(2).copied().unwrap_or(0),
+    )
+}
+
 pub fn models_dev_from_json(
     v: &serde_json::Value,
     provider: &str,
@@ -266,13 +317,10 @@ pub fn models_dev_from_json(
         return Vec::new();
     };
     let mut ids: Vec<String> = models.keys().cloned().collect();
-    ids.sort();
-    if let Some(default) = rs_ai_providers::catalog::by_id(provider).map(|s| s.default_model) {
-        if let Some(i) = ids.iter().position(|m| m == default) {
-            let d = ids.remove(i);
-            ids.insert(0, d);
-        }
-    }
+    // Newest general model first. The catalog's own default is often a
+    // generation behind (it still says gpt-5.5), so it does not win ties.
+    ids.sort_by(|a, b| model_rank(b).cmp(&model_rank(a)).then(a.cmp(b)));
+    let _ = provider;
     ids
 }
 
@@ -377,8 +425,11 @@ mod tests {
         let v = json!({"zhipu": {"models": {"glm-5": {}, "glm-4.7": {}}}});
         assert_eq!(
             models_dev_from_json(&v, "nobody", &["zhipu"]),
-            vec!["glm-4.7", "glm-5"]
+            vec!["glm-5", "glm-4.7"]
         );
+        let openai = serde_json::json!({"openai": {"models": {"gpt-5.5": {}, "gpt-5.6": {}, "gpt-5.4-mini": {}}}});
+        let ranked = models_dev_from_json(&openai, "openai", &[]);
+        assert_eq!(ranked[0], "gpt-5.6");
         assert!(models_dev_from_json(&v, "nobody", &[]).is_empty());
     }
 

@@ -9,7 +9,7 @@
 //! to the templates as children. There is no title bar — only a 2px
 //! progress line along the top edge and a quiet `n / 6` in the footer.
 
-use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 use crepuscularity_gpui::prelude::*;
@@ -73,18 +73,17 @@ enum Field {
     Workspace,
     Name,
     Prompt,
+    Instructions,
 }
 
 /// How the test prompt was answered — shown so a mocked reply is never
 /// mistaken for a live one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeRoute {
-    /// A running apollo agent (`apollo chat`) answered over its HTTP API,
-    /// i.e. a full rx4 agent-loop turn.
+    /// The instance's `apollo serve` process answered over its HTTP API.
+    /// That process is the full agent loop (tools included), kept up across
+    /// turns rather than started per message.
     AgentServer,
-    /// `apollo ask` in the instance's config dir: apollo loaded the config
-    /// and credential just written and round-tripped the provider.
-    Cli,
     /// No apollo binary or no credential — answered locally.
     OfflineMock(String),
 }
@@ -92,8 +91,7 @@ pub enum ProbeRoute {
 impl ProbeRoute {
     pub fn label(&self) -> String {
         match self {
-            ProbeRoute::AgentServer => "live · running apollo agent (rx4 loop)".into(),
-            ProbeRoute::Cli => "live · apollo ask with the new config".into(),
+            ProbeRoute::AgentServer => "live · running apollo agent".into(),
             ProbeRoute::OfflineMock(why) => format!("offline mock · {why}"),
         }
     }
@@ -169,6 +167,8 @@ pub struct OnboardingView {
     signed_in: [bool; 3],
     sign_in: SignIn,
     prompt: String,
+    /// Instance instructions, stored as apollo.json system_prompt.
+    instructions: String,
     test: TestState,
     written: Option<WrittenSetup>,
     error: String,
@@ -287,6 +287,7 @@ impl OnboardingView {
             signed_in: OAUTH_KINDS.map(OAuthKind::signed_in),
             sign_in: SignIn::Idle,
             prompt: "Say hello and tell me which model you are, in one sentence.".into(),
+            instructions: String::new(),
             test: TestState::Idle,
             written: None,
             error: String::new(),
@@ -335,6 +336,7 @@ impl OnboardingView {
             },
             Step::Workspace if self.everywhere => vec![Field::Name],
             Step::Workspace => vec![Field::Workspace, Field::Name],
+            Step::Permissions => vec![Field::Instructions],
             Step::Test => vec![Field::Prompt],
             _ => vec![],
         }
@@ -378,6 +380,7 @@ impl OnboardingView {
             model: self.model.clone(),
             scope: self.scope(),
             profile: self.profile,
+            system_prompt: self.instructions.clone(),
         }
     }
 
@@ -955,6 +958,9 @@ impl OnboardingView {
                     Field::Name => {
                         self.name.pop();
                     }
+                    Field::Instructions => {
+                        self.instructions.pop();
+                    }
                     Field::Prompt => {
                         self.prompt.pop();
                     }
@@ -970,6 +976,7 @@ impl OnboardingView {
                     Field::Model => self.model.clear(),
                     Field::Workspace => self.workspace.clear(),
                     Field::Name => self.name.clear(),
+                    Field::Instructions => self.instructions.clear(),
                     Field::Prompt => self.prompt.clear(),
                     Field::None => {}
                 }
@@ -1001,6 +1008,7 @@ impl OnboardingView {
             Field::Model => self.model.push_str(text.trim()),
             Field::Workspace => self.workspace.push_str(&text),
             Field::Name => self.name.push_str(&text),
+            Field::Instructions => self.instructions.push_str(&text),
             Field::Prompt => self.prompt.push_str(&text),
             Field::None => return,
         }
@@ -1088,15 +1096,13 @@ impl OnboardingView {
         let i = kind_index(kind);
         if let SignIn::Waiting(k, _) = self.sign_in {
             if k == kind {
-                return ("waiting for browser…".into(), WARN);
+                return ("sign-in opened in your browser".into(), WARN);
             }
         }
         match kind.support() {
             Support::Unsupported(_) => ("not supported by apollo".into(), GHOST),
-            Support::NeedsFeature(_) if self.signed_in[i] => {
-                ("✓ signed in · needs build flag".into(), WARN)
-            }
-            Support::NeedsFeature(_) => ("click to sign in · needs build flag".into(), WARN),
+            Support::NeedsFeature(_) if self.signed_in[i] => ("signed in".into(), SUCCESS),
+            Support::NeedsFeature(_) => ("not available in this build".into(), MUTED),
             Support::Live if self.signed_in[i] => ("✓ signed in".into(), SUCCESS),
             Support::Live => ("click to sign in".into(), MUTED),
         }
@@ -1527,39 +1533,22 @@ impl OnboardingView {
         match self.provider.auth {
             Auth::OAuth(kind) => {
                 let i = kind_index(kind);
-                let port = kind.callback_port();
                 let (line, color) = match (&self.sign_in, kind.support()) {
                     (_, Support::Unsupported(why)) => (why.to_string(), MUTED),
-                    (SignIn::Waiting(k, since), _) if *k == kind => (
-                        format!(
-                            "waiting for the browser · localhost:{port} · {}s / 180s",
-                            since.elapsed().as_secs()
-                        ),
-                        WARN,
-                    ),
+                    (SignIn::Waiting(k, _), _) if *k == kind => {
+                        ("sign-in opened in your browser".to_string(), WARN)
+                    }
                     (SignIn::Failed(k, e), _) if *k == kind => (e.clone(), DANGER),
-                    (_, Support::NeedsFeature(feature)) if self.signed_in[i] => (
-                        format!(
-                            "signed in. this apollo build can't run it yet — rebuild with \
-                             `--features {feature}`"
-                        ),
+                    (_, Support::NeedsFeature(_)) if self.signed_in[i] => (
+                        "signed in, but this build cannot use that login".into(),
                         WARN,
                     ),
-                    (_, Support::NeedsFeature(feature)) => (
-                        format!(
-                            "sign-in works and is saved, but apollo needs `--features {feature}` \
-                             to use it"
-                        ),
-                        WARN,
-                    ),
+                    (_, Support::NeedsFeature(_)) => ("not available in this build".into(), MUTED),
                     (_, Support::Live) if self.signed_in[i] => (
                         "signed in — apollo uses this login directly, no key needed".into(),
                         SUCCESS,
                     ),
-                    (_, Support::Live) => (
-                        format!("opens your browser; the login returns to localhost:{port}"),
-                        SOFT,
-                    ),
+                    (_, Support::Live) => ("opens your browser to sign in".into(), SOFT),
                 };
                 let waiting = matches!(self.sign_in, SignIn::Waiting(k, _) if k == kind);
                 let actions = match kind.support() {
@@ -1604,7 +1593,7 @@ impl OnboardingView {
                                 div()
                                     .text_xs()
                                     .text_color(rgb(GHOST))
-                                    .child("~/.config/rs_ai/credentials · shared with apollo"),
+                                    .child("uses your usual browser"),
                             )
                             .child(
                                 div()
@@ -2037,8 +2026,7 @@ impl Render for OnboardingView {
         let (title, lede, hint, next_label): (&str, String, &str, &str) = match step {
             Step::Welcome => (
                 "meet apollo",
-                "a local-first agent on the rotary (rx4) engine. a few screens and it is ready."
-                    .into(),
+                "a local-first agent. a few screens and it is ready.".into(),
                 "enter to continue",
                 "get started",
             ),
@@ -2097,10 +2085,7 @@ impl Render for OnboardingView {
 
         let body: AnyElement = match step {
             Step::Welcome => {
-                let engine_line = format!(
-                    "apollo-ui {} · crepuscularity + gpui · engine rx4",
-                    env!("CARGO_PKG_VERSION")
-                );
+                let engine_line = format!("apollo-ui {}", env!("CARGO_PKG_VERSION"));
                 view_file!("views/welcome.crepus").into_any_element()
             }
             Step::Provider => {
@@ -2172,7 +2157,25 @@ impl Render for OnboardingView {
             }
             Step::Permissions => {
                 let profile_list = self.profile_list(cx);
-                view_file!("views/permissions.crepus").into_any_element()
+                let instructions = Self::labelled(
+                    "instructions",
+                    self.text_field(
+                        "instructions",
+                        Field::Instructions,
+                        self.instructions.clone(),
+                        "how this apollo should behave — optional",
+                        cx,
+                    ),
+                    Some("saved as the system prompt, and editable later in profile".into()),
+                );
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(profile_list)
+                    .child(instructions)
+                    .into_any_element()
             }
             Step::Test => {
                 let prompt_field = self.text_field(
@@ -2207,12 +2210,14 @@ impl Render for OnboardingView {
 
 // ── Test prompt ─────────────────────────────────────────────────────────────
 
-/// Answer the test prompt through the most real path available.
+/// Answer the test prompt through the instance's agent.
 ///
-/// 1. a running apollo agent (full rx4 turn over its HTTP API);
-/// 2. `apollo ask` run in the new workspace, so it loads the apollo.json and
-///    .env the onboarding just wrote;
-/// 3. an offline mock, labelled as such, when neither is possible.
+/// A credential starts `apollo serve` (or reuses the one already serving
+/// this config) and sends the prompt over its API, so the turn has the
+/// same tools as the main window. There is no `apollo ask` fallback: that
+/// command is a bare completion and would tell the model it has no shell.
+/// Without a binary or a credential the reply is an offline mock, labelled
+/// as such.
 pub fn probe(workspace: &std::path::Path, prompt: &str, has_credential: bool) -> ProbeResult {
     let start = Instant::now();
     let done = |route, ok, text: String| ProbeResult {
@@ -2222,7 +2227,10 @@ pub fn probe(workspace: &std::path::Path, prompt: &str, has_credential: bool) ->
         secs: start.elapsed().as_secs_f32(),
     };
 
-    if crate::agent::agent_online() {
+    if has_credential {
+        if let Err(error) = crate::agent::ensure_daemon(workspace) {
+            return done(ProbeRoute::AgentServer, false, error);
+        }
         let (tx, rx) = channel();
         let prompt_owned = prompt.to_string();
         std::thread::spawn(move || {
@@ -2251,95 +2259,16 @@ pub fn probe(workspace: &std::path::Path, prompt: &str, has_credential: bool) ->
         }
     }
 
-    let Some(apollo) = crate::agent::find_apollo_bin() else {
-        return done(
-            ProbeRoute::OfflineMock("apollo binary not found".into()),
-            true,
-            mock_reply(prompt),
-        );
+    let why = if crate::agent::find_apollo_bin().is_none() {
+        "apollo binary not found"
+    } else {
+        "no api key entered"
     };
-    if !has_credential {
-        return done(
-            ProbeRoute::OfflineMock("no api key entered".into()),
-            true,
-            mock_reply(prompt),
-        );
-    }
-
-    // The key reaches the child through the workspace .env apollo loads
-    // itself — never argv, never this process's environment.
-    let child = std::process::Command::new(apollo)
-        .args(["ask", prompt, "--config", "apollo.json"])
-        .current_dir(workspace)
-        .env_remove("OPENAI_API_KEY")
-        .env("RUST_LOG", "error")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
-    let child = match child {
-        Ok(c) => c,
-        Err(e) => {
-            return done(
-                ProbeRoute::Cli,
-                false,
-                format!("could not start apollo: {e}"),
-            )
-        }
-    };
-    let pid = child.id();
-    let (tx, rx) = channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    match rx.recv_timeout(Duration::from_secs(90)) {
-        Ok(Ok(output)) => {
-            let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if output.status.success() && !out.is_empty() {
-                done(ProbeRoute::Cli, true, out)
-            } else {
-                let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                let detail = if err.is_empty() { out } else { err };
-                // Last line is the error; earlier lines are log noise.
-                let detail = detail
-                    .lines()
-                    .last()
-                    .unwrap_or("apollo ask failed")
-                    .to_string();
-                done(ProbeRoute::Cli, false, detail)
-            }
-        }
-        Ok(Err(e)) => done(ProbeRoute::Cli, false, format!("apollo ask failed: {e}")),
-        Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
-            kill_process(pid);
-            done(
-                ProbeRoute::Cli,
-                false,
-                "apollo ask did not answer within 90s".into(),
-            )
-        }
-    }
-}
-
-/// Stop a hung `apollo ask`.
-#[cfg(unix)]
-fn kill_process(pid: u32) {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: plain syscall on a pid this process spawned.
-    unsafe {
-        kill(pid as i32, 9);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_process(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/T", "/PID", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    done(
+        ProbeRoute::OfflineMock(why.into()),
+        true,
+        mock_reply(prompt),
+    )
 }
 
 fn mock_reply(prompt: &str) -> String {

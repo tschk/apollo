@@ -600,11 +600,12 @@ async fn build_automation_agent(
     let policy = Arc::new(ExecutionPolicy::from_config(&cfg.policy));
     let memory = build_memory_backend(workspace, &cfg).await?;
     let embedding_provider = build_embedding_provider(&cfg)?;
-    let system_prompt = if restricted {
+    let assembled = if restricted {
         prompt::build_restricted_system_prompt(workspace).await
     } else {
         prompt::build_system_prompt(workspace).await
     };
+    let system_prompt = prompt::apply_configured(&cfg.system_prompt, assembled);
     let discovered_skills = if restricted {
         Vec::new()
     } else {
@@ -766,8 +767,10 @@ async fn main() -> anyhow::Result<()> {
             let embedding_provider = build_embedding_provider(&cfg)?;
             let self_updater = SelfUpdater::new(workspace.clone(), cfg.runtime.self_update.clone());
 
-            // Build system prompt from workspace context files
-            let system_prompt = prompt::build_system_prompt(&workspace).await;
+            let system_prompt = prompt::apply_configured(
+                &cfg.system_prompt,
+                prompt::build_system_prompt(&workspace).await,
+            );
 
             // Discover skills
             let discovered_skills = skills::discover_skills_for_workspace(Some(&workspace));
@@ -1076,8 +1079,23 @@ async fn main() -> anyhow::Result<()> {
             let model = model.unwrap_or(cfg.model.clone());
             let provider = build_provider(&cfg);
 
-            let response = provider.simple_chat(&message, &model).await?;
-            println!("{}", response);
+            let system_prompt = prompt::apply_configured(
+                &cfg.system_prompt,
+                prompt::build_system_prompt(&cfg.workspace).await,
+            );
+            let messages = [
+                apollo::providers::ChatMessage::system(&system_prompt),
+                apollo::providers::ChatMessage::user(&message),
+            ];
+            let request = apollo::providers::ChatRequest {
+                messages: &messages,
+                tools: None,
+                model: &model,
+                temperature: 0.7,
+                max_tokens: None,
+            };
+            let response = provider.chat(&request).await?;
+            println!("{}", response.text.unwrap_or_default());
         }
 
         Commands::Doctor {
@@ -1187,7 +1205,10 @@ async fn main() -> anyhow::Result<()> {
             );
 
             if let Some(port) = port {
-                let system_prompt = cfg.system_prompt.clone();
+                let system_prompt = prompt::apply_configured(
+                    &cfg.system_prompt,
+                    prompt::build_system_prompt(&workspace).await,
+                );
                 let mut runner = apollo::agent::AgentRunner::new(
                     Arc::clone(&provider),
                     tools.clone(),
@@ -1443,7 +1464,10 @@ async fn main() -> anyhow::Result<()> {
             let memory = build_memory_backend(&workspace, &cfg).await?;
             let embedding_provider = build_embedding_provider(&cfg)?;
 
-            let system_prompt = prompt::build_system_prompt(&workspace).await;
+            let system_prompt = prompt::apply_configured(
+                &cfg.system_prompt,
+                prompt::build_system_prompt(&workspace).await,
+            );
             let discovered_skills = skills::discover_skills_for_workspace(Some(&workspace));
 
             #[cfg(feature = "zkr-memory")]

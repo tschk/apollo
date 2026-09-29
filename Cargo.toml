@@ -34,6 +34,7 @@ default = [
     "channel-cli",
     "channel-telegram",
     "provider-ollama",
+    "provider-copilot",
     "rs-ai",
     "zkr-memory",
     "plugin-web",

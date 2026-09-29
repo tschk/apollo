@@ -9,8 +9,10 @@
 //!   is unset (`bootstrap::load_config_workspace`) and runs it through its
 //!   Codex provider. End to end.
 //! - GitHub Copilot: the login lands in the shared store and apollo's
-//!   Copilot provider reads it — but that provider is behind the
-//!   non-default `provider-copilot` feature.
+//!   Copilot provider reads it. That provider is part of the default build.
+//!
+//! The browser is the system default: `open` on macOS, `xdg-open` on Linux,
+//! `start` on Windows. Nothing embedded.
 //! - Claude: apollo's `anthropic` provider (rs_ai's `ClaudeProvider`) uses
 //!   the shared Claude login when no `ANTHROPIC_API_KEY` is set, sending it
 //!   the way Claude Code does and refreshing it when it expires. Anthropic
@@ -41,6 +43,7 @@ pub enum Support {
     /// Sign-in works and apollo uses it.
     Live,
     /// Sign-in works; apollo needs a non-default build to use it.
+    #[allow(dead_code)]
     NeedsFeature(&'static str),
     /// apollo cannot use this login; sign-in is not offered. (No provider
     /// is in this state today; kept so the UI handles one honestly.)
@@ -78,7 +81,7 @@ impl OAuthKind {
     pub fn support(self) -> Support {
         match self {
             OAuthKind::ChatGpt => Support::Live,
-            OAuthKind::Copilot => Support::NeedsFeature("provider-copilot"),
+            OAuthKind::Copilot => Support::Live,
             OAuthKind::Claude => Support::Live,
         }
     }
@@ -86,6 +89,7 @@ impl OAuthKind {
     /// Local port the provider's redirect comes back to.
     /// (`rs_ai_oauth` keeps its own accessor private; these match its
     /// documented redirect URIs.)
+    #[allow(dead_code)]
     pub fn callback_port(self) -> u16 {
         match self {
             OAuthKind::ChatGpt => 1455,
@@ -137,10 +141,7 @@ mod tests {
     #[test]
     fn support_matches_what_apollo_can_run() {
         assert_eq!(OAuthKind::ChatGpt.support(), Support::Live);
-        assert!(matches!(
-            OAuthKind::Copilot.support(),
-            Support::NeedsFeature(_)
-        ));
+        assert_eq!(OAuthKind::Copilot.support(), Support::Live);
         assert_eq!(OAuthKind::Claude.support(), Support::Live);
     }
 

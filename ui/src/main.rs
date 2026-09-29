@@ -186,7 +186,6 @@ struct ApolloView {
     busy: bool,
     online: bool,
     model: String,
-    engine: String,
     history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -203,12 +202,21 @@ struct ApolloView {
     logs: Vec<shell::LogLine>,
     /// Last settings write, shown under the settings controls.
     notice: String,
+    /// Which profile field is being edited, if any. While set, typing goes
+    /// to `edit_buf` instead of the chat draft.
+    edit: Option<shell::EditField>,
+    edit_buf: String,
+    /// Instance id whose roster context menu is open.
+    roster_menu: Option<String>,
+    /// Model picker overlay state, when open.
+    picker: Option<shell::PickerState>,
 }
 
 impl ApolloView {
     fn new(state: setup::DesktopState, instance: setup::Instance, cx: &mut Context<Self>) -> Self {
-        let (model, engine) = agent::config_summary();
+        let model = agent::config_model();
         let online = agent::agent_online();
+        let config_dir = instance.config_dir.clone();
 
         // Repaint on a timer so the spinner animates and the cursor blinks.
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
@@ -221,25 +229,22 @@ impl ApolloView {
         })
         .detach();
 
-        Self {
+        let mut view = Self {
             focus: cx.focus_handle(),
             draft: String::new(),
             entries: vec![Entry::Status(if online {
-                "connected — streaming tool activity live".into()
+                "agent ready".into()
             } else {
-                "no agent server running — messages go through `apollo ask` in this workspace. \
-                 run `apollo chat` here for tools and live streaming"
-                    .into()
+                "starting the agent…".into()
             })],
             status: if online {
                 "ready".into()
             } else {
-                "offline".into()
+                "starting…".into()
             },
             busy: false,
             online,
             model,
-            engine,
             history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
@@ -253,9 +258,9 @@ impl ApolloView {
                     instance.name,
                     instance.provider,
                     if online {
-                        "agent server online"
+                        "agent ready"
                     } else {
-                        "no agent server, using apollo ask"
+                        "starting the agent"
                     }
                 ),
             )],
@@ -264,7 +269,67 @@ impl ApolloView {
             panel: shell::Panel::Chat,
             switcher_open: false,
             notice: String::new(),
-        }
+            edit: None,
+            edit_buf: String::new(),
+            roster_menu: None,
+            picker: None,
+        };
+        view.supervise_agent(config_dir, cx);
+        view
+    }
+
+    /// Start the instance's agent in the background and flip the banner when
+    /// it is ready. Messages wait on this process; they are not sent as a
+    /// bare completion.
+    fn supervise_agent(&mut self, config_dir: std::path::PathBuf, cx: &mut Context<Self>) {
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(agent::ensure_daemon(&config_dir));
+        });
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
+            match rx.try_recv() {
+                Ok(Ok(())) => {
+                    this.update(cx, |view, cx| {
+                        view.online = true;
+                        view.status = "ready".into();
+                        if let Some(state) = agent::fetch_state() {
+                            if !state.model.is_empty() && state.model != "—" {
+                                view.model = state.model.clone();
+                                view.instance.model = state.model;
+                            }
+                        }
+                        if let Some(Entry::Status(text)) = view.entries.first_mut() {
+                            if text.starts_with("starting") || text.starts_with("agent ") {
+                                *text = "agent ready — tools and streaming are on".into();
+                            }
+                        }
+                        view.log(shell::LogKind::Ok, "agent ready");
+                        cx.notify();
+                    })
+                    .ok();
+                    break;
+                }
+                Ok(Err(error)) => {
+                    this.update(cx, |view, cx| {
+                        view.online = false;
+                        view.status = "agent failed".into();
+                        if let Some(Entry::Status(text)) = view.entries.first_mut() {
+                            *text = format!("the agent did not start. {error}");
+                        }
+                        view.log(shell::LogKind::Error, error);
+                        cx.notify();
+                    })
+                    .ok();
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+        })
+        .detach();
     }
 
     // ── Input ──────────────────────────────────────────────────────────────
@@ -275,6 +340,21 @@ impl ApolloView {
         }
         let stroke = &event.keystroke;
         let key = stroke.key.as_str();
+
+        // The model picker is modal: escape closes it, nothing else types.
+        if self.picker.is_some() {
+            if key == "escape" {
+                self.picker = None;
+                cx.notify();
+            }
+            return;
+        }
+
+        // A profile field being edited takes over the keyboard.
+        if self.edit.is_some() {
+            self.edit_key_down(event, cx);
+            return;
+        }
 
         // Let the platform paste path through rather than swallowing it.
         if stroke.modifiers.platform || stroke.modifiers.control {
@@ -316,6 +396,50 @@ impl ApolloView {
         }
     }
 
+    /// Keys while a profile field is being edited: chars/space append,
+    /// backspace pops, paste pastes, escape cancels, enter saves (and
+    /// shift+enter puts a newline in the instructions field).
+    fn edit_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let stroke = &event.keystroke;
+        let key = stroke.key.as_str();
+
+        if stroke.modifiers.platform || stroke.modifiers.control {
+            if key == "v" {
+                if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                    self.edit_buf.push_str(text.trim_end_matches('\n'));
+                    cx.notify();
+                }
+            }
+            return;
+        }
+
+        let multiline = matches!(self.edit, Some(shell::EditField::Instructions));
+        match key {
+            "enter" if stroke.modifiers.shift && multiline => {
+                self.edit_buf.push('\n');
+                cx.notify();
+            }
+            "enter" => self.save_edit(cx),
+            "backspace" => {
+                self.edit_buf.pop();
+                cx.notify();
+            }
+            "escape" => self.cancel_edit(cx),
+            "space" => {
+                self.edit_buf.push(' ');
+                cx.notify();
+            }
+            _ => {
+                if let Some(ch) = stroke.key_char.as_deref() {
+                    if !ch.is_empty() && !ch.chars().any(char::is_control) {
+                        self.edit_buf.push_str(ch);
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
     /// Walk the input history, keeping the in-progress draft parked at the end.
     fn history_step(&mut self, delta: i32, cx: &mut Context<Self>) {
         if self.history.is_empty() {
@@ -346,10 +470,18 @@ impl ApolloView {
     }
 
     fn submit_action(&mut self, _: &SubmitMessage, window: &mut Window, cx: &mut Context<Self>) {
+        // While the picker or a profile field is open, enter belongs to it,
+        // not to the chat draft.
+        if self.picker.is_some() || self.edit.is_some() {
+            return;
+        }
         self.send(window, cx);
     }
 
     fn clear_action(&mut self, _: &ClearDraft, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker.is_some() || self.edit.is_some() {
+            return;
+        }
         self.draft.clear();
         cx.notify();
     }
@@ -533,8 +665,8 @@ impl ApolloView {
                     }),
                     _ => {}
                 }
-                // Not `online = true`: a reply can also come from the
-                // `apollo ask` fallback with no agent server listening.
+                // The reply came from the already-running agent. A lost
+                // socket is an error event, not a second completion.
                 self.busy = false;
                 self.status = "ready".into();
                 true
@@ -553,9 +685,10 @@ impl ApolloView {
 /// while the onboarding has focus.
 const CHAT_CONTEXT: &str = "ApolloChat";
 
-/// Show the main window for the state's active instance. The chat view,
-/// `apollo ask` fallback and status bar all resolve `apollo.json` relative
-/// to the working directory, so that becomes the instance's config dir.
+/// Show the main window for the state's active instance. The chat view
+/// and status bar resolve `apollo.json` relative to the working directory,
+/// so that becomes the instance's config dir. The agent process is started
+/// once for that config and reused for every message.
 pub(crate) fn open_chat(state: setup::DesktopState, window: &mut Window, cx: &mut App) {
     let Some(instance) = state.ready().cloned() else {
         return open_onboarding(onboarding::Purpose::FirstRun, window, cx);
