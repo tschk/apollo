@@ -4,7 +4,7 @@
 
 Astro (static) with client behavior on [Moonshine](https://github.com/tschk/moonshine)
 signals. Chivo Mono, zinc-950, an ASCII fluid field, and the desktop screenshots.
-Deployed to Cloudflare Pages (`wrangler pages deploy dist`).
+Deployed to Cloudflare Pages: https://apollo-8e0.pages.dev (`wrangler pages deploy dist --project-name apollo`).
 
 ## Commands
 
@@ -24,7 +24,7 @@ records on `tsc.hk`. If the token cannot write DNS, add:
 
 | Type | Name | Content | Proxy |
 | --- | --- | --- | --- |
-| CNAME | apollo | `<project>.pages.dev` | Proxied |
+| CNAME | apollo | `apollo-8e0.pages.dev` | Proxied |
 
 Zone `tsc.hk` is `0b4d96095d00ccbfb16a93d9f68b8328` on account
 `fc62a6e6528bec6d3d81c3bf8967ceeb`. Do not use the Twenifyscale account.
