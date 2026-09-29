@@ -286,11 +286,14 @@ dependencies = [
 name = "apollo-ui"
 version = "0.2.2"
 dependencies = [
+ "chrono",
  "crepuscularity-gpui",
  "gpui",
  "reqwest",
+ "rs_ai_oauth",
  "serde",
  "serde_json",
+ "temp-env",
  "tempfile",
  "tungstenite 0.24.0",
 ]

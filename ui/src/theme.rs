@@ -9,6 +9,7 @@ use std::borrow::Cow;
 pub const BG: u32 = 0x09090b; // --tk-bg (zinc-950)
 pub const SURFACE: u32 = 0x18181b; // --tk-surface
 pub const SURFACE_2: u32 = 0x27272a; // --tk-surface-2
+#[allow(dead_code)] // part of the token set; the templates use it literally
 pub const BORDER: u32 = 0x3f3f46; // --tk-border
 pub const TEXT: u32 = 0xd4d4d8; // --tk-text
 pub const MUTED: u32 = 0x71717a; // --tk-muted

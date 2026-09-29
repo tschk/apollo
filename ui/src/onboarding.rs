@@ -1,22 +1,29 @@
-//! First-run onboarding: welcome → provider + key → workspace → permissions
-//! → test prompt → done, then the window swaps to the main chat view.
+//! Onboarding: welcome → sign in / provider → workspace → permissions →
+//! test prompt → simple-or-advanced, then the window swaps to the main view.
+//!
+//! The same view, started with [`Purpose::NewInstance`], adds another apollo
+//! instance from the main window: it skips the welcome and the mode choice.
 //!
 //! Layout lives in `views/*.crepus` (compiled in with `view_file!`); rows
-//! whose count or click target depends on state (provider cards, fields,
-//! profile list) are built here and handed to the templates as children.
+//! whose count or click target depends on state are built here and handed
+//! to the templates as children. There is no title bar — only a 2px
+//! progress line along the top edge and a quiet `n / 6` in the footer.
 
-use std::path::PathBuf;
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crepuscularity_gpui::prelude::*;
-use gpui::{AnyElement, ClickEvent, KeyDownEvent, PathPromptOptions, SharedString};
+use gpui::{relative, AnyElement, ClickEvent, KeyDownEvent, PathPromptOptions, SharedString};
 
+use crate::oauth::{OAuthKind, Support};
 use crate::setup::{
-    self, DesktopState, ProfileInfo, ProviderInfo, Secret, SetupChoices, WrittenSetup, PROFILES,
-    PROVIDERS,
+    self, Auth, DesktopState, Instance, Mode, ProfileInfo, ProviderInfo, Scope, Secret,
+    SetupChoices, WrittenSetup, OAUTH_PROVIDERS, PROFILES, PROVIDERS,
 };
 use crate::theme::*;
+
+const GHOST: u32 = 0x52525b;
+const SOFT: u32 = 0xa1a1aa;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -28,7 +35,7 @@ pub enum Step {
     Done,
 }
 
-const STEPS: [Step; 6] = [
+const FIRST_RUN_STEPS: [Step; 6] = [
     Step::Welcome,
     Step::Provider,
     Step::Workspace,
@@ -36,21 +43,22 @@ const STEPS: [Step; 6] = [
     Step::Test,
     Step::Done,
 ];
+const NEW_INSTANCE_STEPS: [Step; 5] = [
+    Step::Provider,
+    Step::Workspace,
+    Step::Permissions,
+    Step::Test,
+    Step::Done,
+];
 
-impl Step {
-    fn index(self) -> usize {
-        STEPS.iter().position(|s| *s == self).unwrap_or(0)
-    }
-    fn label(self) -> &'static str {
-        match self {
-            Step::Welcome => "welcome",
-            Step::Provider => "provider",
-            Step::Workspace => "workspace",
-            Step::Permissions => "permissions",
-            Step::Test => "test",
-            Step::Done => "done",
-        }
-    }
+/// Why the onboarding is on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// First launch, or `--onboarding`: sets up (or re-sets up) the active
+    /// instance and picks the mode.
+    FirstRun,
+    /// "+ new instance" from the main window.
+    NewInstance,
 }
 
 /// Which text field receives typing.
@@ -58,8 +66,10 @@ impl Step {
 enum Field {
     None,
     ApiKey,
+    BaseUrl,
     Model,
     Workspace,
+    Name,
     Prompt,
 }
 
@@ -70,18 +80,18 @@ pub enum ProbeRoute {
     /// A running apollo agent (`apollo chat`) answered over its HTTP API,
     /// i.e. a full rx4 agent-loop turn.
     AgentServer,
-    /// `apollo ask` in the new workspace: apollo loaded the config and
-    /// credential just written and round-tripped the provider.
+    /// `apollo ask` in the instance's config dir: apollo loaded the config
+    /// and credential just written and round-tripped the provider.
     Cli,
     /// No apollo binary or no credential — answered locally.
     OfflineMock(String),
 }
 
 impl ProbeRoute {
-    fn label(&self) -> String {
+    pub fn label(&self) -> String {
         match self {
             ProbeRoute::AgentServer => "live · running apollo agent (rx4 loop)".into(),
-            ProbeRoute::Cli => "live · apollo ask with the new workspace config".into(),
+            ProbeRoute::Cli => "live · apollo ask with the new config".into(),
             ProbeRoute::OfflineMock(why) => format!("offline mock · {why}"),
         }
     }
@@ -101,18 +111,44 @@ enum TestState {
     Finished(ProbeResult),
 }
 
-/// Called once with the onboarded workspace; swaps the window to the chat.
-type OnFinish = Box<dyn FnOnce(PathBuf, &mut Window, &mut App) + 'static>;
+/// Browser sign-in progress for the selected OAuth provider.
+#[derive(Debug, Clone, PartialEq)]
+enum SignIn {
+    Idle,
+    Waiting(OAuthKind, Instant),
+    Failed(OAuthKind, String),
+}
+
+/// Called once: `Some(state)` when an instance was saved, `None` when a
+/// new-instance flow was cancelled.
+type OnFinish = Box<dyn FnOnce(Option<DesktopState>, &mut Window, &mut App) + 'static>;
+
+const OAUTH_KINDS: [OAuthKind; 3] = [OAuthKind::ChatGpt, OAuthKind::Copilot, OAuthKind::Claude];
+
+fn kind_index(kind: OAuthKind) -> usize {
+    OAUTH_KINDS.iter().position(|k| *k == kind).unwrap_or(0)
+}
 
 pub struct OnboardingView {
     pub focus: gpui::FocusHandle,
+    purpose: Purpose,
+    state: DesktopState,
+    /// Instance being re-set-up (`--onboarding` over an existing one).
+    editing: Option<String>,
     step: Step,
     field: Field,
     provider: &'static ProviderInfo,
+    dropdown_open: bool,
     api_key: Secret,
+    base_url: String,
     model: String,
+    everywhere: bool,
     workspace: String,
+    name: String,
     profile: &'static ProfileInfo,
+    mode: Mode,
+    signed_in: [bool; 3],
+    sign_in: SignIn,
     prompt: String,
     test: TestState,
     written: Option<WrittenSetup>,
@@ -123,30 +159,68 @@ pub struct OnboardingView {
 
 impl OnboardingView {
     pub fn new(
+        purpose: Purpose,
         cx: &mut Context<Self>,
-        on_finish: impl FnOnce(PathBuf, &mut Window, &mut App) + 'static,
+        on_finish: impl FnOnce(Option<DesktopState>, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let previous = DesktopState::load().unwrap_or_default();
-        let provider = previous
-            .provider
+        let state = DesktopState::load().unwrap_or_default();
+        let active = state
+            .active
             .as_deref()
-            .and_then(setup::provider)
-            .unwrap_or(&PROVIDERS[0]);
-        let model = previous
-            .model
-            .clone()
-            .unwrap_or_else(|| provider.default_model.to_string());
-        let workspace = previous
-            .workspace
-            .clone()
-            .unwrap_or_else(setup::default_workspace);
-        let profile = previous
-            .permission_profile
-            .as_deref()
-            .and_then(|id| PROFILES.iter().find(|p| p.id == id))
-            .unwrap_or(&PROFILES[0]);
+            .and_then(|id| state.instance(id))
+            .or_else(|| state.instances.first())
+            .cloned();
 
-        // Repaint for the blinking caret and the test spinner.
+        // Re-running first-run setup edits the active instance in place; a
+        // new instance starts from its provider but gets its own folder.
+        let editing = match purpose {
+            Purpose::FirstRun => active.as_ref().map(|i| i.id.clone()),
+            Purpose::NewInstance => None,
+        };
+        let provider = active
+            .as_ref()
+            .and_then(|i| setup::provider(&i.provider))
+            .unwrap_or(&OAUTH_PROVIDERS[0]);
+        let model = match (&active, purpose) {
+            (Some(i), Purpose::FirstRun) if !i.model.is_empty() => i.model.clone(),
+            _ => provider.default_model.to_string(),
+        };
+        let (everywhere, workspace, name) = match (&active, purpose) {
+            (Some(i), Purpose::FirstRun) => (
+                i.everywhere,
+                setup::display_path(&i.workspace),
+                i.name.clone(),
+            ),
+            _ => {
+                let names: Vec<&str> = state.instances.iter().map(|i| i.name.as_str()).collect();
+                let name = if names.is_empty() {
+                    "apollo".to_string()
+                } else {
+                    (2..)
+                        .map(|n| format!("apollo {n}"))
+                        .find(|n| !names.contains(&n.as_str()))
+                        .expect("unbounded")
+                };
+                let folder =
+                    setup::default_workspace().with_file_name(setup::instance_id(&name, &[]));
+                (false, setup::display_path(&folder), name)
+            }
+        };
+        let profile = active
+            .as_ref()
+            .and_then(|i| PROFILES.iter().find(|p| p.id == i.permission_profile))
+            .unwrap_or(&PROFILES[0]);
+        let base_url = if provider.is_custom() {
+            active
+                .as_ref()
+                .map(|i| setup::read_config(&i.config_path()))
+                .and_then(|c| c["provider"]["base_url"].as_str().map(str::to_string))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Repaint for the blinking caret, the test spinner and sign-in wait.
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
             cx.background_executor()
                 .timer(Duration::from_millis(250))
@@ -157,32 +231,79 @@ impl OnboardingView {
         })
         .detach();
 
-        Self {
+        let mode = state.mode;
+        let mut view = Self {
             focus: cx.focus_handle(),
-            step: Step::Welcome,
+            purpose,
+            state,
+            editing,
+            step: match purpose {
+                Purpose::FirstRun => Step::Welcome,
+                Purpose::NewInstance => Step::Provider,
+            },
             field: Field::None,
             provider,
+            dropdown_open: false,
             api_key: Secret::default(),
+            base_url,
             model,
-            workspace: setup::display_path(&workspace),
+            everywhere,
+            workspace,
+            name,
             profile,
+            mode,
+            signed_in: OAUTH_KINDS.map(OAuthKind::signed_in),
+            sign_in: SignIn::Idle,
             prompt: "Say hello and tell me which model you are, in one sentence.".into(),
             test: TestState::Idle,
             written: None,
             error: String::new(),
             cursor_start: Instant::now(),
             on_finish: Some(Box::new(on_finish)),
+        };
+        view.field = view.default_field();
+        // A flow started before this view (e.g. a cancelled new instance) is
+        // still listening: show it and pick up its result.
+        if let Auth::OAuth(kind) = view.provider.auth {
+            if kind.in_flight() {
+                view.start_sign_in(kind, cx);
+            }
+        }
+        view
+    }
+
+    fn steps(&self) -> &'static [Step] {
+        match self.purpose {
+            Purpose::FirstRun => &FIRST_RUN_STEPS,
+            Purpose::NewInstance => &NEW_INSTANCE_STEPS,
+        }
+    }
+
+    fn step_index(&self) -> usize {
+        self.steps()
+            .iter()
+            .position(|s| *s == self.step)
+            .unwrap_or(0)
+    }
+
+    /// Text fields on the current step, in tab order.
+    fn fields(&self) -> Vec<Field> {
+        match self.step {
+            Step::Provider => match self.provider.auth {
+                Auth::OAuth(kind) if matches!(kind.support(), Support::Unsupported(_)) => vec![],
+                Auth::OAuth(_) | Auth::Local => vec![Field::Model],
+                Auth::ApiKey(_) => vec![Field::ApiKey, Field::Model],
+                Auth::Custom => vec![Field::BaseUrl, Field::ApiKey, Field::Model],
+            },
+            Step::Workspace if self.everywhere => vec![Field::Name],
+            Step::Workspace => vec![Field::Workspace, Field::Name],
+            Step::Test => vec![Field::Prompt],
+            _ => vec![],
         }
     }
 
     fn default_field(&self) -> Field {
-        match self.step {
-            Step::Provider if self.provider.env_var.is_some() => Field::ApiKey,
-            Step::Provider => Field::Model,
-            Step::Workspace => Field::Workspace,
-            Step::Test => Field::Prompt,
-            _ => Field::None,
-        }
+        self.fields().first().copied().unwrap_or(Field::None)
     }
 
     fn caret(&self) -> &'static str {
@@ -193,12 +314,30 @@ impl OnboardingView {
         }
     }
 
+    fn scope(&self) -> Scope {
+        if self.everywhere {
+            Scope::Everywhere
+        } else {
+            Scope::Folder(setup::expand_path(&self.workspace))
+        }
+    }
+
+    fn instance_id(&self) -> String {
+        match &self.editing {
+            Some(id) => id.clone(),
+            None => setup::instance_id(&self.name, &self.state.ids()),
+        }
+    }
+
     fn choices(&self) -> SetupChoices {
         SetupChoices {
+            instance_id: self.instance_id(),
+            name: self.name.trim().to_string(),
             provider: self.provider,
             api_key: self.api_key.clone(),
+            base_url: self.base_url.trim().to_string(),
             model: self.model.clone(),
-            workspace: setup::expand_path(&self.workspace),
+            scope: self.scope(),
             profile: self.profile,
         }
     }
@@ -208,8 +347,17 @@ impl OnboardingView {
     fn go(&mut self, step: Step, cx: &mut Context<Self>) {
         self.step = step;
         self.error.clear();
+        self.dropdown_open = false;
         self.field = self.default_field();
         self.cursor_start = Instant::now();
+        cx.notify();
+    }
+
+    fn fail(&mut self, error: impl Into<String>, field: Option<Field>, cx: &mut Context<Self>) {
+        self.error = error.into();
+        if let Some(field) = field {
+            self.field = field;
+        }
         cx.notify();
     }
 
@@ -218,26 +366,36 @@ impl OnboardingView {
     fn advance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.step {
             Step::Welcome => self.go(Step::Provider, cx),
-            Step::Provider => match setup::validate_key(self.provider, &self.api_key) {
-                Ok(()) => {
-                    if self.model.trim().is_empty() {
-                        self.model = self.provider.default_model.to_string();
-                    }
-                    self.go(Step::Workspace, cx)
+            Step::Provider => {
+                if let Err((e, field)) = self.check_provider() {
+                    return self.fail(e, field, cx);
                 }
-                Err(e) => {
-                    self.error = e;
-                    self.field = Field::ApiKey;
-                    cx.notify();
+                if self.model.trim().is_empty() {
+                    self.model = self.provider.default_model.to_string();
                 }
-            },
+                self.go(Step::Workspace, cx)
+            }
             Step::Workspace => {
-                if self.workspace.trim().is_empty() {
-                    self.error = "choose a folder for apollo to work in".into();
-                    cx.notify();
-                } else {
-                    self.go(Step::Permissions, cx)
+                if self.name.trim().is_empty() {
+                    return self.fail("give this instance a name", Some(Field::Name), cx);
                 }
+                if !self.everywhere && self.workspace.trim().is_empty() {
+                    return self.fail(
+                        "choose a folder, or let apollo work everywhere",
+                        Some(Field::Workspace),
+                        cx,
+                    );
+                }
+                let dir = self.choices().config_dir();
+                let except = self.editing.clone().unwrap_or_default();
+                if let Some(owner) = self.state.config_dir_owner(&dir, &except) {
+                    let msg = format!(
+                        "instance \"{}\" already lives in that folder — pick another",
+                        owner.name
+                    );
+                    return self.fail(msg, Some(Field::Workspace), cx);
+                }
+                self.go(Step::Permissions, cx)
             }
             Step::Permissions => match setup::write_setup(&self.choices()) {
                 Ok(written) => {
@@ -245,10 +403,7 @@ impl OnboardingView {
                     self.test = TestState::Idle;
                     self.go(Step::Test, cx);
                 }
-                Err(e) => {
-                    self.error = e;
-                    cx.notify();
-                }
+                Err(e) => self.fail(e, None, cx),
             },
             Step::Test => {
                 if matches!(self.test, TestState::Running(_)) {
@@ -260,28 +415,59 @@ impl OnboardingView {
         }
     }
 
+    fn check_provider(&self) -> Result<(), (String, Option<Field>)> {
+        match self.provider.auth {
+            Auth::OAuth(kind) => {
+                if let Support::Unsupported(why) = kind.support() {
+                    return Err((
+                        format!("{} can't be used: {why}", self.provider.label),
+                        None,
+                    ));
+                }
+                if !self.signed_in[kind_index(kind)] {
+                    let msg = if matches!(self.sign_in, SignIn::Waiting(k, _) if k == kind) {
+                        "finish signing in in your browser first".to_string()
+                    } else {
+                        format!("sign in to {} first", self.provider.label)
+                    };
+                    return Err((msg, None));
+                }
+                Ok(())
+            }
+            Auth::Custom => {
+                setup::validate_custom(&self.base_url, &self.model).map_err(|e| {
+                    let field = if e.contains("model") {
+                        Field::Model
+                    } else {
+                        Field::BaseUrl
+                    };
+                    (e, Some(field))
+                })?;
+                setup::validate_key(self.provider, &self.api_key)
+                    .map_err(|e| (e, Some(Field::ApiKey)))
+            }
+            _ => setup::validate_key(self.provider, &self.api_key)
+                .map_err(|e| (e, Some(Field::ApiKey))),
+        }
+    }
+
     fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let choices = self.choices();
-        let workspace = choices
-            .workspace
-            .canonicalize()
-            .unwrap_or(choices.workspace.clone());
-        let state = DesktopState {
-            onboarded: true,
-            workspace: Some(workspace.clone()),
-            provider: Some(self.provider.id.to_string()),
-            model: Some(self.model.trim().to_string()),
-            permission_profile: Some(self.profile.id.to_string()),
+        let Some(written) = self.written.clone() else {
+            return self.fail("nothing was saved yet — go back to permissions", None, cx);
         };
+        let mut state = self.state.clone();
+        state.upsert(Instance::from_setup(&self.choices(), &written));
+        state.onboarded = true;
+        if self.purpose == Purpose::FirstRun {
+            state.mode = self.mode;
+        }
         if let Err(e) = state.save() {
-            self.error = e;
-            cx.notify();
-            return;
+            return self.fail(e, None, cx);
         }
         // The key is on disk now; drop the in-memory copy.
         self.api_key.clear();
         if let Some(on_finish) = self.on_finish.take() {
-            on_finish(workspace, window, cx);
+            on_finish(Some(state), window, cx);
         }
     }
 
@@ -289,14 +475,23 @@ impl OnboardingView {
         self.advance(window, cx);
     }
 
-    fn on_back(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let i = self.step.index();
-        if i > 0 && !matches!(self.test, TestState::Running(_)) {
-            self.go(STEPS[i - 1], cx);
+    fn on_back(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.test, TestState::Running(_)) {
+            return;
+        }
+        let i = self.step_index();
+        if i > 0 {
+            self.go(self.steps()[i - 1], cx);
+        } else if self.purpose == Purpose::NewInstance {
+            self.api_key.clear();
+            if let Some(on_finish) = self.on_finish.take() {
+                on_finish(None, window, cx);
+            }
         }
     }
 
     fn on_browse(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.everywhere = false;
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -332,20 +527,30 @@ impl OnboardingView {
         self.run_test(cx);
     }
 
+    fn has_credential(&self) -> bool {
+        match self.provider.auth {
+            Auth::OAuth(kind) => self.signed_in[kind_index(kind)],
+            Auth::ApiKey(_) => !self.api_key.is_empty(),
+            Auth::Local | Auth::Custom => true,
+        }
+    }
+
     fn run_test(&mut self, cx: &mut Context<Self>) {
         if matches!(self.test, TestState::Running(_)) || self.prompt.trim().is_empty() {
             return;
         }
-        let workspace = setup::expand_path(&self.workspace);
+        let Some(dir) = self.written.as_ref().map(|w| w.config_dir.clone()) else {
+            return;
+        };
         let prompt = self.prompt.trim().to_string();
-        let has_credential = self.provider.env_var.is_none() || !self.api_key.is_empty();
+        let has_credential = self.has_credential();
         self.test = TestState::Running(Instant::now());
         self.field = Field::None;
         cx.notify();
 
         let (tx, rx) = channel::<ProbeResult>();
         std::thread::spawn(move || {
-            let _ = tx.send(probe(&workspace, &prompt, has_credential));
+            let _ = tx.send(probe(&dir, &prompt, has_credential));
         });
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
             match rx.try_recv() {
@@ -374,17 +579,97 @@ impl OnboardingView {
             self.model = provider.default_model.to_string();
         }
         self.provider = provider;
+        self.dropdown_open = false;
         self.error.clear();
-        self.field = if provider.env_var.is_some() {
-            Field::ApiKey
+        self.field = self.default_field();
+        cx.notify();
+    }
+
+    /// Start the browser sign-in for `kind` on a worker thread. The flow
+    /// blocks until the redirect arrives or its own 3-minute timeout; the
+    /// UI only learns the outcome, never a token.
+    fn start_sign_in(&mut self, kind: OAuthKind, cx: &mut Context<Self>) {
+        if matches!(kind.support(), Support::Unsupported(_)) {
+            return;
+        }
+        self.sign_in = SignIn::Waiting(kind, Instant::now());
+        self.error.clear();
+        cx.notify();
+        let (tx, rx) = channel::<Result<(), String>>();
+        if kind.claim() {
+            std::thread::spawn(move || {
+                let _ = tx.send(kind.sign_in());
+            });
         } else {
-            Field::Model
-        };
+            // An earlier attempt is still listening on the callback port;
+            // wait for it rather than starting a second listener.
+            std::thread::spawn(move || {
+                while kind.in_flight() {
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                let _ = tx.send(if kind.signed_in() {
+                    Ok(())
+                } else {
+                    Err("sign-in did not complete".into())
+                });
+            });
+        }
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
+            match rx.try_recv() {
+                Ok(outcome) => {
+                    this.update(cx, |view, cx| view.sign_in_finished(kind, outcome, cx))
+                        .ok();
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    this.update(cx, |view, cx| {
+                        view.sign_in_finished(kind, Err("sign-in stopped".into()), cx)
+                    })
+                    .ok();
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+        })
+        .detach();
+    }
+
+    fn sign_in_finished(
+        &mut self,
+        kind: OAuthKind,
+        outcome: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        let i = kind_index(kind);
+        // Whatever the UI showed, the store is the truth.
+        self.signed_in[i] = kind.signed_in();
+        let watching = matches!(self.sign_in, SignIn::Waiting(k, _) if k == kind);
+        if watching {
+            self.sign_in = match outcome {
+                Ok(()) => SignIn::Idle,
+                Err(e) => SignIn::Failed(kind, e),
+            };
+        }
+        cx.notify();
+    }
+
+    fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        self.sign_in = SignIn::Idle;
         cx.notify();
     }
 
     fn pick_profile(&mut self, profile: &'static ProfileInfo, cx: &mut Context<Self>) {
         self.profile = profile;
+        cx.notify();
+    }
+
+    fn set_everywhere(&mut self, everywhere: bool, cx: &mut Context<Self>) {
+        self.everywhere = everywhere;
+        self.error.clear();
+        self.field = self.default_field();
         cx.notify();
     }
 
@@ -403,6 +688,12 @@ impl OnboardingView {
             return;
         }
 
+        if self.dropdown_open && matches!(key, "enter" | "escape") {
+            self.dropdown_open = false;
+            cx.notify();
+            return;
+        }
+
         match key {
             "enter" => {
                 if self.step == Step::Test && self.field == Field::Prompt {
@@ -412,21 +703,28 @@ impl OnboardingView {
                 }
             }
             "tab" => {
-                self.field = match (self.step, self.field) {
-                    (Step::Provider, Field::ApiKey) => Field::Model,
-                    (Step::Provider, _) if self.provider.env_var.is_some() => Field::ApiKey,
-                    _ => self.field,
-                };
-                cx.notify();
+                let fields = self.fields();
+                if !fields.is_empty() {
+                    let at = fields.iter().position(|f| *f == self.field);
+                    self.field = fields[at.map(|i| (i + 1) % fields.len()).unwrap_or(0)];
+                    self.cursor_start = Instant::now();
+                    cx.notify();
+                }
             }
             "backspace" => {
                 match self.field {
                     Field::ApiKey => self.api_key.pop(),
+                    Field::BaseUrl => {
+                        self.base_url.pop();
+                    }
                     Field::Model => {
                         self.model.pop();
                     }
                     Field::Workspace => {
                         self.workspace.pop();
+                    }
+                    Field::Name => {
+                        self.name.pop();
                     }
                     Field::Prompt => {
                         self.prompt.pop();
@@ -438,8 +736,10 @@ impl OnboardingView {
             "escape" => {
                 match self.field {
                     Field::ApiKey => self.api_key.clear(),
+                    Field::BaseUrl => self.base_url.clear(),
                     Field::Model => self.model.clear(),
                     Field::Workspace => self.workspace.clear(),
+                    Field::Name => self.name.clear(),
                     Field::Prompt => self.prompt.clear(),
                     Field::None => {}
                 }
@@ -458,16 +758,18 @@ impl OnboardingView {
 
     fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
         let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        let compact = || {
+            text.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+        };
         match self.field {
-            // Whitespace never belongs in a key; a paste often carries some.
-            Field::ApiKey => self.api_key.push_str(
-                &text
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect::<String>(),
-            ),
+            // Whitespace never belongs in a key or URL; a paste often carries some.
+            Field::ApiKey => self.api_key.push_str(&compact()),
+            Field::BaseUrl => self.base_url.push_str(&compact()),
             Field::Model => self.model.push_str(text.trim()),
             Field::Workspace => self.workspace.push_str(&text),
+            Field::Name => self.name.push_str(&text),
             Field::Prompt => self.prompt.push_str(&text),
             Field::None => return,
         }
@@ -477,33 +779,15 @@ impl OnboardingView {
 
     // ── Rust-built pieces handed to the templates ─────────────────────────
 
-    fn rail(&self) -> AnyElement {
-        let current = self.step.index();
+    /// A 2px line along the top edge; the only progress indicator.
+    fn progress(&self) -> AnyElement {
+        let frac = (self.step_index() + 1) as f32 / self.steps().len() as f32;
         div()
             .w_full()
-            .flex()
-            .flex_row()
-            .gap_2()
-            .children(STEPS.iter().enumerate().map(|(i, step)| {
-                let (bar, label) = if i < current {
-                    (MUTED, MUTED)
-                } else if i == current {
-                    (ACCENT, ACCENT)
-                } else {
-                    (SURFACE_2, 0x52525b)
-                };
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap_1p5()
-                    .child(div().h(px(3.)).w_full().rounded_sm().bg(rgb(bar)))
-                    .child(div().text_xs().text_color(rgb(label)).child(format!(
-                        "{:02} {}",
-                        i + 1,
-                        step.label()
-                    )))
-            }))
+            .h(px(2.))
+            .flex_shrink_0()
+            .bg(rgb(SURFACE))
+            .child(div().h_full().w(relative(frac)).bg(rgb(MUTED)))
             .into_any_element()
     }
 
@@ -531,96 +815,577 @@ impl OnboardingView {
             .py_2()
             .rounded_md()
             .border_1()
-            .border_color(rgb(if focused { MUTED } else { BORDER }))
+            .border_color(rgb(if focused { MUTED } else { SURFACE_2 }))
             .bg(rgb(if focused { SURFACE } else { BG }))
             .text_sm()
-            .text_color(rgb(if empty && !focused { 0x52525b } else { TEXT }))
+            .text_color(rgb(if empty && !focused { GHOST } else { TEXT }))
             .cursor_text()
             .child(SharedString::from(text))
             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                 view.field = field;
+                view.dropdown_open = false;
                 view.cursor_start = Instant::now();
                 cx.notify();
             }))
             .into_any_element()
     }
 
-    fn provider_grid(&self, cx: &mut Context<Self>) -> AnyElement {
-        let rows: Vec<AnyElement> = PROVIDERS
-            .chunks(4)
-            .enumerate()
-            .map(|(r, chunk)| {
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .children(chunk.iter().enumerate().map(|(c, p)| {
-                        let selected = p.id == self.provider.id;
-                        div()
-                            .id(("provider", r * 4 + c))
-                            .flex_1()
-                            // Without this a card's min width is its content,
-                            // and the row stops being four equal columns.
-                            .min_w(px(0.))
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .p_3()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(if selected { ACCENT } else { BORDER }))
-                            .bg(rgb(if selected { SURFACE_2 } else { SURFACE }))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(SURFACE_2)))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(rgb(if selected { ACCENT } else { TEXT }))
-                                            .child(p.label),
-                                    )
-                                    .child(div().flex_1())
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(SUCCESS))
-                                            .child(if selected { "●" } else { "" }),
-                                    ),
-                            )
-                            .child(div().text_xs().text_color(rgb(MUTED)).child(p.blurb))
-                            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                                view.pick_provider(p, cx)
-                            }))
-                            .into_any_element()
-                    }))
-                    // Keep the last row's cards the same width as the others.
-                    // Same padding and border as a card: with a zero flex basis
-                    // those still count, so a bare spacer would come out narrower.
-                    .children((chunk.len()..4).map(|_| {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .p_3()
-                            .border_1()
-                            .border_color(gpui::transparent_black())
-                            .into_any_element()
-                    }))
-                    .into_any_element()
-            })
-            .collect();
+    fn labelled(
+        label: impl Into<SharedString>,
+        field: AnyElement,
+        note: Option<String>,
+    ) -> AnyElement {
         div()
             .w_full()
             .flex()
             .flex_col()
-            .gap_2()
-            .children(rows)
+            .gap_1p5()
+            .child(div().text_xs().text_color(rgb(MUTED)).child(label.into()))
+            .child(field)
+            .children(note.map(|n| {
+                div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child(SharedString::from(n))
+            }))
             .into_any_element()
+    }
+
+    /// Status line under a pinned sign-in card.
+    fn oauth_status(&self, kind: OAuthKind) -> (String, u32) {
+        let i = kind_index(kind);
+        if let SignIn::Waiting(k, _) = self.sign_in {
+            if k == kind {
+                return ("waiting for browser…".into(), WARN);
+            }
+        }
+        match kind.support() {
+            Support::Unsupported(_) => ("not supported by apollo".into(), GHOST),
+            Support::NeedsFeature(_) if self.signed_in[i] => {
+                ("✓ signed in · needs build flag".into(), WARN)
+            }
+            Support::NeedsFeature(_) => ("needs build flag".into(), WARN),
+            Support::Live if self.signed_in[i] => ("✓ signed in".into(), SUCCESS),
+            Support::Live => ("browser sign-in".into(), MUTED),
+        }
+    }
+
+    fn pinned(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .children(OAUTH_PROVIDERS.iter().enumerate().map(|(i, p)| {
+                let selected = p.id == self.provider.id;
+                let Auth::OAuth(kind) = p.auth else {
+                    unreachable!("pinned providers are oauth")
+                };
+                let unsupported = matches!(kind.support(), Support::Unsupported(_));
+                let (status, color) = self.oauth_status(kind);
+                div()
+                    .id(("oauth", i))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(if selected { MUTED } else { SURFACE_2 }))
+                    .bg(rgb(if selected { SURFACE } else { BG }))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(SURFACE)))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(if unsupported {
+                                MUTED
+                            } else if selected {
+                                ACCENT
+                            } else {
+                                TEXT
+                            }))
+                            .child(p.label),
+                    )
+                    .child(div().text_xs().text_color(rgb(GHOST)).child(p.blurb))
+                    .child(
+                        div()
+                            .pt_1()
+                            .text_xs()
+                            .text_color(rgb(color))
+                            .child(SharedString::from(status)),
+                    )
+                    .on_click(
+                        cx.listener(move |view, _: &ClickEvent, _, cx| view.pick_provider(p, cx)),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+
+    fn separator(text: &'static str) -> AnyElement {
+        let line = || div().flex_1().h(px(1.)).bg(rgb(SURFACE_2));
+        div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .child(line())
+            .child(div().text_xs().text_color(rgb(GHOST)).child(text))
+            .child(line())
+            .into_any_element()
+    }
+
+    fn dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let chosen = PROVIDERS.iter().find(|p| p.id == self.provider.id);
+        let trigger_label = match chosen {
+            Some(p) => format!("{} · {}", p.label, p.blurb),
+            None => "api key, local model or custom endpoint".to_string(),
+        };
+        let trigger = div()
+            .id("provider-dropdown")
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(if chosen.is_some() || self.dropdown_open {
+                MUTED
+            } else {
+                SURFACE_2
+            }))
+            .bg(rgb(if chosen.is_some() { SURFACE } else { BG }))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(SURFACE)))
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .text_color(rgb(if chosen.is_some() { ACCENT } else { SOFT }))
+                    .child(SharedString::from(trigger_label)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(if self.dropdown_open { "▴" } else { "▾" }),
+            )
+            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                view.dropdown_open = !view.dropdown_open;
+                cx.notify();
+            }));
+
+        let list =
+            self.dropdown_open.then(|| {
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(SURFACE_2))
+                    .bg(rgb(SURFACE))
+                    .children(PROVIDERS.iter().enumerate().map(|(i, p)| {
+                        let selected = p.id == self.provider.id;
+                        let right = match p.auth {
+                            Auth::ApiKey(var) => var.to_string(),
+                            Auth::Local => "no key".into(),
+                            Auth::Custom => "base url + key".into(),
+                            Auth::OAuth(_) => String::new(),
+                        };
+                        div()
+                            .id(("provider-option", i))
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .px_3()
+                            .py(px(7.))
+                            .cursor_pointer()
+                            .bg(rgb(if selected { SURFACE_2 } else { SURFACE }))
+                            .hover(|s| s.bg(rgb(SURFACE_2)))
+                            .child(
+                                div()
+                                    .w(px(150.))
+                                    .text_sm()
+                                    .text_color(rgb(if selected { ACCENT } else { TEXT }))
+                                    .child(p.label),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child(p.blurb),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(GHOST))
+                                    .child(SharedString::from(right)),
+                            )
+                            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                                view.pick_provider(p, cx)
+                            }))
+                    }))
+            });
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(trigger)
+            .children(list)
+            .into_any_element()
+    }
+
+    fn model_field(&self, cx: &mut Context<Self>) -> AnyElement {
+        let placeholder = if self.provider.default_model.is_empty() {
+            "model name, e.g. llama-3.3-70b".to_string()
+        } else {
+            self.provider.default_model.to_string()
+        };
+        let field = self.text_field("model", Field::Model, self.model.clone(), &placeholder, cx);
+        Self::labelled("model", field, None)
+    }
+
+    fn key_field(&self, cx: &mut Context<Self>) -> AnyElement {
+        let var = self.provider.env_var().unwrap_or_default();
+        let optional = self.provider.is_custom();
+        let field = self.text_field(
+            "api-key",
+            Field::ApiKey,
+            self.api_key.masked(),
+            if optional {
+                "leave empty if the endpoint needs none"
+            } else {
+                "paste with ctrl+v"
+            },
+            cx,
+        );
+        let label = if optional {
+            format!("api key · optional · {var}")
+        } else {
+            format!("api key · {var}")
+        };
+        Self::labelled(
+            label,
+            field,
+            Some("saved to the instance's .env, owner-only — never apollo.json".into()),
+        )
+    }
+
+    fn button(
+        id: &'static str,
+        label: &'static str,
+        primary: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .px_4()
+            .py_2()
+            .rounded_md()
+            .text_sm()
+            .cursor_pointer()
+            .when(primary, |d| {
+                d.bg(rgb(ACCENT))
+                    .text_color(rgb(BG))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .hover(|s| s.bg(rgb(TEXT)))
+            })
+            .when(!primary, |d| {
+                d.border_1()
+                    .border_color(rgb(SURFACE_2))
+                    .text_color(rgb(TEXT))
+                    .hover(|s| s.bg(rgb(SURFACE)))
+            })
+            .child(label)
+            .on_click(on_click)
+            .into_any_element()
+    }
+
+    /// Below the chooser: whatever the selected provider needs.
+    fn provider_details(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.dropdown_open {
+            return div().into_any_element();
+        }
+        let col = || div().w_full().flex().flex_col().gap_3();
+        match self.provider.auth {
+            Auth::OAuth(kind) => {
+                let i = kind_index(kind);
+                let port = kind.callback_port();
+                let (line, color) = match (&self.sign_in, kind.support()) {
+                    (_, Support::Unsupported(why)) => (why.to_string(), MUTED),
+                    (SignIn::Waiting(k, since), _) if *k == kind => (
+                        format!(
+                            "waiting for the browser · localhost:{port} · {}s / 180s",
+                            since.elapsed().as_secs()
+                        ),
+                        WARN,
+                    ),
+                    (SignIn::Failed(k, e), _) if *k == kind => (e.clone(), DANGER),
+                    (_, Support::NeedsFeature(feature)) if self.signed_in[i] => (
+                        format!(
+                            "signed in. this apollo build can't run it yet — rebuild with \
+                             `--features {feature}`"
+                        ),
+                        WARN,
+                    ),
+                    (_, Support::NeedsFeature(feature)) => (
+                        format!(
+                            "sign-in works and is saved, but apollo needs `--features {feature}` \
+                             to use it"
+                        ),
+                        WARN,
+                    ),
+                    (_, Support::Live) if self.signed_in[i] => (
+                        "signed in — apollo uses this login directly, no key needed".into(),
+                        SUCCESS,
+                    ),
+                    (_, Support::Live) => (
+                        format!("opens your browser; the login returns to localhost:{port}"),
+                        SOFT,
+                    ),
+                };
+                let waiting = matches!(self.sign_in, SignIn::Waiting(k, _) if k == kind);
+                let actions = match kind.support() {
+                    Support::Unsupported(_) => None,
+                    _ if waiting => Some(Self::button(
+                        "oauth-cancel",
+                        "cancel",
+                        false,
+                        cx.listener(|view, _: &ClickEvent, _, cx| view.cancel_sign_in(cx)),
+                    )),
+                    _ => Some(Self::button(
+                        "oauth-sign-in",
+                        if self.signed_in[i] {
+                            "sign in again"
+                        } else {
+                            "sign in with browser"
+                        },
+                        !self.signed_in[i],
+                        cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            view.start_sign_in(kind, cx)
+                        }),
+                    )),
+                };
+                let panel = div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_4()
+                    .p_4()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(SURFACE_2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(GHOST))
+                                    .child("~/.config/rs_ai/credentials · shared with apollo"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(color))
+                                    .child(SharedString::from(line)),
+                            ),
+                    )
+                    .children(actions);
+                let unsupported = matches!(kind.support(), Support::Unsupported(_));
+                col()
+                    .child(panel)
+                    .when(!unsupported, |d| d.child(self.model_field(cx)))
+                    .into_any_element()
+            }
+            Auth::ApiKey(_) => col()
+                .child(self.key_field(cx))
+                .child(self.model_field(cx))
+                .into_any_element(),
+            Auth::Local => col()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(SOFT))
+                        .child("no key — apollo talks to ollama at http://localhost:11434"),
+                )
+                .child(self.model_field(cx))
+                .into_any_element(),
+            Auth::Custom => {
+                let url = self.text_field(
+                    "base-url",
+                    Field::BaseUrl,
+                    self.base_url.clone(),
+                    "https://api.example.com/v1",
+                    cx,
+                );
+                col()
+                    .child(Self::labelled(
+                        "base url · openai-compatible (/chat/completions)",
+                        url,
+                        None,
+                    ))
+                    .child(self.key_field(cx))
+                    .child(self.model_field(cx))
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn option_card(
+        id: &'static str,
+        selected: bool,
+        title: &'static str,
+        detail: String,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_4()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(if selected { MUTED } else { SURFACE_2 }))
+            .bg(rgb(if selected { SURFACE } else { BG }))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(SURFACE)))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(if selected { ACCENT } else { GHOST }))
+                            .child(if selected { "●" } else { "○" }),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(if selected { ACCENT } else { TEXT }))
+                            .child(title),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(SharedString::from(detail)),
+            )
+            .on_click(on_click)
+            .into_any_element()
+    }
+
+    fn scope_cards(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(Self::option_card(
+                "scope-folder",
+                !self.everywhere,
+                "one folder",
+                "a project folder. apollo.json and .env live in it, like `apollo init`.".into(),
+                cx.listener(|view, _: &ClickEvent, _, cx| view.set_everywhere(false, cx)),
+            ))
+            .child(Self::option_card(
+                "scope-everywhere",
+                self.everywhere,
+                "works everywhere",
+                "no single folder. works from your home directory; config is kept in \
+                 ~/.apollo/instances/."
+                    .into(),
+                cx.listener(|view, _: &ClickEvent, _, cx| view.set_everywhere(true, cx)),
+            ))
+            .into_any_element()
+    }
+
+    fn scope_details(&self) -> Vec<AnyElement> {
+        let dir = self.choices().config_dir();
+        let shown = setup::display_path(&dir);
+        let row = |path: String, what: String| {
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .gap_4()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(SharedString::from(path)),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(SharedString::from(what)),
+                )
+                .into_any_element()
+        };
+        let mut rows = vec![div()
+            .pb_1()
+            .text_xs()
+            .text_color(rgb(GHOST))
+            .child("apollo will write")
+            .into_any_element()];
+        rows.push(row(
+            format!("{shown}/apollo.json"),
+            "provider, model, policy".into(),
+        ));
+        rows.push(match self.provider.auth {
+            Auth::OAuth(_) => row(
+                "~/.config/rs_ai/credentials".into(),
+                "the sign-in (already saved)".into(),
+            ),
+            Auth::Local => row(format!("{shown}/.env"), "nothing secret".into()),
+            _ => row(
+                format!("{shown}/.env"),
+                format!("{} · 0600", self.provider.env_var().unwrap_or_default()),
+            ),
+        });
+        if self.everywhere {
+            rows.push(row(
+                format!(
+                    "{}  (workspace)",
+                    setup::display_path(&self.choices().workspace())
+                ),
+                "reads + writes anywhere under it".into(),
+            ));
+        } else {
+            rows.push(row(format!("{shown}/.apollo/"), "memory + sessions".into()));
+        }
+        rows
     }
 
     fn profile_list(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -642,15 +1407,15 @@ impl OnboardingView {
                     .py_3()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(if selected { ACCENT } else { BORDER }))
-                    .bg(rgb(if selected { SURFACE_2 } else { SURFACE }))
+                    .border_color(rgb(if selected { MUTED } else { SURFACE_2 }))
+                    .bg(rgb(if selected { SURFACE } else { BG }))
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(SURFACE_2)))
+                    .hover(|s| s.bg(rgb(SURFACE)))
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(if selected { ACCENT } else { MUTED }))
-                            .child(if selected { "(•)" } else { "( )" }),
+                            .text_color(rgb(if selected { ACCENT } else { GHOST }))
+                            .child(if selected { "●" } else { "○" }),
                     )
                     .child(
                         div()
@@ -681,7 +1446,7 @@ impl OnboardingView {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(div().text_xs().text_color(rgb(0x52525b)).child(who))
+                .child(div().text_xs().text_color(rgb(GHOST)).child(who))
                 .child(
                     div()
                         .text_sm()
@@ -692,7 +1457,7 @@ impl OnboardingView {
         match &self.test {
             TestState::Idle => div()
                 .text_sm()
-                .text_color(rgb(0x52525b))
+                .text_color(rgb(GHOST))
                 .child("press run (or enter) to send the prompt")
                 .into_any_element(),
             TestState::Running(start) => {
@@ -729,40 +1494,53 @@ impl OnboardingView {
                 .flex()
                 .flex_row()
                 .gap_3()
-                .child(div().w(px(120.)).text_xs().text_color(rgb(MUTED)).child(k))
+                .child(div().w(px(110.)).text_xs().text_color(rgb(MUTED)).child(k))
                 .child(
                     div()
                         .flex_1()
-                        .text_sm()
+                        .text_xs()
                         .text_color(rgb(TEXT))
                         .child(SharedString::from(v)),
                 )
         };
-        let ws = setup::expand_path(&self.workspace);
-        let key = match (self.provider.env_var, &self.written) {
-            (None, _) => "not needed".to_string(),
-            (Some(var), Some(w)) => format!(
-                "{var} in {} (0600, never shown)",
-                w.env_path
-                    .as_deref()
-                    .map(setup::display_path)
-                    .unwrap_or_default()
-            ),
-            (Some(var), None) => format!("{var} — not written yet"),
+        let auth = match (self.provider.auth, &self.written) {
+            (Auth::OAuth(_), _) => "browser sign-in (shared rs_ai store)".to_string(),
+            (Auth::Local, _) => "not needed".to_string(),
+            (_, Some(w)) => match (&w.env_path, self.api_key.is_empty()) {
+                (Some(p), false) => format!(
+                    "{} in {} (0600)",
+                    self.provider.env_var().unwrap_or_default(),
+                    setup::display_path(p)
+                ),
+                _ => "none".to_string(),
+            },
+            (_, None) => "not written yet".to_string(),
         };
         let test = match &self.test {
             TestState::Finished(r) if r.ok => format!("passed · {}", r.route.label()),
             TestState::Finished(r) => format!("failed · {}", r.route.label()),
             _ => "skipped".to_string(),
         };
+        let provider = if self.provider.is_custom() {
+            format!("custom · {}", self.base_url.trim())
+        } else {
+            self.provider.label.to_string()
+        };
+        let scope = if self.everywhere {
+            "everywhere (~)".to_string()
+        } else {
+            setup::display_path(&setup::expand_path(&self.workspace))
+        };
         div()
+            .w_full()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(row("provider", self.provider.label.to_string()))
-            .child(row("model", self.model.trim().to_string()))
-            .child(row("api key", key))
-            .child(row("workspace", setup::display_path(&ws)))
+            .gap_1p5()
+            .child(row("instance", self.name.trim().to_string()))
+            .child(row("provider", provider))
+            .child(row("model", self.choices().resolved_model()))
+            .child(row("credential", auth))
+            .child(row("works in", scope))
             .child(row(
                 "config",
                 self.written
@@ -774,66 +1552,109 @@ impl OnboardingView {
             .child(row("test prompt", test))
             .into_any_element()
     }
+
+    fn mode_cards(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.purpose != Purpose::FirstRun {
+            return div().into_any_element();
+        }
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child("how much app do you want?"),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(Self::option_card(
+                        "mode-simple",
+                        self.mode == Mode::Simple,
+                        "simple",
+                        "just the chat and an instance switcher.".into(),
+                        cx.listener(|view, _: &ClickEvent, _, cx| {
+                            view.mode = Mode::Simple;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(Self::option_card(
+                        "mode-advanced",
+                        self.mode == Mode::Advanced,
+                        "advanced",
+                        "instance roster, tools + permissions, model params and logs.".into(),
+                        cx.listener(|view, _: &ClickEvent, _, cx| {
+                            view.mode = Mode::Advanced;
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child("switch any time in settings"),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for OnboardingView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let step = self.step;
-        let step_counter = format!("step {} of {}", step.index() + 1, STEPS.len());
-        let rail = self.rail();
-        let can_back = step.index() > 0 && step != Step::Done;
+        let first = self.step_index() == 0;
+        let counter = format!("{} / {}", self.step_index() + 1, self.steps().len());
+        let progress = self.progress();
+        let can_back = step != Step::Done && (!first || self.purpose == Purpose::NewInstance);
+        let back_label = if first { "cancel" } else { "back" };
         let error = self.error.clone();
         let running = matches!(self.test, TestState::Running(_));
+        let new_instance = self.purpose == Purpose::NewInstance;
 
-        let (eyebrow, title, lede, hint, next_label): (&str, &str, String, &str, &str) = match step
-        {
+        let (title, lede, hint, next_label): (&str, String, &str, &str) = match step {
             Step::Welcome => (
-                "welcome",
                 "meet apollo",
-                "a local-first agent host on the rotary (rx4) harness engine. \
-                 a few screens and it is ready to work in a folder of your choosing."
+                "a local-first agent on the rotary (rx4) engine. a few screens and it is ready."
                     .into(),
                 "enter to continue",
                 "get started",
             ),
             Step::Provider => (
-                "model provider",
-                "pick a provider and paste its key",
-                "the key is written to your workspace .env, owner-only. \
-                 apollo.json never holds it, and it is never logged."
-                    .into(),
-                "ctrl+v pastes · tab switches field",
+                if new_instance {
+                    "new instance · model"
+                } else {
+                    "connect a model"
+                },
+                "sign in with an account, or pick a key-based provider below.".into(),
+                "tab · ctrl+v",
                 "continue",
             ),
             Step::Workspace => (
-                "workspace",
-                "where should apollo work?",
-                "apollo reads and writes files, keeps memory and runs tools inside this folder. \
-                 it is created if missing."
+                "where should it work?",
+                "one folder keeps apollo's files, memory and tools inside it. \
+                 everywhere lets it work across your home directory."
                     .into(),
                 "",
                 "continue",
             ),
             Step::Permissions => (
-                "permissions",
-                "choose policy defaults",
-                "how much apollo may do on its own. \
-                 continuing writes apollo.json and .env into the workspace."
-                    .into(),
+                "what may it do on its own?",
+                "continuing writes the config. change it later in settings.".into(),
                 "",
                 "save and continue",
             ),
             Step::Test => (
-                "test",
-                "check that the agent answers",
-                "one prompt through apollo using the config just written. \
-                 with no apollo binary or key it falls back to a clearly marked offline mock."
+                "say hello",
+                "one prompt through apollo with the config just written. \
+                 without a binary or credential it falls back to a marked offline mock."
                     .into(),
-                if running {
-                    "waiting for the agent…"
-                } else {
-                    ""
-                },
+                if running { "waiting…" } else { "" },
                 match &self.test {
                     TestState::Running(_) => "…",
                     TestState::Finished(r) if r.ok => "continue",
@@ -842,11 +1663,18 @@ impl Render for OnboardingView {
                 },
             ),
             Step::Done => (
-                "done",
-                "apollo is set up",
-                "everything below is on disk. the main window opens next.".into(),
+                if new_instance {
+                    "instance ready"
+                } else {
+                    "ready"
+                },
+                "everything below is on disk.".into(),
                 "",
-                "open apollo",
+                if new_instance {
+                    "open it"
+                } else {
+                    "open apollo"
+                },
             ),
         };
 
@@ -859,72 +1687,71 @@ impl Render for OnboardingView {
                 view_file!("views/welcome.crepus").into_any_element()
             }
             Step::Provider => {
-                let provider_grid = self.provider_grid(cx);
-                let key_label = match self.provider.env_var {
-                    Some(var) => format!("api key · {var}"),
-                    None => "api key · not needed for ollama".into(),
-                };
-                let key_field = if self.provider.env_var.is_some() {
-                    self.text_field(
-                        "api-key",
-                        Field::ApiKey,
-                        self.api_key.masked(),
-                        "paste your key",
-                        cx,
-                    )
-                } else {
-                    div()
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(BORDER))
-                        .text_sm()
-                        .text_color(rgb(0x52525b))
-                        .child("ollama runs locally at http://localhost:11434")
-                        .into_any_element()
-                };
-                // Not even the length is shown back.
-                let key_note = if self.api_key.is_empty() {
-                    "masked while you type · stored locally only"
-                } else {
-                    "key captured · masked · stored locally only"
-                };
-                let model_field = self.text_field(
-                    "model",
-                    Field::Model,
-                    self.model.clone(),
-                    self.provider.default_model,
-                    cx,
-                );
+                let pinned = self.pinned(cx);
+                let separator = Self::separator("or");
+                let dropdown = self.dropdown(cx);
+                let details = self.provider_details(cx);
                 view_file!("views/provider.crepus").into_any_element()
             }
             Step::Workspace => {
-                let workspace_field = self.text_field(
-                    "workspace",
-                    Field::Workspace,
-                    self.workspace.clone(),
-                    "~/apollo",
-                    cx,
+                let scope_cards = self.scope_cards(cx);
+                let folder = (!self.everywhere).then(|| {
+                    let ws = setup::expand_path(&self.workspace);
+                    let note = if ws.join("apollo.json").is_file() {
+                        "has an apollo.json — it will be updated, not replaced"
+                    } else if ws.is_dir() {
+                        "existing folder"
+                    } else {
+                        "new folder — created on save"
+                    };
+                    let field = self.text_field(
+                        "workspace",
+                        Field::Workspace,
+                        self.workspace.clone(),
+                        "~/apollo",
+                        cx,
+                    );
+                    let row = div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(div().flex_1().child(field))
+                        .child(Self::button(
+                            "browse",
+                            "browse…",
+                            false,
+                            cx.listener(Self::on_browse),
+                        ))
+                        .into_any_element();
+                    Self::labelled("folder", row, Some(note.into()))
+                });
+                let name_field = Self::labelled(
+                    "instance name",
+                    self.text_field("name", Field::Name, self.name.clone(), "apollo", cx),
+                    Some(format!("id: {}", self.instance_id())),
                 );
-                let ws = setup::expand_path(&self.workspace);
-                let workspace_note = if ws.join("apollo.json").is_file() {
-                    "this folder already has an apollo.json — it will be updated, not replaced"
-                        .to_string()
-                } else if ws.is_dir() {
-                    "existing folder".to_string()
-                } else {
-                    "new folder — created on save".to_string()
-                };
-                let shown = setup::display_path(&ws);
-                let config_preview = format!("{shown}/apollo.json   provider, model, policy");
-                let env_preview = match self.provider.env_var {
-                    Some(var) => format!("{shown}/.env          {var} (0600)"),
-                    None => format!("{shown}/.env          OLLAMA_BASE_URL"),
-                };
-                let memory_preview = format!("{shown}/.apollo/      memory + sessions");
-                view_file!("views/workspace.crepus").into_any_element()
+                let preview = div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_4()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(SURFACE_2))
+                    .children(self.scope_details())
+                    .into_any_element();
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(scope_cards)
+                    .children(folder)
+                    .child(name_field)
+                    .child(preview)
+                    .into_any_element()
             }
             Step::Permissions => {
                 let profile_list = self.profile_list(cx);
@@ -952,6 +1779,7 @@ impl Render for OnboardingView {
             }
             Step::Done => {
                 let summary = self.summary();
+                let mode_cards = self.mode_cards(cx);
                 view_file!("views/done.crepus").into_any_element()
             }
         };
@@ -1101,12 +1929,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn steps_are_ordered_and_labelled() {
-        assert_eq!(Step::Welcome.index(), 0);
-        assert_eq!(Step::Done.index(), STEPS.len() - 1);
-        for s in STEPS {
-            assert!(!s.label().is_empty());
-        }
+    fn step_lists_match_purpose() {
+        assert_eq!(FIRST_RUN_STEPS[0], Step::Welcome);
+        assert_eq!(NEW_INSTANCE_STEPS[0], Step::Provider);
+        assert_eq!(*FIRST_RUN_STEPS.last().unwrap(), Step::Done);
+        assert_eq!(*NEW_INSTANCE_STEPS.last().unwrap(), Step::Done);
     }
 
     #[test]

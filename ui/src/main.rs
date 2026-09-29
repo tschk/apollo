@@ -1,18 +1,24 @@
 //! apollo desktop app — Crepuscularity + GPUI.
 //!
 //! First launch runs the onboarding (`onboarding.rs`, `views/*.crepus`):
-//! provider + key, workspace, permissions and a test prompt, written where
-//! the `apollo` CLI reads them. Later launches open the chat window directly
-//! in the onboarded workspace; `--onboarding` runs the setup again.
+//! sign-in or provider, a folder or "everywhere", permissions, a test prompt
+//! and simple-vs-advanced, written where the `apollo` CLI reads them. Later
+//! launches open the main window on the active instance; `--onboarding`
+//! runs the setup again.
+//!
+//! The app manages several apollo *instances* (each its own config dir,
+//! provider, model and permissions). Simple mode is the chat plus an
+//! instance pill; advanced mode adds a roster sidebar, tools/permissions,
+//! model parameters and a session log (`shell.rs`).
 //!
 //! Palette and type follow the Telekinesis portal tokens (`theme.rs`):
-//! zinc-950 surfaces, Chivo Mono. Tool calls render as `| tool` with
-//! indented detail, a blinking input cursor, a braille spinner while busy,
-//! and a status bar carrying model, engine and connection state.
+//! zinc-950 surfaces, Chivo Mono.
 
 mod agent;
+mod oauth;
 mod onboarding;
 mod setup;
+mod shell;
 mod theme;
 
 use std::sync::mpsc::{channel, Receiver};
@@ -185,10 +191,20 @@ struct ApolloView {
     spinner_start: Instant,
     cursor_start: Instant,
     turns: usize,
+    /// Everything the app knows: instances, active one, mode.
+    state: setup::DesktopState,
+    /// The instance this window is chatting with.
+    instance: setup::Instance,
+    panel: shell::Panel,
+    switcher_open: bool,
+    /// Session log for the advanced logs panel.
+    logs: Vec<shell::LogLine>,
+    /// Last settings write, shown under the settings controls.
+    notice: String,
 }
 
 impl ApolloView {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(state: setup::DesktopState, instance: setup::Instance, cx: &mut Context<Self>) -> Self {
         let (model, engine) = agent::config_summary();
         let online = agent::agent_online();
 
@@ -228,6 +244,24 @@ impl ApolloView {
             spinner_start: Instant::now(),
             cursor_start: Instant::now(),
             turns: 0,
+            logs: vec![shell::LogLine::new(
+                shell::LogKind::Info,
+                format!(
+                    "opened {} · {} · {}",
+                    instance.name,
+                    instance.provider,
+                    if online {
+                        "agent server online"
+                    } else {
+                        "no agent server, using apollo ask"
+                    }
+                ),
+            )],
+            state,
+            instance,
+            panel: shell::Panel::Chat,
+            switcher_open: false,
+            notice: String::new(),
         }
     }
 
@@ -356,6 +390,14 @@ impl ApolloView {
         self.turns += 1;
         self.spinner_start = Instant::now();
         self.status = "thinking…".into();
+        self.log(
+            shell::LogKind::Info,
+            format!(
+                "turn {} sent ({} chars)",
+                self.turns,
+                prompt.chars().count()
+            ),
+        );
         cx.notify();
 
         // The transport is blocking, so it runs on its own thread and reports
@@ -423,6 +465,7 @@ impl ApolloView {
 
     /// Fold one event into the transcript. Returns true when the turn is over.
     fn apply(&mut self, event: AgentEvent) -> bool {
+        self.log_event(&event);
         match event {
             AgentEvent::Status(message) => {
                 self.status = message.into();
@@ -504,149 +547,64 @@ impl ApolloView {
     }
 }
 
-// ── Rendering ───────────────────────────────────────────────────────────────
-
-impl ApolloView {
-    fn transcript(&self) -> impl IntoElement {
-        let cursor = blink_cursor(self.cursor_start);
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .children(self.entries.iter().map(|entry| entry.view(cursor)))
-    }
-}
-
-impl Render for ApolloView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let busy = self.busy;
-        let spinner = SharedString::from(if busy {
-            spinner_frame(self.spinner_start).to_string()
-        } else {
-            String::new()
-        });
-        let cursor = blink_cursor(self.cursor_start);
-        let draft_empty = self.draft.is_empty();
-        let draft_display = SharedString::from(if draft_empty {
-            format!("type a message…{cursor}")
-        } else {
-            format!("{}{cursor}", self.draft)
-        });
-
-        let status = self.status.clone();
-        let model = SharedString::from(self.model.clone());
-        let engine = SharedString::from(format!("engine: {}", self.engine));
-        let turns = SharedString::from(format!("{} turns", self.turns));
-        let online = self.online;
-        let link = SharedString::from(if online {
-            format!("● :{}", agent::http_port())
-        } else {
-            "○ offline".to_string()
-        });
-        let transcript = self.transcript();
-        let workspace = SharedString::from(
-            std::env::current_dir()
-                .map(|d| setup::display_path(&d))
-                .unwrap_or_default(),
-        );
-
-        view! {r#"
-            div w-full h-full bg-[#09090b] text-[#d4d4d8] font-[Chivo_Mono] flex flex-col @keydown=on_key_down
-
-                div h-11 w-full flex flex-row items-center px-4 gap-3 border-b border-[#3f3f46] bg-[#18181b]
-                    div w-6 h-6 flex items-center justify-center rounded-md border border-[#3f3f46] bg-[#27272a] text-[#fafafa] text-xs font-bold
-                        "a"
-                    span text-sm font-semibold text-[#d4d4d8]
-                        "apollo"
-                    span text-xs text-[#71717a]
-                        "{workspace}"
-                    if {busy}
-                        span text-xs text-[#fbbf24]
-                            "{spinner}"
-                    span flex-1
-                    span text-xs text-[#71717a]
-                        "{model}"
-                    span text-xs text-[#52525b]
-                        "{engine}"
-                    if {online}
-                        span text-xs text-[#34d399]
-                            "{link}"
-                    else
-                        span text-xs text-[#52525b]
-                            "{link}"
-
-                div flex-1 w-full px-5 py-4 overflow-hidden
-                    {transcript}
-
-                div w-full px-5 py-2 flex flex-row gap-2 border-t border-[#3f3f46]
-                    button bg-[#18181b] border border-[#3f3f46] text-[#a1a1aa] text-xs px-3 py-1 rounded-md hover:bg-[#27272a] @click=prompt_doctor
-                        "doctor"
-                    button bg-[#18181b] border border-[#3f3f46] text-[#a1a1aa] text-xs px-3 py-1 rounded-md hover:bg-[#27272a] @click=prompt_tools
-                        "tools"
-                    button bg-[#18181b] border border-[#3f3f46] text-[#a1a1aa] text-xs px-3 py-1 rounded-md hover:bg-[#27272a] @click=clear_chat
-                        "clear"
-
-                div w-full flex flex-row items-center px-5 py-3 gap-3 border-t border-[#3f3f46]
-                    span text-sm text-[#fafafa]
-                        "›"
-                    if {draft_empty}
-                        span flex-1 text-sm text-[#52525b]
-                            "{draft_display}"
-                    else
-                        span flex-1 text-sm text-[#d4d4d8]
-                            "{draft_display}"
-                    button bg-[#fafafa] text-[#09090b] text-xs font-semibold px-4 py-2 rounded-md disabled={busy} @click=submit
-                        if {busy}
-                            "…"
-                        else
-                            "send"
-
-                div h-7 w-full flex flex-row items-center px-5 gap-3 border-t border-[#3f3f46] bg-[#18181b]
-                    span text-xs text-[#71717a]
-                        "{status}"
-                    span flex-1
-                    span text-xs text-[#52525b]
-                        "{turns}"
-                    span text-xs text-[#52525b]
-                        "↑↓ history · esc clear · enter send"
-        "#}
-        .track_focus(&self.focus)
-        .key_context(CHAT_CONTEXT)
-        .on_action(cx.listener(Self::submit_action))
-        .on_action(cx.listener(Self::clear_action))
-    }
-}
-
 /// Key context of the chat view, so its enter/escape bindings do not fire
 /// while the onboarding has focus.
 const CHAT_CONTEXT: &str = "ApolloChat";
 
-fn open_chat(workspace: &std::path::Path, window: &mut Window, cx: &mut App) {
-    // The chat view, `apollo ask` fallback and status bar all resolve
-    // `apollo.json` relative to the working directory.
-    if let Err(e) = std::env::set_current_dir(workspace) {
-        eprintln!("apollo-ui: cannot enter {}: {e}", workspace.display());
+/// Show the main window for the state's active instance. The chat view,
+/// `apollo ask` fallback and status bar all resolve `apollo.json` relative
+/// to the working directory, so that becomes the instance's config dir.
+pub(crate) fn open_chat(state: setup::DesktopState, window: &mut Window, cx: &mut App) {
+    let Some(instance) = state.ready().cloned() else {
+        return open_onboarding(onboarding::Purpose::FirstRun, window, cx);
+    };
+    if let Err(e) = std::env::set_current_dir(&instance.config_dir) {
+        eprintln!(
+            "apollo-ui: cannot enter {}: {e}",
+            instance.config_dir.display()
+        );
     }
-    let view = window.replace_root(cx, |_, cx| ApolloView::new(cx));
+    let view = window.replace_root(cx, |_, cx| ApolloView::new(state, instance, cx));
+    window.focus(&view.read(cx).focus);
+}
+
+/// Swap the window to the onboarding. A cancelled new-instance flow goes
+/// back to the main window unchanged.
+pub(crate) fn open_onboarding(purpose: onboarding::Purpose, window: &mut Window, cx: &mut App) {
+    let view = window.replace_root(cx, move |_, cx| {
+        onboarding::OnboardingView::new(purpose, cx, |state, window, cx| {
+            let state = state.or_else(setup::DesktopState::load).unwrap_or_default();
+            open_chat(state, window, cx)
+        })
+    });
     window.focus(&view.read(cx).focus);
 }
 
 fn main() {
     let force_onboarding = std::env::args().skip(1).any(|a| a == "--onboarding");
+    let simple = std::env::args().skip(1).any(|a| a == "--simple");
+    let advanced = std::env::args().skip(1).any(|a| a == "--advanced");
     if std::env::args().skip(1).any(|a| a == "--help" || a == "-h") {
         println!(
             "apollo-ui — desktop app for apollo\n\n\
-             usage: apollo-ui [--onboarding]\n\n\
-             first launch walks through setup; later launches open the chat window\n\
-             in the onboarded workspace. --onboarding runs setup again.\n\
+             usage: apollo-ui [--onboarding] [--simple | --advanced]\n\n\
+             first launch walks through setup; later launches open the main window\n\
+             on the active instance. --onboarding runs setup again; --simple and\n\
+             --advanced switch the mode (saved).\n\
              state: ~/.apollo/desktop.json (no secrets)"
         );
         return;
     }
-    let ready = setup::DesktopState::load()
-        .and_then(|s| s.ready().map(|p| p.to_path_buf()))
-        .filter(|_| !force_onboarding);
+    let mut state = setup::DesktopState::load().unwrap_or_default();
+    if simple || advanced {
+        state.mode = if advanced {
+            setup::Mode::Advanced
+        } else {
+            setup::Mode::Simple
+        };
+        let _ = state.save();
+    }
+    let ready = state.ready().cloned().filter(|_| !force_onboarding);
 
     Application::new().run(move |cx: &mut App| {
         theme::load_fonts(cx);
@@ -667,17 +625,23 @@ fn main() {
 
         let opened = cx.open_window(window_options, move |window, cx| {
             let root = match ready {
-                Some(workspace) => {
-                    let _ = std::env::set_current_dir(&workspace);
-                    let view = cx.new(ApolloView::new);
+                Some(instance) => {
+                    let _ = std::env::set_current_dir(&instance.config_dir);
+                    let view = cx.new(|cx| ApolloView::new(state, instance, cx));
                     window.focus(&view.read(cx).focus);
                     gpui::AnyView::from(view)
                 }
                 None => {
                     let view = cx.new(|cx| {
-                        onboarding::OnboardingView::new(cx, |workspace, window, cx| {
-                            open_chat(&workspace, window, cx)
-                        })
+                        onboarding::OnboardingView::new(
+                            onboarding::Purpose::FirstRun,
+                            cx,
+                            |state, window, cx| {
+                                let state =
+                                    state.or_else(setup::DesktopState::load).unwrap_or_default();
+                                open_chat(state, window, cx)
+                            },
+                        )
                     });
                     window.focus(&view.read(cx).focus);
                     gpui::AnyView::from(view)

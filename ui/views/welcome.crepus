@@ -1,28 +1,25 @@
-# Step 1 — what apollo is and what the next screens will set up.
+# Step 1 — what the next screens set up.
 div w-full flex flex-col gap-4
-  div w-full flex flex-col gap-3 p-5 rounded-lg border border-[#3f3f46] bg-[#18181b]
+  div w-full flex flex-col gap-3 p-5 rounded-md border border-[#27272a]
     div flex flex-row gap-3
-      span text-sm text-[#fafafa]
+      span text-sm text-[#52525b]
         "01"
       span text-sm text-[#d4d4d8]
-        "model provider + api key — stored locally, owner-only"
+        "sign in with an account, or add an api key or custom endpoint"
     div flex flex-row gap-3
-      span text-sm text-[#fafafa]
+      span text-sm text-[#52525b]
         "02"
       span text-sm text-[#d4d4d8]
-        "workspace folder — where apollo reads, writes and remembers"
+        "one folder, or everywhere"
     div flex flex-row gap-3
-      span text-sm text-[#fafafa]
+      span text-sm text-[#52525b]
         "03"
       span text-sm text-[#d4d4d8]
-        "permission profile — what the agent may do without asking"
+        "what the agent may do without asking"
     div flex flex-row gap-3
-      span text-sm text-[#fafafa]
+      span text-sm text-[#52525b]
         "04"
       span text-sm text-[#d4d4d8]
-        "a test prompt through the agent to prove it answers"
-  div flex flex-row gap-2 items-center
-    span text-xs text-[#34d399]
-      "●"
-    span text-xs text-[#71717a]
-      "{engine_line}"
+        "a test prompt, then simple or advanced"
+  span text-xs text-[#52525b]
+    "{engine_line}"

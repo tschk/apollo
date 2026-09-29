@@ -1,40 +1,27 @@
-# First-run onboarding chrome: brand bar, step rail, the current step's body
-# and the back / continue footer. Compiled into the binary by `view_file!`;
-# every `{name}` below is a local in `OnboardingView::render`.
+# Onboarding chrome: a 2px progress line on the top edge, the current step
+# and a quiet footer. No title bar. Every `{name}` is a local in
+# `OnboardingView::render`.
 div w-full h-full flex flex-col bg-[#09090b] text-[#d4d4d8] font-[Chivo_Mono] @keydown=on_key_down
+  {progress}
 
-  div h-11 w-full flex flex-row items-center px-4 gap-3 border-b border-[#3f3f46] bg-[#18181b] shrink-0
-    div w-6 h-6 flex items-center justify-center rounded-md border border-[#3f3f46] bg-[#27272a] text-[#fafafa] text-xs font-bold
-      "a"
-    div flex flex-col
-      span text-sm font-semibold text-[#d4d4d8]
-        "apollo"
-      span text-xs text-[#71717a]
-        "first-run setup"
-    span flex-1
-    span text-xs text-[#71717a]
-      "{step_counter}"
-
-  div w-full px-8 pt-5 shrink-0
-    {rail}
-
-  div flex-1 w-full flex flex-col items-center px-8 py-6 overflow-hidden
-    div w-full max-w-176 flex flex-col gap-5
-      span text-xs text-[#71717a]
-        "{eyebrow}"
-      span text-2xl font-semibold text-[#fafafa]
-        "{title}"
-      span text-sm text-[#a1a1aa] leading-relaxed
-        "{lede}"
+  div flex-1 w-full flex flex-col items-center px-10 pt-14 pb-4 overflow-hidden
+    div w-full max-w-160 flex flex-col gap-5
+      div flex flex-col gap-2
+        span text-2xl font-semibold text-[#fafafa]
+          "{title}"
+        span text-sm text-[#71717a] leading-relaxed
+          "{lede}"
       {body}
 
-  div h-16 w-full flex flex-row items-center px-8 gap-3 border-t border-[#3f3f46] bg-[#18181b] shrink-0
+  div h-14 w-full flex flex-row items-center px-10 gap-3 shrink-0
     if {can_back}
-      button bg-[#09090b] border border-[#3f3f46] text-[#d4d4d8] text-sm px-4 py-2 rounded-md hover:bg-[#27272a] @click=on_back
-        "back"
+      button text-[#71717a] text-sm px-2 py-2 rounded-md hover:text-[#d4d4d8] @click=on_back
+        "{back_label}"
     span flex-1 text-xs text-[#f87171]
       "{error}"
-    span text-xs text-[#71717a]
+    span text-xs text-[#52525b]
       "{hint}"
+    span text-xs text-[#3f3f46]
+      "{counter}"
     button bg-[#fafafa] text-[#09090b] text-sm font-semibold px-5 py-2 rounded-md hover:bg-[#d4d4d8] @click=on_next
       "{next_label}"

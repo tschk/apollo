@@ -8,8 +8,14 @@
 //!   profile. Never carries the key (`provider.api_key` stays `null`).
 //! - `<workspace>/.env` — the provider key, under the variable apollo's
 //!   credential detection reads for that provider. Written owner-only.
-//! - `~/.apollo/desktop.json` — "onboarding done" plus the workspace to open,
-//!   so a relaunch goes straight to the main window. No secrets.
+//! - `~/.apollo/desktop.json` — "onboarding done", simple/advanced mode and
+//!   the instances (each a config dir + workspace), so a relaunch goes
+//!   straight to the main window. No secrets.
+//!
+//! An instance scoped to a folder keeps its config in that folder, exactly
+//! where `apollo init` puts it. A "works everywhere" instance has no single
+//! folder: its workspace is `$HOME` and its config lives in
+//! `~/.apollo/instances/<id>/`.
 //!
 //! The key is held in [`Secret`], whose `Debug` is redacted, and is never
 //! printed, logged or echoed back to the screen.
@@ -18,21 +24,79 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// How a provider authenticates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)] // variants name the auth methods
+pub enum Auth {
+    /// Browser sign-in; tokens go to the shared rs_ai credential store.
+    OAuth(crate::oauth::OAuthKind),
+    /// An API key, written to `.env` under this variable.
+    ApiKey(&'static str),
+    /// Nothing to enter (Ollama).
+    Local,
+    /// Any OpenAI-compatible endpoint: base URL + optional key + model.
+    /// The key goes to `.env` as [`CUSTOM_KEY_VAR`].
+    Custom,
+}
+
+/// The variable apollo reads the configured provider's key from when it is
+/// not one of the catalog providers (see `bootstrap::explicit_provider_key`).
+pub const CUSTOM_KEY_VAR: &str = "APOLLO_PROVIDER_API_KEY";
+
 /// A model provider the onboarding offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderInfo {
     /// `provider.name` in apollo.json.
     pub id: &'static str,
     pub label: &'static str,
-    /// Environment variable apollo reads the key from. `None`: no key needed.
-    pub env_var: Option<&'static str>,
+    pub auth: Auth,
     /// Pre-filled model. Matches `providers::defaults` where apollo has one.
     pub default_model: &'static str,
     pub blurb: &'static str,
 }
 
-/// Providers apollo constructs directly and whose key its credential
-/// detection (`bootstrap::catalog_env_key`) picks up from the environment.
+impl ProviderInfo {
+    /// Environment variable the key is written under, if any.
+    pub fn env_var(&self) -> Option<&'static str> {
+        match self.auth {
+            Auth::ApiKey(var) => Some(var),
+            Auth::Custom => Some(CUSTOM_KEY_VAR),
+            Auth::OAuth(_) | Auth::Local => None,
+        }
+    }
+    pub fn is_custom(&self) -> bool {
+        matches!(self.auth, Auth::Custom)
+    }
+}
+
+/// Sign-in providers, pinned at the top of the provider step.
+pub const OAUTH_PROVIDERS: &[ProviderInfo] = &[
+    ProviderInfo {
+        id: "chatgpt",
+        label: "ChatGPT",
+        auth: Auth::OAuth(crate::oauth::OAuthKind::ChatGpt),
+        default_model: "gpt-5.5",
+        blurb: "sign in with your chatgpt plan",
+    },
+    ProviderInfo {
+        id: "github-copilot",
+        label: "GitHub Copilot",
+        auth: Auth::OAuth(crate::oauth::OAuthKind::Copilot),
+        default_model: "gpt-5.4",
+        blurb: "sign in with github",
+    },
+    ProviderInfo {
+        id: "claude",
+        label: "Claude",
+        auth: Auth::OAuth(crate::oauth::OAuthKind::Claude),
+        default_model: "",
+        blurb: "sign in with claude.ai",
+    },
+];
+
+/// Everything else, behind the dropdown: API-key providers apollo constructs
+/// directly and whose key its credential detection
+/// (`bootstrap::catalog_env_key`) reads, then Ollama and a custom endpoint.
 ///
 /// OpenAI's key goes in `OPENAI_API_KEY`, which apollo also treats as "use
 /// OpenAI" — so it is only ever written for the OpenAI entry. Writing it for
@@ -41,56 +105,66 @@ pub const PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
         id: "openrouter",
         label: "OpenRouter",
-        env_var: Some("OPENROUTER_API_KEY"),
+        auth: Auth::ApiKey("OPENROUTER_API_KEY"),
         default_model: "z-ai/glm-5.2",
         blurb: "one key, many models",
     },
     ProviderInfo {
         id: "openai",
         label: "OpenAI",
-        env_var: Some("OPENAI_API_KEY"),
+        auth: Auth::ApiKey("OPENAI_API_KEY"),
         default_model: "gpt-5.4",
         blurb: "gpt models",
     },
     ProviderInfo {
-        id: "xai",
-        label: "xAI",
-        env_var: Some("XAI_API_KEY"),
-        default_model: "grok-build-0.1",
-        blurb: "grok models",
-    },
-    ProviderInfo {
         id: "gemini",
         label: "Gemini",
-        env_var: Some("GEMINI_API_KEY"),
+        auth: Auth::ApiKey("GEMINI_API_KEY"),
         default_model: "gemini-3.1-pro-preview",
         blurb: "ai studio key",
     },
     ProviderInfo {
+        id: "xai",
+        label: "xAI",
+        auth: Auth::ApiKey("XAI_API_KEY"),
+        default_model: "grok-build-0.1",
+        blurb: "grok models",
+    },
+    ProviderInfo {
         id: "deepseek",
         label: "DeepSeek",
-        env_var: Some("DEEPSEEK_API_KEY"),
+        auth: Auth::ApiKey("DEEPSEEK_API_KEY"),
         default_model: "deepseek-v4-pro",
         blurb: "platform key",
     },
     ProviderInfo {
         id: "moonshot",
         label: "Moonshot",
-        env_var: Some("MOONSHOT_API_KEY"),
+        auth: Auth::ApiKey("MOONSHOT_API_KEY"),
         default_model: "kimi-k3",
         blurb: "kimi models",
     },
     ProviderInfo {
         id: "ollama",
         label: "Ollama",
-        env_var: None,
+        auth: Auth::Local,
         default_model: "llama3.2",
         blurb: "local models, no key",
+    },
+    ProviderInfo {
+        id: "custom",
+        label: "Custom endpoint",
+        auth: Auth::Custom,
+        default_model: "",
+        blurb: "any openai-compatible api",
     },
 ];
 
 pub fn provider(id: &str) -> Option<&'static ProviderInfo> {
-    PROVIDERS.iter().find(|p| p.id == id)
+    OAUTH_PROVIDERS
+        .iter()
+        .chain(PROVIDERS.iter())
+        .find(|p| p.id == id)
 }
 
 /// A permission profile, as `apollo init` offers them.
@@ -169,37 +243,122 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// Where an instance works.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// One folder; the config sits in it, like `apollo init`.
+    Folder(PathBuf),
+    /// No single folder: workspace `$HOME`, config under
+    /// `~/.apollo/instances/<id>/`.
+    Everywhere,
+}
+
 /// Everything the onboarding collects.
 #[derive(Debug, Clone)]
 pub struct SetupChoices {
+    pub instance_id: String,
+    pub name: String,
     pub provider: &'static ProviderInfo,
     pub api_key: Secret,
+    /// Custom endpoints only.
+    pub base_url: String,
     pub model: String,
-    pub workspace: PathBuf,
+    pub scope: Scope,
     pub profile: &'static ProfileInfo,
+}
+
+impl SetupChoices {
+    pub fn workspace(&self) -> PathBuf {
+        match &self.scope {
+            Scope::Folder(p) => p.clone(),
+            Scope::Everywhere => home_dir().unwrap_or_else(|| PathBuf::from(".")),
+        }
+    }
+
+    pub fn config_dir(&self) -> PathBuf {
+        match &self.scope {
+            Scope::Folder(p) => p.clone(),
+            Scope::Everywhere => instances_root().join(&self.instance_id),
+        }
+    }
+
+    pub fn resolved_model(&self) -> String {
+        if self.model.trim().is_empty() {
+            self.provider.default_model.to_string()
+        } else {
+            self.model.trim().to_string()
+        }
+    }
+}
+
+pub fn instances_root() -> PathBuf {
+    home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".apollo")
+        .join("instances")
+}
+
+/// A filesystem-safe id from a display name, unique among `taken`.
+pub fn instance_id(name: &str, taken: &[String]) -> String {
+    let mut base: String = name
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    while base.contains("--") {
+        base = base.replace("--", "-");
+    }
+    let base = base.trim_matches('-');
+    let base = if base.is_empty() { "apollo" } else { base }.to_string();
+    if !taken.contains(&base) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|id| !taken.contains(id))
+        .expect("unbounded")
 }
 
 /// Where each piece landed, for the summary screen.
 #[derive(Debug, Clone)]
 pub struct WrittenSetup {
+    pub config_dir: PathBuf,
     pub config_path: PathBuf,
     pub env_path: Option<PathBuf>,
+    pub workspace: PathBuf,
 }
 
 /// Reject a key that could not survive a round trip through `.env`.
 pub fn validate_key(provider: &ProviderInfo, key: &Secret) -> Result<(), String> {
-    if provider.env_var.is_none() {
-        return Ok(());
-    }
     let key = key.expose().trim();
-    if key.is_empty() {
-        return Err(format!("{} needs an API key", provider.label));
+    match provider.auth {
+        Auth::ApiKey(_) if key.is_empty() => {
+            return Err(format!("{} needs an API key", provider.label))
+        }
+        Auth::ApiKey(_) | Auth::Custom => {}
+        Auth::OAuth(_) | Auth::Local => return Ok(()),
     }
     if key
         .chars()
         .any(|c| c.is_control() || c == '"' || c == '\\' || c.is_whitespace())
     {
         return Err("that key contains characters an API key never has".into());
+    }
+    Ok(())
+}
+
+/// A custom endpoint needs an http(s) base URL and a model name.
+pub fn validate_custom(base_url: &str, model: &str) -> Result<(), String> {
+    let url = base_url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("base url must start with http:// or https://".into());
+    }
+    if url.chars().any(|c| c.is_whitespace() || c == '"') {
+        return Err("base url cannot contain spaces or quotes".into());
+    }
+    if model.trim().is_empty() {
+        return Err("a custom endpoint needs a model name".into());
     }
     Ok(())
 }
@@ -244,21 +403,26 @@ pub fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// Write `apollo.json` and `.env` into the chosen workspace.
+/// Write `apollo.json` and `.env` into the instance's config dir.
 ///
 /// An existing `apollo.json` is merged into, not replaced, so re-running the
 /// onboarding over a configured workspace keeps its channels, prompt and
-/// plugins. An existing `.env` keeps every line but the one being set.
+/// plugins. An existing `.env` keeps every line but the ones being set.
 pub fn write_setup(choices: &SetupChoices) -> Result<WrittenSetup, String> {
     validate_key(choices.provider, &choices.api_key)?;
-    let workspace = &choices.workspace;
-    std::fs::create_dir_all(workspace)
-        .map_err(|e| format!("could not create {}: {e}", workspace.display()))?;
-    let workspace = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.clone());
+    if choices.provider.is_custom() {
+        validate_custom(&choices.base_url, &choices.model)?;
+    }
+    let workspace = choices.workspace();
+    let config_dir = choices.config_dir();
+    for dir in [&workspace, &config_dir] {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    }
+    let workspace = workspace.canonicalize().unwrap_or(workspace);
+    let config_dir = config_dir.canonicalize().unwrap_or(config_dir);
 
-    let config_path = workspace.join("apollo.json");
+    let config_path = config_dir.join("apollo.json");
     let mut config = match std::fs::read_to_string(&config_path) {
         Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
             .map_err(|e| format!("{} is not valid JSON: {e}", config_path.display()))?,
@@ -269,26 +433,35 @@ pub fn write_setup(choices: &SetupChoices) -> Result<WrittenSetup, String> {
     // The agent sandbox treats apollo.json as a credential file.
     write_private(&config_path, &json)?;
 
-    let env_path = match choices.provider.env_var {
-        Some(var) => {
-            let path = workspace.join(".env");
-            let existing = std::fs::read_to_string(&path).unwrap_or_default();
-            let content = upsert_env_line(&existing, var, choices.api_key.expose().trim());
-            write_private(&path, &content)?;
-            Some(path)
+    let env_path = config_dir.join(".env");
+    let mut env = std::fs::read_to_string(&env_path).unwrap_or_default();
+    // A leftover custom-endpoint key would override whatever provider is
+    // chosen now, since apollo reads it first.
+    if !choices.provider.is_custom() {
+        env = remove_env_line(&env, CUSTOM_KEY_VAR);
+    }
+    match choices.provider.auth {
+        Auth::ApiKey(var) => env = upsert_env_line(&env, var, choices.api_key.expose().trim()),
+        Auth::Custom if !choices.api_key.is_empty() => {
+            env = upsert_env_line(&env, CUSTOM_KEY_VAR, choices.api_key.expose().trim())
         }
-        None => {
-            let path = workspace.join(".env");
-            let existing = std::fs::read_to_string(&path).unwrap_or_default();
-            let content = upsert_env_line(&existing, "OLLAMA_BASE_URL", "http://localhost:11434");
-            write_private(&path, &content)?;
-            Some(path)
-        }
+        Auth::Custom => env = remove_env_line(&env, CUSTOM_KEY_VAR),
+        Auth::Local => env = upsert_env_line(&env, "OLLAMA_BASE_URL", "http://localhost:11434"),
+        // OAuth tokens live in the shared rs_ai credential store.
+        Auth::OAuth(_) => {}
+    }
+    let env_path = if env.trim().is_empty() && !env_path.exists() {
+        None
+    } else {
+        write_private(&env_path, &env)?;
+        Some(env_path)
     };
 
     Ok(WrittenSetup {
+        config_dir,
         config_path,
         env_path,
+        workspace,
     })
 }
 
@@ -311,30 +484,36 @@ pub fn apply_choices(config: &mut serde_json::Value, choices: &SetupChoices, wor
     provider.insert("api_key".into(), Value::Null);
     provider.insert(
         "base_url".into(),
-        if choices.provider.id == "ollama" {
-            json!("http://localhost:11434")
-        } else {
-            Value::Null
+        match choices.provider.auth {
+            Auth::Local => json!("http://localhost:11434"),
+            Auth::Custom => json!(choices.base_url.trim().trim_end_matches('/')),
+            _ => Value::Null,
         },
     );
 
-    let model = if choices.model.trim().is_empty() {
-        choices.provider.default_model.to_string()
-    } else {
-        choices.model.trim().to_string()
-    };
-    root.insert("model".into(), json!(model));
+    root.insert("model".into(), json!(choices.resolved_model()));
     root.insert("workspace".into(), json!(workspace));
 
+    apply_profile(config, choices.profile.id);
+}
+
+/// Set the permission profile the way `config::apply_permission_profile`
+/// does: profile name plus the policy/toolsets it implies.
+pub fn apply_profile(config: &mut serde_json::Value, profile: &str) {
+    use serde_json::json;
+    if !config.is_object() {
+        *config = json!({});
+    }
+    let root = config.as_object_mut().expect("object");
     let agent = root.entry("agent").or_insert_with(|| json!({}));
     if !agent.is_object() {
         *agent = json!({});
     }
     let agent = agent.as_object_mut().expect("object");
-    agent.insert("permission_profile".into(), json!(choices.profile.id));
+    agent.insert("permission_profile".into(), json!(profile));
     agent.remove("permissions");
 
-    match choices.profile.id {
+    match profile {
         "full" => {
             root.insert(
                 "policy".into(),
@@ -360,6 +539,28 @@ pub fn apply_choices(config: &mut serde_json::Value, choices: &SetupChoices, wor
             root.insert("toolsets".into(), json!({}));
         }
     }
+}
+
+/// Read, change and rewrite (0600) an instance's apollo.json.
+pub fn update_config(
+    path: &Path,
+    change: impl FnOnce(&mut serde_json::Value),
+) -> Result<serde_json::Value, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let mut value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?;
+    change(&mut value);
+    let json = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    write_private(path, &json)?;
+    Ok(value)
+}
+
+pub fn read_config(path: &Path) -> serde_json::Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
 }
 
 /// Set `KEY="value"` in a dotenv file body, keeping every other line.
@@ -390,6 +591,25 @@ pub fn upsert_env_line(existing: &str, key: &str, value: &str) -> String {
     body
 }
 
+/// Drop `KEY=` lines from a dotenv body.
+pub fn remove_env_line(existing: &str, key: &str) -> String {
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start().trim_start_matches("export ").trim_start();
+            t.split_once('=')
+                .map(|(k, _)| k.trim() != key)
+                .unwrap_or(true)
+        })
+        .collect();
+    if kept.is_empty() {
+        return String::new();
+    }
+    let mut body = kept.join("\n");
+    body.push('\n');
+    body
+}
+
 fn write_private(path: &Path, content: &str) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -415,14 +635,79 @@ fn write_private(path: &Path, content: &str) -> Result<(), String> {
     }
 }
 
-/// `~/.apollo/desktop.json`: whether onboarding finished and what to open.
+/// How much of the app is on screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Chat and an instance switcher, nothing else.
+    #[default]
+    Simple,
+    /// Instance roster, tools, permissions, model params and logs.
+    Advanced,
+}
+
+/// One apollo agent the app knows about.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Instance {
+    pub id: String,
+    pub name: String,
+    /// `true`: works everywhere (workspace `$HOME`).
+    #[serde(default)]
+    pub everywhere: bool,
+    pub workspace: PathBuf,
+    /// Holds `apollo.json` and `.env`; the chat runs with this as its cwd.
+    pub config_dir: PathBuf,
+    pub provider: String,
+    pub model: String,
+    pub permission_profile: String,
+}
+
+impl Instance {
+    pub fn from_setup(choices: &SetupChoices, written: &WrittenSetup) -> Self {
+        Self {
+            id: choices.instance_id.clone(),
+            name: choices.name.trim().to_string(),
+            everywhere: choices.scope == Scope::Everywhere,
+            workspace: written.workspace.clone(),
+            config_dir: written.config_dir.clone(),
+            provider: choices.provider.id.to_string(),
+            model: choices.resolved_model(),
+            permission_profile: choices.profile.id.to_string(),
+        }
+    }
+
+    pub fn config_path(&self) -> PathBuf {
+        self.config_dir.join("apollo.json")
+    }
+
+    pub fn scope_label(&self) -> String {
+        if self.everywhere {
+            "everywhere".into()
+        } else {
+            display_path(&self.workspace)
+        }
+    }
+}
+
+/// `~/.apollo/desktop.json`: onboarding state, mode and instances.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct DesktopState {
     pub onboarded: bool,
-    pub workspace: Option<PathBuf>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub permission_profile: Option<String>,
+    #[serde(default)]
+    pub mode: Mode,
+    #[serde(default)]
+    pub active: Option<String>,
+    #[serde(default)]
+    pub instances: Vec<Instance>,
+    /// Pre-instances layout (a single workspace); migrated on load.
+    #[serde(default, skip_serializing)]
+    workspace: Option<PathBuf>,
+    #[serde(default, skip_serializing)]
+    provider: Option<String>,
+    #[serde(default, skip_serializing)]
+    model: Option<String>,
+    #[serde(default, skip_serializing)]
+    permission_profile: Option<String>,
 }
 
 pub fn desktop_state_path() -> Option<PathBuf> {
@@ -436,7 +721,32 @@ impl DesktopState {
 
     pub fn load_from(path: &Path) -> Option<Self> {
         let text = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&text).ok()
+        let mut state: Self = serde_json::from_str(&text).ok()?;
+        state.migrate();
+        Some(state)
+    }
+
+    /// Turn a single-workspace state into one instance.
+    fn migrate(&mut self) {
+        if !self.instances.is_empty() {
+            return;
+        }
+        if let Some(ws) = self.workspace.take() {
+            self.instances.push(Instance {
+                id: "apollo".into(),
+                name: "apollo".into(),
+                everywhere: false,
+                config_dir: ws.clone(),
+                workspace: ws,
+                provider: self.provider.take().unwrap_or_default(),
+                model: self.model.take().unwrap_or_default(),
+                permission_profile: self
+                    .permission_profile
+                    .take()
+                    .unwrap_or_else(|| "auto".into()),
+            });
+            self.active = Some("apollo".into());
+        }
     }
 
     pub fn save(&self) -> Result<PathBuf, String> {
@@ -454,10 +764,46 @@ impl DesktopState {
         std::fs::write(path, json).map_err(|e| format!("could not write {}: {e}", path.display()))
     }
 
-    /// Onboarding is done and the workspace it set up still has a config.
-    pub fn ready(&self) -> Option<&Path> {
-        let ws = self.workspace.as_deref()?;
-        (self.onboarded && ws.join("apollo.json").is_file()).then_some(ws)
+    pub fn ids(&self) -> Vec<String> {
+        self.instances.iter().map(|i| i.id.clone()).collect()
+    }
+
+    pub fn instance(&self, id: &str) -> Option<&Instance> {
+        self.instances.iter().find(|i| i.id == id)
+    }
+
+    /// Add or replace an instance and make it active.
+    pub fn upsert(&mut self, instance: Instance) {
+        self.active = Some(instance.id.clone());
+        match self.instances.iter_mut().find(|i| i.id == instance.id) {
+            Some(existing) => *existing = instance,
+            None => self.instances.push(instance),
+        }
+    }
+
+    /// Another instance already keeps its config in `dir`.
+    pub fn config_dir_owner(&self, dir: &Path, except: &str) -> Option<&Instance> {
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        self.instances.iter().find(|i| {
+            i.id != except
+                && i.config_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| i.config_dir.clone())
+                    == dir
+        })
+    }
+
+    /// Onboarding is done and the active instance still has a config.
+    pub fn ready(&self) -> Option<&Instance> {
+        if !self.onboarded {
+            return None;
+        }
+        let active = self
+            .active
+            .as_deref()
+            .and_then(|id| self.instance(id))
+            .or_else(|| self.instances.first())?;
+        active.config_path().is_file().then_some(active)
     }
 }
 
@@ -467,10 +813,13 @@ mod tests {
 
     fn choices(dir: &Path, provider_id: &str, key: &str, profile: &str) -> SetupChoices {
         SetupChoices {
+            instance_id: "t".into(),
+            name: "t".into(),
             provider: provider(provider_id).unwrap(),
             api_key: Secret::new(key),
+            base_url: String::new(),
             model: String::new(),
-            workspace: dir.to_path_buf(),
+            scope: Scope::Folder(dir.to_path_buf()),
             profile: PROFILES.iter().find(|p| p.id == profile).unwrap(),
         }
     }
@@ -522,7 +871,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.path().join(".env"),
-            "APOLLO_TELEGRAM_TOKEN=\"t\"\nXAI_API_KEY=\"old\"\n",
+            "APOLLO_TELEGRAM_TOKEN=\"t\"\nXAI_API_KEY=\"old\"\nAPOLLO_PROVIDER_API_KEY=\"stale\"\n",
         )
         .unwrap();
         write_setup(&choices(dir.path(), "xai", "xai-new", "tools_only")).unwrap();
@@ -535,6 +884,7 @@ mod tests {
         assert_eq!(v["agent"]["permission_profile"], "tools_only");
         assert_eq!(v["policy"]["allow_shell"], false);
         assert_eq!(v["toolsets"]["enabled"][0], "web");
+        // The stale custom key is gone: apollo would read it before XAI_API_KEY.
         let env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
         assert_eq!(
             env,
@@ -543,12 +893,58 @@ mod tests {
     }
 
     #[test]
-    fn ollama_needs_no_key() {
+    fn custom_endpoint_keeps_its_key_in_env() {
         let dir = tempfile::tempdir().unwrap();
-        let written = write_setup(&choices(dir.path(), "ollama", "", "auto")).unwrap();
+        let mut c = choices(dir.path(), "custom", "sk-gw-1", "auto");
+        c.base_url = "https://llm.example.com/v1/".into();
+        c.model = "my-model".into();
+        let written = write_setup(&c).unwrap();
+        let config = std::fs::read_to_string(&written.config_path).unwrap();
+        assert!(!config.contains("sk-gw-1"));
+        let v: serde_json::Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(v["provider"]["name"], "custom");
+        assert_eq!(v["provider"]["base_url"], "https://llm.example.com/v1");
+        assert_eq!(v["model"], "my-model");
+        let env = std::fs::read_to_string(written.env_path.unwrap()).unwrap();
+        assert_eq!(env, "APOLLO_PROVIDER_API_KEY=\"sk-gw-1\"\n");
+    }
+
+    #[test]
+    fn custom_endpoint_validation() {
+        assert!(validate_custom("llm.example.com", "m").is_err());
+        assert!(validate_custom("https://x/v1", "").is_err());
+        assert!(validate_custom("https://x/v1", "m").is_ok());
+        // A keyless local endpoint is fine.
+        assert!(validate_key(provider("custom").unwrap(), &Secret::new("")).is_ok());
+    }
+
+    #[test]
+    fn oauth_writes_no_key_and_no_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let written = write_setup(&choices(dir.path(), "chatgpt", "", "auto")).unwrap();
+        assert!(written.env_path.is_none());
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(written.config_path).unwrap()).unwrap();
-        assert_eq!(v["provider"]["base_url"], "http://localhost:11434");
+        assert_eq!(v["provider"]["name"], "chatgpt");
+        assert_eq!(v["model"], "gpt-5.5");
+    }
+
+    #[test]
+    fn everywhere_scope_uses_home_and_a_private_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("HOME", Some(home.path()), || {
+            let mut c = choices(Path::new("/unused"), "ollama", "", "auto");
+            c.scope = Scope::Everywhere;
+            c.instance_id = "global".into();
+            let written = write_setup(&c).unwrap();
+            let home = home.path().canonicalize().unwrap();
+            assert_eq!(written.workspace, home);
+            assert_eq!(written.config_dir, home.join(".apollo/instances/global"));
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(written.config_path).unwrap())
+                    .unwrap();
+            assert_eq!(v["workspace"], serde_json::json!(home));
+        });
     }
 
     #[test]
@@ -563,11 +959,19 @@ mod tests {
     #[test]
     fn only_openai_writes_openai_api_key() {
         // apollo reads OPENAI_API_KEY as "switch to OpenAI".
-        for p in PROVIDERS {
+        for p in OAUTH_PROVIDERS.iter().chain(PROVIDERS) {
             if p.id != "openai" {
-                assert_ne!(p.env_var, Some("OPENAI_API_KEY"), "{}", p.id);
+                assert_ne!(p.env_var(), Some("OPENAI_API_KEY"), "{}", p.id);
             }
         }
+    }
+
+    #[test]
+    fn instance_ids_are_slugged_and_unique() {
+        assert_eq!(instance_id("Work  Bot!", &[]), "work-bot");
+        assert_eq!(instance_id("", &[]), "apollo");
+        let taken = vec!["apollo".to_string(), "apollo-2".to_string()];
+        assert_eq!(instance_id("apollo", &taken), "apollo-3");
     }
 
     #[test]
@@ -576,16 +980,44 @@ mod tests {
         let path = dir.path().join("state/desktop.json");
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let state = DesktopState {
+        let mut state = DesktopState {
             onboarded: true,
-            workspace: Some(ws.clone()),
+            mode: Mode::Advanced,
             ..Default::default()
         };
+        state.upsert(Instance {
+            id: "a".into(),
+            name: "a".into(),
+            everywhere: false,
+            workspace: ws.clone(),
+            config_dir: ws.clone(),
+            provider: "gemini".into(),
+            model: "m".into(),
+            permission_profile: "auto".into(),
+        });
         state.save_to(&path).unwrap();
         let loaded = DesktopState::load_from(&path).unwrap();
         assert_eq!(loaded, state);
         assert!(loaded.ready().is_none(), "no apollo.json yet");
         std::fs::write(ws.join("apollo.json"), "{}").unwrap();
-        assert_eq!(loaded.ready(), Some(ws.as_path()));
+        assert_eq!(loaded.ready().map(|i| i.id.as_str()), Some("a"));
+        assert!(loaded.config_dir_owner(&ws, "b").is_some());
+        assert!(loaded.config_dir_owner(&ws, "a").is_none());
+    }
+
+    #[test]
+    fn single_workspace_state_migrates_to_an_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("desktop.json");
+        std::fs::write(
+            &path,
+            r#"{"onboarded":true,"workspace":"/w","provider":"gemini","model":"m","permission_profile":"auto"}"#,
+        )
+        .unwrap();
+        let state = DesktopState::load_from(&path).unwrap();
+        assert_eq!(state.mode, Mode::Simple);
+        assert_eq!(state.instances.len(), 1);
+        assert_eq!(state.instances[0].config_dir, PathBuf::from("/w"));
+        assert_eq!(state.active.as_deref(), Some("apollo"));
     }
 }
