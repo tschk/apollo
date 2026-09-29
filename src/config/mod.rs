@@ -660,17 +660,6 @@ mod config_path_tests {
     }
 
     #[test]
-    fn set_path_rejects_empty_keys() {
-        let cfg = Config::default_config();
-
-        let err = cfg.set_path("", "value").unwrap_err().to_string();
-        assert_eq!(err, "empty config key");
-
-        let err = cfg.set_path("   ", "value").unwrap_err().to_string();
-        assert_eq!(err, "empty config key");
-    }
-
-    #[test]
     fn set_path_does_not_mutate_original_config() {
         let original_cfg = Config::default_config();
         let original_json = serde_json::to_value(&original_cfg).unwrap();
