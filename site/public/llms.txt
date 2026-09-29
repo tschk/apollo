@@ -1,0 +1,8 @@
+# apollo
+
+local-first agent host by tsc.hk. the public site is https://apollo.tsc.hk
+source: https://github.com/tschk/apollo
+
+the desktop app (apollo-ui) is crepuscularity + gpui. it onboards a model,
+a workspace, and permissions, then opens simple (chat) or advanced
+(instances, tools, logs). the rotary (rx4) engine runs on the machine.
