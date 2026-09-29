@@ -1,0 +1,10 @@
+# Apollo
+
+Apollo is a desktop agent from tsc.hk.
+Site: https://apollo.tsc.hk
+Source: https://github.com/tschk/apollo
+
+The agent that sits on your computer. Setup is a handful of screens: connect a
+model, choose a folder, set the rules, try one message. Then a simple chat, or
+the full app with several instances, tools, and a history of what happened.
+Mac and Linux.
