@@ -18,3 +18,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 tungstenite = "0.24"
+
+# gpui is pulled in without its default platform backends, so on Linux the
+# window system has to be opted into explicitly — without these the app
+# starts headless and refuses to open a window even with DISPLAY set.
+[target.'cfg(target_os = "linux")'.dependencies]
+crepuscularity-gpui = { version = "0.5.8", features = ["x11", "wayland"] }
+
+[dev-dependencies]
+tempfile = "3"
