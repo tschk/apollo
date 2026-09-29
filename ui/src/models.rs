@@ -413,6 +413,107 @@ pub fn resolve(
     (list, live_error)
 }
 
+/// Case-insensitive substring filter. An empty query returns the full list.
+pub fn filter_models(models: &[String], query: &str) -> Vec<String> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return models.to_vec();
+    }
+    models
+        .iter()
+        .filter(|model| model.to_ascii_lowercase().contains(&query))
+        .cloned()
+        .collect()
+}
+
+/// Effort tokens models.dev lists for this model, in catalog order.
+/// `None` means the model has no reasoning dial, so the UI hides it.
+pub fn effort_levels(model_id: &str) -> Option<Vec<String>> {
+    // Cache only. Rendering must not wait on the network; a model refresh
+    // fills this file, and the next frame grows or hides the dial.
+    let path = cache_dir()?.join("models.dev.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let wrapped: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let catalog = wrapped.get("catalog").cloned().unwrap_or(wrapped);
+    effort_levels_from_catalog(&catalog, model_id)
+}
+
+pub fn effort_levels_from_catalog(
+    catalog: &serde_json::Value,
+    model_id: &str,
+) -> Option<Vec<String>> {
+    let want = model_id.trim();
+    if want.is_empty() {
+        return None;
+    }
+    let providers = catalog.as_object()?;
+    for provider in providers.values() {
+        let Some(models) = provider.get("models").and_then(|m| m.as_object()) else {
+            continue;
+        };
+        let Some(model) = models.get(want).or_else(|| {
+            models
+                .values()
+                .find(|entry| entry.get("id").and_then(|v| v.as_str()) == Some(want))
+        }) else {
+            continue;
+        };
+        if let Some(levels) = effort_values(model) {
+            return Some(levels);
+        }
+    }
+    None
+}
+
+fn effort_values(model: &serde_json::Value) -> Option<Vec<String>> {
+    let options = model.get("reasoning_options")?.as_array()?;
+    for option in options {
+        if option.get("type").and_then(|t| t.as_str()) != Some("effort") {
+            continue;
+        }
+        let values = option
+            .get("values")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter_map(effort_token)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            return Some(values);
+        }
+    }
+    None
+}
+
+pub fn effort_token(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "none" => Some("none"),
+        "minimal" => Some("minimal"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
+        _ => None,
+    }
+}
+
+/// Keep `current` when the model still offers it. Otherwise the middle option,
+/// or nothing when the model has no dial.
+pub fn snap_effort(model_id: &str, current: &str) -> String {
+    match effort_levels(model_id) {
+        Some(levels) if levels.iter().any(|level| level == current) => current.to_string(),
+        Some(levels) => levels
+            .iter()
+            .find(|level| *level == "medium" || *level == "high")
+            .cloned()
+            .or_else(|| levels.first().cloned())
+            .unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +531,38 @@ mod tests {
         assert!(parse_listing(&json!({"error":"nope"})).is_empty());
         let dup = json!({"data":[{"id":"a"},{"id":" a "},{"id":""},{"id":"b"}]});
         assert_eq!(parse_listing(&dup), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn filter_is_a_case_insensitive_substring() {
+        let models = vec!["gpt-5.6".into(), "gpt-6-astra".into(), "gpt-5.5".into()];
+        assert_eq!(
+            filter_models(&models, "6-A"),
+            vec!["gpt-6-astra".to_string()]
+        );
+        assert_eq!(filter_models(&models, "gpt-6-luna"), Vec::<String>::new());
+        assert_eq!(filter_models(&models, "  ").len(), 3);
+    }
+
+    #[test]
+    fn effort_levels_follow_the_model() {
+        let catalog = json!({
+            "openai": {"models": {
+                "gpt-5.5": {"reasoning_options": [{"type": "effort", "values": ["low", "medium", "high", "xhigh"]}]},
+                "gpt-image": {"reasoning_options": []}
+            }}
+        });
+        assert_eq!(
+            effort_levels_from_catalog(&catalog, "gpt-5.5"),
+            Some(vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into()
+            ])
+        );
+        assert!(effort_levels_from_catalog(&catalog, "gpt-image").is_none());
+        assert!(effort_levels_from_catalog(&catalog, "missing").is_none());
     }
 
     #[test]

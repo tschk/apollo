@@ -88,6 +88,48 @@ async fn read_file(workspace: &Path, filename: &str, limit: usize) -> Option<Str
     }
 }
 
+/// A short note rebuilt every turn from the model, the mode, and the tools
+/// actually attached. Original wording: the shape (what you are, what you may
+/// do, what you just checked) is the useful part of other agents' prompts,
+/// not their sentences.
+pub fn situation_note(model: &str, mode: &str, tools: &[&str]) -> String {
+    let model = if model.trim().is_empty() {
+        "the selected model"
+    } else {
+        model.trim()
+    };
+    let mode_line = match mode {
+        "auto" => "Mode: auto. Short questions can be answered directly. Anything that depends on the workspace should be checked, then done.".to_string(),
+        "unattended" => "Mode: unattended. Finish the task without stopping for a plan. Stay inside the workspace.".to_string(),
+        "coding, plan first" => "Mode: coding, plan first. Say what you will change and wait. Do not edit or run mutating commands yet.".to_string(),
+        "coding" => "Mode: coding. Change the code, then say what changed and how you checked it.".to_string(),
+        "swarm" => "Mode: swarm. Split the work into pieces that can run side by side, then merge what came back.".to_string(),
+        other => format!("Mode: {other}. Follow that mode's limits."),
+    };
+    let tools_line = if tools.is_empty() {
+        "No tools are attached this turn. Answer from the conversation, and say so if the task needs a tool you do not have.".to_string()
+    } else {
+        let shown = tools
+            .iter()
+            .take(24)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let extra = tools.len().saturating_sub(24);
+        let more = if extra > 0 {
+            format!(" (+{extra} more)")
+        } else {
+            String::new()
+        };
+        format!(
+            "Tools on this turn: {shown}{more}. Use one when it can check a fact, read a file, or change the workspace. Do not invent a tool result, and do not tell the user to run a command you can run yourself."
+        )
+    };
+    format!(
+        "## This turn\nModel: {model}.\n{mode_line}\n{tools_line}\n\nLead with the result. When a tool was used, say what it showed. If you are unsure, look before you answer. Leave the user's files in their own style unless they asked for a change."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +159,17 @@ mod tests {
         assert!(prompt.contains("repository rules"));
         assert!(!prompt.contains("private user data"));
         assert!(!prompt.contains("private memory"));
+    }
+
+    #[test]
+    fn situation_note_tracks_model_mode_and_tools() {
+        let bare = situation_note("gpt-5.5", "auto", &[]);
+        let with_tools = situation_note("claude-sonnet-4-6", "coding", &["shell", "doctor"]);
+        assert!(bare.contains("gpt-5.5"));
+        assert!(bare.contains("No tools"));
+        assert!(with_tools.contains("claude-sonnet-4-6"));
+        assert!(with_tools.contains("shell, doctor"));
+        assert!(with_tools.contains("Mode: coding"));
+        assert_ne!(bare, with_tools);
     }
 }

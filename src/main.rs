@@ -644,6 +644,7 @@ async fn build_automation_agent(
 
     let mut runner = AgentRunner::new(provider, tools, memory, &system_prompt, cfg.model.clone())
         .with_config(cfg.agent.clone())
+        .with_config_path(config_path)
         .with_mode(agent_mode_from_permission_profile(
             &cfg.agent.permission_profile,
         ))
@@ -831,6 +832,7 @@ async fn main() -> anyhow::Result<()> {
             let mut runner =
                 AgentRunner::new(provider, tools, memory.clone(), &system_prompt, model)
                     .with_config(cfg.agent.clone())
+                    .with_config_path(config.as_str())
                     .with_mode(agent_mode_from_permission_profile(
                         &cfg.agent.permission_profile,
                     ))
@@ -1502,6 +1504,7 @@ async fn main() -> anyhow::Result<()> {
             let mut runner =
                 AgentRunner::new(provider, tools, memory.clone(), &system_prompt, model)
                     .with_config(cfg.agent.clone())
+                    .with_config_path(config.as_str())
                     .with_mode(agent_mode_from_permission_profile(
                         &cfg.agent.permission_profile,
                     ))

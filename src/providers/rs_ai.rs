@@ -214,9 +214,10 @@ impl Provider for RsAiProvider {
             options = options.with_reasoning_effort(effort);
             // Claude's request uses a thinking budget, not OpenAI's field.
             if matches!(self.provider_name.as_str(), "anthropic" | "claude") {
-                options = options.with_thinking(ThinkingConfig::Budget {
-                    tokens: thinking_budget(request.reasoning_effort.unwrap_or("medium")),
-                });
+                let tokens = thinking_budget(request.reasoning_effort.unwrap_or("medium"));
+                if tokens > 0 {
+                    options = options.with_thinking(ThinkingConfig::Budget { tokens });
+                }
             }
         }
 
@@ -279,19 +280,24 @@ fn map_generate_result(result: GenerateResult) -> anyhow::Result<ChatResponse> {
 }
 
 fn reasoning_effort(level: &str) -> Option<ReasoningEffort> {
+    // rs_ai has four levels. Finer catalog tokens fold into the nearest one;
+    // OpenAI-compatible requests still send the original string.
     match level {
-        "low" => Some(ReasoningEffort::Low),
+        "none" => Some(ReasoningEffort::None),
+        "minimal" | "low" => Some(ReasoningEffort::Low),
         "medium" => Some(ReasoningEffort::Medium),
-        "high" | "xhigh" => Some(ReasoningEffort::High),
+        "high" | "xhigh" | "max" => Some(ReasoningEffort::High),
         _ => None,
     }
 }
 
 fn thinking_budget(level: &str) -> u32 {
     match level {
+        "none" => 0,
+        "minimal" => 1_024,
         "low" => 2_048,
         "high" => 16_384,
-        "xhigh" => 32_000,
+        "xhigh" | "max" => 32_000,
         _ => 8_192,
     }
 }

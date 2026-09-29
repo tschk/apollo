@@ -11,7 +11,9 @@ use std::sync::mpsc::{channel, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crepuscularity_gpui::prelude::*;
-use gpui::{AnyElement, ClickEvent, MouseButton, MouseDownEvent, SharedString};
+use gpui::{
+    ease_out_quint, Animation, AnyElement, ClickEvent, MouseButton, MouseDownEvent, SharedString,
+};
 
 use crate::agent::{self, AgentEvent};
 use crate::models::{self, ModelList};
@@ -80,6 +82,8 @@ pub(crate) struct PickerState {
     note: Option<String>,
     /// Bumped per fetch so a slow, stale answer is dropped.
     gen: u64,
+    /// Typed filter. A non-match is kept as a custom model id.
+    pub(crate) query: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,12 +269,9 @@ impl ApolloView {
             c["agent"]["reasoning_effort"] = serde_json::json!(effort);
         }) {
             Ok(_) => {
-                if let Some(dir) = dir {
-                    std::thread::spawn(move || {
-                        let _ = agent::ensure_daemon(&dir);
-                    });
-                }
-                format!("effort set to {effort} · the agent is restarting")
+                let _ = setup::write_dial(&path, "main", None, Some(effort));
+                let _ = dir;
+                format!("effort set to {effort} · next message")
             }
             Err(e) => e,
         };
@@ -279,9 +280,16 @@ impl ApolloView {
 
     fn effort_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.current_effort();
-        let chips = setup::EFFORTS.iter().enumerate().map(|(i, (id, label))| {
-            let on = current == *id;
-            let id_owned = (*id).to_string();
+        let Some(levels) = models::effort_levels(&self.model) else {
+            return div()
+                .text_xs()
+                .text_color(rgb(GHOST))
+                .child("this model has no effort dial")
+                .into_any_element();
+        };
+        let chips = levels.iter().enumerate().map(|(i, level)| {
+            let on = current == *level;
+            let id_owned = level.clone();
             div()
                 .id(("settings-effort", i))
                 .px_3()
@@ -294,7 +302,7 @@ impl ApolloView {
                 .text_color(rgb(if on { ACCENT } else { SOFT }))
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(SURFACE)))
-                .child(*label)
+                .child(SharedString::from(level.clone()))
                 .on_click(
                     cx.listener(move |view, _: &ClickEvent, _, cx| view.set_effort(&id_owned, cx)),
                 )
@@ -308,7 +316,7 @@ impl ApolloView {
                 div()
                     .text_xs()
                     .text_color(rgb(GHOST))
-                    .child("how hard the model thinks. sent with every request."),
+                    .child("only the levels this model offers. the next message uses it."),
             )
             .into_any_element()
     }
@@ -525,6 +533,7 @@ impl ApolloView {
             loading: false,
             note: None,
             gen: 0,
+            query: String::new(),
         });
         self.refresh_picker_models(cx);
         cx.notify();
@@ -602,6 +611,44 @@ impl ApolloView {
     /// Write the picked model to apollo.json. Picking on another provider
     /// also switches `provider.name` and `provider.base_url`.
     fn pick_model(&mut self, model: String, cx: &mut Context<Self>) {
+        if let Some(role) = self.dial.take() {
+            let path = self.instance.config_path();
+            let current = setup::read_dials(&path, &self.model)
+                .into_iter()
+                .nth(match role {
+                    "oracle" => 0,
+                    "subagents" => 2,
+                    _ => 1,
+                })
+                .map(|dial| dial.effort)
+                .unwrap_or_default();
+            let effort = models::snap_effort(&model, &current);
+            self.notice = match setup::write_dial(&path, role, Some(&model), Some(&effort)) {
+                Ok(_) => {
+                    if role == "main" {
+                        self.model = model.clone();
+                        self.instance.model = model.clone();
+                        self.state.upsert(self.instance.clone());
+                        let _ = self.state.save();
+                        format!("main → {model} · next message")
+                    } else if role == "oracle" {
+                        let dir = path.parent().map(|p| p.to_path_buf());
+                        if let Some(dir) = dir {
+                            std::thread::spawn(move || {
+                                let _ = agent::ensure_daemon(&dir);
+                            });
+                        }
+                        format!("oracle → {model} · fast model, after the agent restarts")
+                    } else {
+                        format!("subagents → {model} · stored. the engine has no separate subagent runner yet")
+                    }
+                }
+                Err(e) => e,
+            };
+            self.picker = None;
+            cx.notify();
+            return;
+        }
         let (provider, is_current) = match self.picker.as_ref() {
             Some(picker) => match picker.rail.get(picker.highlighted) {
                 // Dimmed providers are not switchable.
@@ -627,7 +674,17 @@ impl ApolloView {
                 c["provider"]["base_url"] =
                     base_url.map_or(serde_json::Value::Null, |u| serde_json::json!(u));
             }
-            c["model"] = serde_json::json!(model_write);
+            c["model"] = serde_json::json!(model_write.clone());
+            if !c["agent"].is_object() {
+                c["agent"] = serde_json::json!({});
+            }
+            if !c["agent"]["roles"].is_object() {
+                c["agent"]["roles"] = serde_json::json!({});
+            }
+            if !c["agent"]["roles"]["main"].is_object() {
+                c["agent"]["roles"]["main"] = serde_json::json!({});
+            }
+            c["agent"]["roles"]["main"]["model"] = serde_json::json!(model_write);
         });
         match result {
             Ok(_) => {
@@ -688,6 +745,104 @@ impl ApolloView {
             .into_any_element()
     }
 
+    fn chat_dock(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(self.role_dials(cx))
+            .child(self.composer(cx))
+            .into_any_element()
+    }
+
+    fn role_dials(&self, cx: &mut Context<Self>) -> AnyElement {
+        let path = self.instance.config_path();
+        let dials = setup::read_dials(&path, &self.model);
+        let roles = ["oracle", "main", "subagents"];
+        let rows = roles.into_iter().enumerate().map(|(i, role)| {
+            let dial = &dials[i];
+            let levels = models::effort_levels(&dial.model).unwrap_or_default();
+            let model_label = if dial.model.is_empty() {
+                "model".to_string()
+            } else {
+                dial.model.clone()
+            };
+            let chips = levels.into_iter().enumerate().map(|(j, level)| {
+                let on = dial.effort == level;
+                let level_owned = level.clone();
+                div()
+                    .id(("dial-effort", i * 8 + j))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(if on { MUTED } else { SURFACE_2 }))
+                    .text_xs()
+                    .text_color(rgb(if on { ACCENT } else { SOFT }))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(SURFACE)))
+                    .child(SharedString::from(level))
+                    .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                        let path = view.instance.config_path();
+                        view.notice = setup::write_dial(&path, role, None, Some(&level_owned))
+                            .map(|_| format!("{role} effort → {level_owned}"))
+                            .unwrap_or_else(|e| e);
+                        cx.notify();
+                    }))
+            });
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(72.))
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(role),
+                )
+                .child(
+                    div()
+                        .id(("dial-model", i))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(SURFACE_2))
+                        .text_xs()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE)))
+                        .child(SharedString::from(model_label))
+                        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            view.dial = Some(role);
+                            view.open_picker(cx);
+                        })),
+                )
+                .children(chips)
+        });
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child("main is this chat. oracle is the fast model. subagents are stored."),
+            )
+            .children(rows)
+            .with_animation(
+                "role-dials",
+                Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+                |el, delta| el.opacity(0.4 + 0.6 * delta),
+            )
+            .into_any_element()
+    }
+
     fn composer(&self, cx: &mut Context<Self>) -> AnyElement {
         let cursor = blink_cursor(self.cursor_start);
         let empty = self.draft.is_empty();
@@ -737,11 +892,12 @@ impl ApolloView {
 
     fn transcript(&self) -> impl IntoElement {
         let cursor = blink_cursor(self.cursor_start);
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .children(self.entries.iter().map(|entry| entry.view(cursor)))
+        div().flex().flex_col().gap_4().children(
+            self.entries
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| entry.view(cursor, i)),
+        )
     }
 
     fn transcript_pane(&self) -> AnyElement {
@@ -888,6 +1044,11 @@ impl ApolloView {
                     .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
                         view.new_instance(window, cx)
                     })),
+            )
+            .with_animation(
+                "instance-switcher",
+                Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
+                |el, delta| el.opacity(0.4 + 0.6 * delta),
             )
             .into_any_element()
     }
@@ -1392,11 +1553,16 @@ impl ApolloView {
                 String::new(),
             )
         } else {
-            let models: Vec<AnyElement> = picker
-                .models
-                .as_ref()
-                .map(|m| m.models.clone())
-                .unwrap_or_default()
+            let query = picker.query.clone();
+            let matched = models::filter_models(
+                &picker
+                    .models
+                    .as_ref()
+                    .map(|m| m.models.clone())
+                    .unwrap_or_default(),
+                &query,
+            );
+            let mut models: Vec<AnyElement> = matched
                 .into_iter()
                 .enumerate()
                 .map(|(i, m)| {
@@ -1420,6 +1586,26 @@ impl ApolloView {
                         .into_any_element()
                 })
                 .collect();
+            if models.is_empty() && !query.trim().is_empty() {
+                let custom = query.trim().to_string();
+                models.push(
+                    div()
+                        .id("picker-custom")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(ACCENT))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(SURFACE_2)))
+                        .child(SharedString::from(format!("use {custom}")))
+                        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            view.pick_model(custom.clone(), cx)
+                        }))
+                        .into_any_element(),
+                );
+            }
             let footer = if picker.loading {
                 "fetching models…".to_string()
             } else {
@@ -1483,8 +1669,13 @@ impl ApolloView {
                                     .text_sm()
                                     .text_color(rgb(TEXT))
                                     .child(SharedString::from(format!(
-                                        "model · {}",
-                                        current_provider.label
+                                        "model · {}{}",
+                                        current_provider.label,
+                                        if picker.query.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(" · {}", picker.query)
+                                        }
                                     ))),
                             )
                             .child(div().flex_1())
@@ -1542,6 +1733,11 @@ impl ApolloView {
                             .child(SharedString::from(format!(
                                 "{footer} · written to apollo.json · applies next turn"
                             ))),
+                    )
+                    .with_animation(
+                        "model-picker",
+                        Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
+                        |el, delta| el.opacity(0.55 + 0.45 * delta),
                     ),
             )
             .into_any_element()
@@ -1854,7 +2050,7 @@ impl ApolloView {
             .child(top)
             .child(body)
             .when(!settings_open && !profile_open, |d| {
-                d.child(div().w_full().px_8().pt_3().child(self.composer(cx)))
+                d.child(div().w_full().px_8().pt_3().child(self.chat_dock(cx)))
             })
             .child(
                 div()
@@ -1874,9 +2070,10 @@ impl ApolloView {
                             .text_color(rgb(MUTED))
                             .hover(|s| s.text_color(rgb(TEXT)))
                             .child(SharedString::from(self.model.clone()))
-                            .on_click(
-                                cx.listener(|view, _: &ClickEvent, _, cx| view.open_picker(cx)),
-                            ),
+                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                view.dial = None;
+                                view.open_picker(cx);
+                            })),
                     )
                     .child(
                         div()
@@ -2158,7 +2355,7 @@ impl ApolloView {
                 .into_any_element(),
         };
         let composer = (self.panel == Panel::Chat)
-            .then(|| div().w_full().px_6().pt_3().child(self.composer(cx)));
+            .then(|| div().w_full().px_6().pt_3().child(self.chat_dock(cx)));
         let status = div()
             .w_full()
             .mt_3()

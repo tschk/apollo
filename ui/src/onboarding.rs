@@ -13,7 +13,10 @@ use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 use crepuscularity_gpui::prelude::*;
-use gpui::{relative, AnyElement, ClickEvent, KeyDownEvent, PathPromptOptions, SharedString};
+use gpui::{
+    ease_out_quint, relative, Animation, AnyElement, ClickEvent, KeyDownEvent, PathPromptOptions,
+    SharedString,
+};
 
 use crate::models::{self, ModelList};
 use crate::oauth::{OAuthKind, Support};
@@ -325,6 +328,16 @@ impl OnboardingView {
         }
     }
 
+    fn reveal_model_menu(&mut self) {
+        if self
+            .models
+            .as_ref()
+            .is_some_and(|list| !list.models.is_empty())
+        {
+            self.model_menu = true;
+        }
+    }
+
     fn step_index(&self) -> usize {
         self.steps()
             .iter()
@@ -432,6 +445,7 @@ impl OnboardingView {
                 if self.model.trim().is_empty() {
                     self.model = self.provider.default_model.to_string();
                 }
+                self.effort = models::snap_effort(&self.model, &self.effort);
                 self.go(Step::Workspace, cx)
             }
             Step::Workspace => {
@@ -996,6 +1010,7 @@ impl OnboardingView {
                     }
                     Field::Model => {
                         self.model.pop();
+                        self.reveal_model_menu();
                     }
                     Field::Workspace => {
                         self.workspace.pop();
@@ -1050,7 +1065,10 @@ impl OnboardingView {
             Field::ApiKey => self.api_key.push_str(&compact()),
             Field::BaseUrl => self.base_url.push_str(&compact()),
             Field::CustomName => self.custom_name.push_str(&text),
-            Field::Model => self.model.push_str(text.trim()),
+            Field::Model => {
+                self.model.push_str(text.trim());
+                self.reveal_model_menu();
+            }
             Field::Workspace => self.workspace.push_str(&text),
             Field::Name => self.name.push_str(&text),
             Field::Instructions => self.instructions.push_str(&text),
@@ -1390,13 +1408,29 @@ impl OnboardingView {
             self.provider.default_model.to_string()
         };
         let field = self.text_field("model", Field::Model, self.model.clone(), &placeholder, cx);
-        let count = self.models.as_ref().map_or(0, |m| m.models.len());
+        let all = self
+            .models
+            .as_ref()
+            .map(|m| m.models.clone())
+            .unwrap_or_default();
+        let shown = models::filter_models(&all, &self.model);
+        let count = all.len();
+        let visible = if self.model.trim().is_empty() {
+            count
+        } else {
+            shown.len()
+        };
         let picker_label = if self.models_loading && count == 0 {
             "loading…".to_string()
         } else if self.models_loading {
             format!("{count} models · refreshing")
         } else if count == 0 {
             "no list".to_string()
+        } else if !self.model.trim().is_empty() {
+            format!(
+                "{visible} match {}",
+                if self.model_menu { "▴" } else { "▾" }
+            )
         } else {
             format!("{count} models {}", if self.model_menu { "▴" } else { "▾" })
         };
@@ -1444,11 +1478,46 @@ impl OnboardingView {
             .child(refresh);
 
         let menu = (self.model_menu && count > 0).then(|| {
-            let models = self
-                .models
-                .as_ref()
-                .map(|m| m.models.clone())
-                .unwrap_or_default();
+            let rows: Vec<AnyElement> = if shown.is_empty() {
+                vec![div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child(SharedString::from(format!(
+                        "no match — {} stays the model id",
+                        self.model.trim()
+                    )))
+                    .into_any_element()]
+            } else {
+                shown
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let selected = m == self.model.trim();
+                        let pick = m.clone();
+                        div()
+                            .id(("model-option", i))
+                            .w_full()
+                            .px_3()
+                            .py(px(5.))
+                            .text_sm()
+                            .text_color(rgb(if selected { ACCENT } else { TEXT }))
+                            .bg(rgb(if selected { SURFACE_2 } else { SURFACE }))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(SURFACE_2)))
+                            .child(SharedString::from(m))
+                            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                                view.model = pick.clone();
+                                view.effort = models::snap_effort(&pick, &view.effort);
+                                view.model_menu = false;
+                                view.error.clear();
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    })
+                    .collect()
+            };
             div()
                 .id("model-list")
                 .w_full()
@@ -1461,27 +1530,13 @@ impl OnboardingView {
                 .border_1()
                 .border_color(rgb(SURFACE_2))
                 .bg(rgb(SURFACE))
-                .children(models.into_iter().enumerate().map(|(i, m)| {
-                    let selected = m == self.model.trim();
-                    let pick = m.clone();
-                    div()
-                        .id(("model-option", i))
-                        .w_full()
-                        .px_3()
-                        .py(px(5.))
-                        .text_sm()
-                        .text_color(rgb(if selected { ACCENT } else { TEXT }))
-                        .bg(rgb(if selected { SURFACE_2 } else { SURFACE }))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(SURFACE_2)))
-                        .child(SharedString::from(m))
-                        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                            view.model = pick.clone();
-                            view.model_menu = false;
-                            view.error.clear();
-                            cx.notify();
-                        }))
-                }))
+                .children(rows)
+                .with_animation(
+                    "model-list",
+                    Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
+                    |el, delta| el.opacity(0.35 + 0.65 * delta),
+                )
+                .into_any_element()
         });
 
         let note = if self.models_loading {
@@ -1527,9 +1582,12 @@ impl OnboardingView {
     }
 
     fn effort_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let chips = setup::EFFORTS.iter().enumerate().map(|(i, (id, label))| {
-            let on = self.effort == *id;
-            let id_owned = (*id).to_string();
+        let Some(levels) = models::effort_levels(&self.model) else {
+            return div().into_any_element();
+        };
+        let chips = levels.iter().enumerate().map(|(i, level)| {
+            let on = self.effort == *level;
+            let id_owned = level.clone();
             div()
                 .id(("effort", i))
                 .px_3()
@@ -1542,7 +1600,7 @@ impl OnboardingView {
                 .text_color(rgb(if on { ACCENT } else { SOFT }))
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(SURFACE)))
-                .child(*label)
+                .child(SharedString::from(level.clone()))
                 .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                     view.effort = id_owned.clone();
                     cx.notify();
@@ -1555,12 +1613,23 @@ impl OnboardingView {
             .flex_col()
             .gap_1p5()
             .child(div().text_xs().text_color(rgb(MUTED)).child("effort"))
-            .child(div().flex().flex_row().gap_2().children(chips))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .children(chips)
+                    .with_animation(
+                        SharedString::from(format!("effort-{}", self.model)),
+                        Animation::new(Duration::from_millis(140)).with_easing(ease_out_quint()),
+                        |el, delta| el.opacity(0.4 + 0.6 * delta),
+                    ),
+            )
             .child(
                 div()
                     .text_xs()
                     .text_color(rgb(GHOST))
-                    .child("how hard the model thinks. sent with every request."),
+                    .child("only the levels this model offers. sent with every request."),
             )
             .into_any_element()
     }
@@ -2306,6 +2375,16 @@ impl Render for OnboardingView {
                 view_file!("views/done.crepus").into_any_element()
             }
         };
+        let step_ix = self.step_index();
+        let body = div()
+            .w_full()
+            .child(body)
+            .with_animation(
+                ("onboarding-step", step_ix),
+                Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+                |el, delta| el.opacity(0.45 + 0.55 * delta),
+            )
+            .into_any_element();
 
         view_file!("views/onboarding.crepus").track_focus(&self.focus)
     }

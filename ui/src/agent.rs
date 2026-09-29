@@ -266,6 +266,38 @@ pub fn on_path(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The agent binary beside this app, on `PATH`, or built from this checkout.
+pub fn ensure_apollo_bin() -> Result<std::path::PathBuf, String> {
+    if let Some(path) = find_apollo_bin() {
+        return Ok(path);
+    }
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = if root.join("src").join("main.rs").is_file() {
+        root
+    } else if root
+        .parent()
+        .is_some_and(|parent| parent.join("src").join("main.rs").is_file())
+    {
+        root.parent().unwrap().to_path_buf()
+    } else {
+        return Err("couldn't start the agent".into());
+    };
+    let output = std::process::Command::new("cargo")
+        .args(["build", "-p", "apollo", "--bin", "apollo"])
+        .current_dir(&root)
+        .output()
+        .map_err(|_| "couldn't start the agent".to_string())?;
+    if !output.status.success() {
+        return Err("couldn't start the agent".into());
+    }
+    find_apollo_bin()
+        .or_else(|| {
+            let built = root.join("target").join("debug").join(APOLLO_EXE);
+            built.is_file().then_some(built)
+        })
+        .ok_or_else(|| "couldn't start the agent".into())
+}
+
 pub fn find_apollo_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -424,10 +456,7 @@ pub fn ensure_daemon(config_dir: &std::path::Path) -> Result<(), String> {
     if agent_online() {
         shutdown_daemon();
     }
-    let apollo = find_apollo_bin().ok_or_else(|| {
-        "apollo binary not found next to apollo-ui or on PATH — the app starts it as the agent"
-            .to_string()
-    })?;
+    let apollo = ensure_apollo_bin()?;
     let workspace = workspace_of(&config).unwrap_or_else(|| config_dir.to_path_buf());
     let log_path = daemon_log_path();
     if let Some(dir) = log_path.parent() {

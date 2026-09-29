@@ -439,6 +439,7 @@ pub fn write_setup(choices: &SetupChoices) -> Result<WrittenSetup, String> {
 }
 
 /// rx4's reasoning levels. The label is what the desktop shows.
+#[allow(dead_code)]
 pub const EFFORTS: &[(&str, &str)] = &[
     ("low", "low"),
     ("medium", "medium"),
@@ -448,12 +449,105 @@ pub const EFFORTS: &[(&str, &str)] = &[
 
 pub fn normalize_effort(value: &str) -> Option<&'static str> {
     match value.trim() {
+        "none" => Some("none"),
+        "minimal" => Some("minimal"),
         "low" => Some("low"),
         "medium" => Some("medium"),
         "high" => Some("high"),
-        "xhigh" | "max" => Some("xhigh"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dial {
+    pub model: String,
+    pub effort: String,
+}
+
+/// Oracle, main, subagents. Empty role models fall back to the chat model,
+/// except oracle, which prefers `agent.fast_model`.
+pub fn read_dials(path: &std::path::Path, fallback_model: &str) -> [Dial; 3] {
+    let config = read_config(path);
+    let agent = &config["agent"];
+    let roles = &agent["roles"];
+    let fast = agent["fast_model"].as_str().unwrap_or("");
+    let pick = |role: &str, fallback: &str| {
+        roles[role]["model"]
+            .as_str()
+            .filter(|model| !model.is_empty())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    let effort = |role: &str, fallback: &str| {
+        roles[role]["effort"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    let main_effort = agent["reasoning_effort"].as_str().unwrap_or("medium");
+    [
+        Dial {
+            model: pick(
+                "oracle",
+                if fast.is_empty() {
+                    fallback_model
+                } else {
+                    fast
+                },
+            ),
+            effort: effort("oracle", "low"),
+        },
+        Dial {
+            model: pick("main", fallback_model),
+            effort: effort("main", main_effort),
+        },
+        Dial {
+            model: pick("subagents", fallback_model),
+            effort: effort("subagents", "low"),
+        },
+    ]
+}
+
+/// Store one role. Main also updates the chat model and `reasoning_effort`.
+/// Oracle updates `fast_model`. Subagents update `heavy_model` (stored; the
+/// engine has no separate subagent runner).
+pub fn write_dial(
+    path: &std::path::Path,
+    role: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    update_config(path, |config| {
+        if !config["agent"].is_object() {
+            config["agent"] = serde_json::json!({});
+        }
+        if !config["agent"]["roles"].is_object() {
+            config["agent"]["roles"] = serde_json::json!({});
+        }
+        if !config["agent"]["roles"][role].is_object() {
+            config["agent"]["roles"][role] = serde_json::json!({});
+        }
+        if let Some(model) = model {
+            config["agent"]["roles"][role]["model"] = serde_json::json!(model);
+            if role == "main" {
+                config["model"] = serde_json::json!(model);
+            } else if role == "oracle" {
+                config["agent"]["fast_model"] = serde_json::json!(model);
+            } else if role == "subagents" {
+                config["agent"]["heavy_model"] = serde_json::json!(model);
+            }
+        }
+        if let Some(effort) = effort {
+            config["agent"]["roles"][role]["effort"] = serde_json::json!(effort);
+            if role == "main" {
+                config["agent"]["reasoning_effort"] = serde_json::json!(effort);
+            }
+        }
+    })
+    .map(|_| ())
 }
 
 /// Fold the choices into an apollo.json value. Mirrors `apollo init` and
@@ -493,6 +587,14 @@ pub fn apply_choices(config: &mut serde_json::Value, choices: &SetupChoices, wor
     apply_profile(config, choices.profile.id);
     if let Some(agent) = config.get_mut("agent").and_then(|a| a.as_object_mut()) {
         agent.insert("reasoning_effort".into(), json!(effort));
+        agent.insert(
+            "roles".into(),
+            json!({
+                "main": {"model": choices.resolved_model(), "effort": effort},
+                "oracle": {"model": "", "effort": "low"},
+                "subagents": {"model": "", "effort": "low"}
+            }),
+        );
     }
 }
 

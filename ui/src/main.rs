@@ -28,7 +28,10 @@ use std::time::{Duration, Instant};
 
 use agent::AgentEvent;
 use crepuscularity_gpui::prelude::*;
-use gpui::{actions, bounds, point, px, size, Application, ClickEvent, KeyDownEvent, SharedString};
+use gpui::{
+    actions, bounds, ease_out_quint, point, px, size, Animation, Application, ClickEvent,
+    KeyDownEvent, SharedString,
+};
 
 actions!(
     apollo_ui,
@@ -86,8 +89,8 @@ enum Entry {
 }
 
 impl Entry {
-    fn view(&self, cursor: &'static str) -> impl IntoElement {
-        match self {
+    fn view(&self, cursor: &'static str, index: usize) -> impl IntoElement {
+        let row = match self {
             Entry::User(text) => div()
                 .flex()
                 .flex_col()
@@ -172,7 +175,12 @@ impl Entry {
                         .text_color(rgb(ERR))
                         .child(SharedString::from(text.clone())),
                 ),
-        }
+        };
+        row.with_animation(
+            ("entry", index),
+            Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+            |el, delta| el.opacity(0.45 + 0.55 * delta),
+        )
     }
 }
 
@@ -210,6 +218,8 @@ struct ApolloView {
     roster_menu: Option<String>,
     /// Model picker overlay state, when open.
     picker: Option<shell::PickerState>,
+    /// Which role dial the picker is writing, if it was opened from one.
+    dial: Option<&'static str>,
 }
 
 impl ApolloView {
@@ -273,6 +283,7 @@ impl ApolloView {
             edit_buf: String::new(),
             roster_menu: None,
             picker: None,
+            dial: None,
         };
         view.supervise_agent(config_dir, cx);
         view
@@ -345,8 +356,23 @@ impl ApolloView {
         if self.picker.is_some() {
             if key == "escape" {
                 self.picker = None;
-                cx.notify();
+                self.dial = None;
+            } else if key == "backspace" {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.query.pop();
+                }
+            } else if let Some(ch) = stroke.key_char.as_deref() {
+                if !ch.is_empty() && !ch.chars().any(char::is_control) {
+                    if let Some(picker) = self.picker.as_mut() {
+                        picker.query.push_str(ch);
+                    }
+                }
+            } else if key == "space" {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.query.push(' ');
+                }
             }
+            cx.notify();
             return;
         }
 

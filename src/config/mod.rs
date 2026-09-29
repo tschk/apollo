@@ -46,6 +46,75 @@ pub struct EmbeddingsConfig {
     pub base_url: Option<String>,
 }
 
+/// Model and effort for one role. An empty model means "the instance default".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RoleChoice {
+    pub model: String,
+    pub effort: String,
+}
+
+impl Default for RoleChoice {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            effort: default_reasoning_effort(),
+        }
+    }
+}
+
+/// A models.dev effort token, or nothing when the string is not one.
+pub fn recognized_effort(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "none" => Some("none"),
+        "minimal" => Some("minimal"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
+        _ => None,
+    }
+}
+
+impl RoleChoice {
+    pub fn effort_level(&self) -> Option<&'static str> {
+        recognized_effort(&self.effort)
+    }
+}
+
+/// How the three roles are asked to run.
+///
+/// The main dial is what a chat turn uses (model + effort), re-read each
+/// turn. Oracle is copied onto `fast_model`. Subagents are stored and copied
+/// onto `heavy_model`; rx4 does not run a separate subagent model yet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RoleDials {
+    pub oracle: RoleChoice,
+    pub main: RoleChoice,
+    pub subagents: RoleChoice,
+}
+
+impl Default for RoleDials {
+    fn default() -> Self {
+        Self {
+            oracle: RoleChoice {
+                model: String::new(),
+                effort: "low".into(),
+            },
+            main: RoleChoice {
+                model: String::new(),
+                effort: default_reasoning_effort(),
+            },
+            subagents: RoleChoice {
+                model: String::new(),
+                effort: "low".into(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
@@ -76,6 +145,9 @@ pub struct AgentConfig {
     /// rx4's values: `low`, `medium`, `high`, `xhigh`. Empty sends nothing.
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: String,
+    /// Per-role model and effort. Missing on old configs.
+    #[serde(default)]
+    pub roles: RoleDials,
 }
 
 fn default_reasoning_effort() -> String {
@@ -96,6 +168,7 @@ impl Default for AgentConfig {
             auto_compact_after: 0,
             trajectory_enabled: true,
             reasoning_effort: default_reasoning_effort(),
+            roles: RoleDials::default(),
         }
     }
 }
@@ -103,13 +176,15 @@ impl Default for AgentConfig {
 impl AgentConfig {
     /// A recognised effort, or nothing when the config asks not to send one.
     pub fn reasoning_effort_level(&self) -> Option<&'static str> {
-        match self.reasoning_effort.trim() {
-            "low" => Some("low"),
-            "medium" => Some("medium"),
-            "high" => Some("high"),
-            "xhigh" => Some("xhigh"),
-            _ => None,
-        }
+        recognized_effort(&self.reasoning_effort)
+    }
+
+    /// Effort for the chat turn: the main dial, then `reasoning_effort`.
+    pub fn main_effort(&self) -> Option<&'static str> {
+        self.roles
+            .main
+            .effort_level()
+            .or_else(|| self.reasoning_effort_level())
     }
 }
 
@@ -668,6 +743,14 @@ mod config_path_tests {
         assert_eq!(cfg.reasoning_effort_level(), Some("xhigh"));
         let cfg: AgentConfig = serde_json::from_str(r#"{"reasoning_effort":""}"#).unwrap();
         assert_eq!(cfg.reasoning_effort_level(), None);
+        assert_eq!(cfg.main_effort(), Some("medium"));
+        let cfg: AgentConfig = serde_json::from_str(
+            r#"{"reasoning_effort":"high","roles":{"main":{"effort":"low"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.main_effort(), Some("low"));
+        assert_eq!(cfg.roles.oracle.effort, "low");
+        assert!(cfg.roles.subagents.model.is_empty());
     }
 
     #[test]
