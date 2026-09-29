@@ -5,4 +5,4 @@ source: https://github.com/tschk/apollo
 
 the desktop app (apollo-ui) is crepuscularity + gpui. it onboards a model,
 a workspace, and permissions, then opens simple (chat) or advanced
-(instances, tools, logs). the rotary (rx4) engine runs on the machine.
+(instances, tools, logs).

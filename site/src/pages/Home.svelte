@@ -98,7 +98,6 @@
         <p class="lede">
           a local-first agent host. the desktop app is the desk: onboarding,
           instances, and a simple or advanced surface on crepuscularity and gpui.
-          the rotary engine stays on the machine.
         </p>
         <div class="actions">
           <LetterSwap solid label="read the source" href="https://github.com/tschk/apollo" />
@@ -106,7 +105,6 @@
         </div>
         <p class="meta-row">
           <span>apollo-ui</span>
-          <span>engine rx4</span>
           <span>mpl-2.0</span>
           <span>tsc.hk</span>
         </p>
