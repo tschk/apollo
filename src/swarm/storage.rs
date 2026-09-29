@@ -779,6 +779,38 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn test_rockscache_get_comprehensive() {
+        let dir = tempdir().unwrap();
+        let cache = RocksCache::new(dir.path()).expect("Failed to create RocksCache");
+
+        let cfs = vec!["embeddings", "chunks", "sticker_cache", "agent_cache"];
+
+        for cf in cfs {
+            // Test non-existent key
+            let get_res = cache.get(cf, b"non_existent").expect("Failed to get");
+            assert_eq!(get_res, None);
+
+            // Test empty key (non-existent)
+            let get_res = cache.get(cf, b"").expect("Failed to get");
+            assert_eq!(get_res, None);
+
+            // Test put and get empty key
+            cache
+                .put(cf, b"", b"empty_key_value")
+                .expect("Failed to put empty key");
+            let get_res = cache.get(cf, b"").expect("Failed to get");
+            assert_eq!(get_res, Some(b"empty_key_value".to_vec()));
+
+            // Test put and get normal key
+            cache
+                .put(cf, b"normal_key", b"normal_value")
+                .expect("Failed to put");
+            let get_res = cache.get(cf, b"normal_key").expect("Failed to get");
+            assert_eq!(get_res, Some(b"normal_value".to_vec()));
+        }
+    }
+
+    #[test]
     fn test_rockscache_put_get_delete() {
         let dir = tempdir().unwrap();
         let cache = RocksCache::new(dir.path()).expect("Failed to create RocksCache");
