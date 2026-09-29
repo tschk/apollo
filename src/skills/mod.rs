@@ -257,10 +257,21 @@ pub fn expand_inline_shell(content: &str, cwd: Option<&Path>, _timeout_secs: u64
                 return String::new();
             }
 
-            let mut cmd_obj = std::process::Command::new("sh");
+            let parts = match shlex::split(cmd) {
+                Some(p) => p,
+                None => return "[inline-shell error: invalid command quoting]".to_string(),
+            };
+
+            if parts.is_empty() {
+                return String::new();
+            }
+
+            let mut cmd_obj = std::process::Command::new(&parts[0]);
+            if parts.len() > 1 {
+                cmd_obj.args(&parts[1..]);
+            }
+
             cmd_obj
-                .arg("-c")
-                .arg(cmd)
                 .current_dir(cwd.unwrap_or(Path::new(".")))
                 .env_clear()
                 .envs(crate::tools::child_proc::child_env());
