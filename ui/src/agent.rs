@@ -248,7 +248,7 @@ fn ask_via_cli(prompt: &str) -> Result<String, String> {
 /// The CLI is the single implementation of `config`, `doctor` and friends —
 /// masking included — so the UI drives it rather than reimplementing it. This
 /// blocks on a child process, so callers must run it off the UI thread.
-#[allow(dead_code)]
+
 pub fn run_apollo(args: &[&str]) -> Result<String, String> {
     let apollo = find_apollo_bin().ok_or_else(|| {
         "apollo binary not found — install it, or put it next to apollo-tui".to_string()
@@ -275,7 +275,7 @@ pub fn run_apollo(args: &[&str]) -> Result<String, String> {
 }
 
 /// True when `name` resolves to a file on `PATH`.
-#[allow(dead_code)]
+
 pub fn on_path(name: &str) -> bool {
     std::env::var_os("PATH")
         .map(|path| {
@@ -307,7 +307,7 @@ fn find_apollo_bin() -> Option<std::path::PathBuf> {
 /// The server is the only place these are true: the local config file says
 /// what the agent started with, not what it is running now.
 #[derive(Debug, Clone, Default, PartialEq)]
-#[allow(dead_code)]
+
 pub struct AgentState {
     pub model: String,
     pub engine: String,
@@ -322,7 +322,7 @@ pub struct AgentState {
     pub message_count: u64,
 }
 
-#[allow(dead_code)]
+
 fn parse_state(value: &serde_json::Value) -> AgentState {
     let text = |key: &str| {
         value
@@ -350,7 +350,7 @@ fn parse_state(value: &serde_json::Value) -> AgentState {
     }
 }
 
-#[allow(dead_code)]
+
 fn blocking_client(timeout_ms: u64) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
@@ -358,7 +358,7 @@ fn blocking_client(timeout_ms: u64) -> Result<reqwest::blocking::Client, String>
         .map_err(|e| e.to_string())
 }
 
-#[allow(dead_code)]
+
 fn authed(request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
     match auth_token() {
         Some(token) => request.bearer_auth(token),
@@ -367,7 +367,7 @@ fn authed(request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::Requ
 }
 
 /// Read the agent's live state. `None` when no agent is reachable.
-#[allow(dead_code)]
+
 pub fn fetch_state() -> Option<AgentState> {
     let url = format!("http://127.0.0.1:{}/v1/state", http_port());
     let response = authed(blocking_client(1500).ok()?.get(&url)).send().ok()?;
@@ -378,6 +378,21 @@ pub fn fetch_state() -> Option<AgentState> {
     Some(parse_state(&value))
 }
 
+/// Switch the running agent's model, returning its new state.
+
+pub fn set_model(model: &str) -> Result<AgentState, String> {
+    let url = format!("http://127.0.0.1:{}/v1/model", http_port());
+    let request = blocking_client(5000)?
+        .post(&url)
+        .json(&serde_json::json!({ "model": model }));
+    let response = authed(request).send().map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let value: serde_json::Value = response.json().map_err(|e| e.to_string())?;
+    Ok(parse_state(&value))
+}
+
 /// Ask the agent to clear a chat's stored history.
 ///
 /// `path` is `/v1/clear`. `/v1/compact` was removed rather than left as a
@@ -386,7 +401,7 @@ pub fn fetch_state() -> Option<AgentState> {
 ///
 /// On failure the server's own explanation is returned and shown as-is — the
 /// UI must not claim work that did not happen.
-#[allow(dead_code)]
+
 pub fn post_chat_action(path: &str, chat_id: &str) -> Result<String, String> {
     let url = format!("http://127.0.0.1:{}{}", http_port(), path);
     let request = blocking_client(30_000)?
