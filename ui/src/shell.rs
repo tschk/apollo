@@ -900,6 +900,129 @@ impl ApolloView {
         )
     }
 
+    /// True once someone has spoken. A status line alone is still the empty home.
+    fn has_conversation(&self) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                crate::Entry::User(_)
+                    | crate::Entry::Agent { .. }
+                    | crate::Entry::Tool { .. }
+                    | crate::Entry::Error(_)
+            )
+        })
+    }
+
+    /// First screen: a centered column, not a void with controls on the floor.
+    /// Chat guidance (a message column, an empty state that says what this
+    /// one does, a few starters, composer in a predictable place) puts the
+    /// composer mid-column until the first message, then docks it.
+    fn home_stage(&self, cx: &mut Context<Self>) -> AnyElement {
+        let column = if self.has_conversation() {
+            div()
+                .w_full()
+                .max_w(px(720.))
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(self.transcript_pane())
+                .child(div().w_full().pt_4().child(self.chat_dock(cx)))
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .max_w(px(560.))
+                .flex()
+                .flex_col()
+                .gap_5()
+                .child(self.empty_intro())
+                .child(self.starters(cx))
+                .child(self.role_dials(cx))
+                .child(self.composer(cx))
+                .with_animation(
+                    "empty-home",
+                    Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+                    |el, delta| el.opacity(0.45 + 0.55 * delta),
+                )
+                .into_any_element()
+        };
+        div()
+            .flex_1()
+            .w_full()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .px_8()
+            .when(self.has_conversation(), |d| d.justify_start())
+            .child(column)
+            .into_any_element()
+    }
+
+    fn empty_intro(&self) -> AnyElement {
+        let scope = if self.instance.everywhere {
+            "anywhere on this machine"
+        } else {
+            "this workspace"
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_lg()
+                    .text_color(rgb(TEXT))
+                    .child(SharedString::from(self.instance.name.clone())),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(SOFT))
+                    .child(SharedString::from(format!(
+                        "It can look at {scope}, run a check, and change files. Pick a start, or write your own."
+                    ))),
+            )
+            .into_any_element()
+    }
+
+    fn starters(&self, cx: &mut Context<Self>) -> AnyElement {
+        let prompts = [
+            ("Look around", "Look at this workspace and tell me what is here."),
+            ("Run a check", "Run doctor and summarize any issues."),
+            ("What can you use", "List your available tools, grouped by purpose."),
+        ];
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(prompts.into_iter().enumerate().map(|(i, (label, prompt))| {
+                let prompt = prompt.to_string();
+                div()
+                    .id(("starter", i))
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(SURFACE_2))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(SURFACE)))
+                    .child(div().text_sm().text_color(rgb(TEXT)).child(label))
+                    .child(div().text_xs().text_color(rgb(GHOST)).child("↵"))
+                    .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+                        view.use_prompt(&prompt, window, cx)
+                    }))
+            }))
+            .into_any_element()
+    }
+
     fn transcript_pane(&self) -> AnyElement {
         div()
             .flex_1()
@@ -2039,15 +2162,7 @@ impl ApolloView {
                 .child(self.profile_panel(cx))
                 .into_any_element()
         } else {
-            div()
-                .flex_1()
-                .w_full()
-                .min_h(px(0.))
-                .flex()
-                .flex_col()
-                .px_10()
-                .child(self.transcript_pane())
-                .into_any_element()
+            self.home_stage(cx)
         };
         div()
             .size_full()
@@ -2055,9 +2170,6 @@ impl ApolloView {
             .flex_col()
             .child(top)
             .child(body)
-            .when(!settings_open && !profile_open, |d| {
-                d.child(div().w_full().px_8().pt_3().child(self.chat_dock(cx)))
-            })
             .child(
                 div()
                     .w_full()
