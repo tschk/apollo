@@ -1,13 +1,7 @@
 {
+  "extends": "astro/tsconfigs/strict",
+  "include": [".astro/types.d.ts", "src", "scripts", "tests"],
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "skipLibCheck": true,
-    "noEmit": true,
-    "types": ["bun"],
-    "lib": ["ES2022", "DOM", "DOM.Iterable"]
-  },
-  "include": ["src", "build.ts", "scripts", "tests", "uno.config.ts"]
+    "types": ["bun"]
+  }
 }

@@ -1,24 +1,6 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "apollo-site",
-  // tsc.hk lives on this account (Undivisible), not Twenifyscale.
+  "name": "apollo",
   "account_id": "fc62a6e6528bec6d3d81c3bf8967ceeb",
-  "main": "dist/worker.js",
-  "compatibility_date": "2026-07-08",
-  "compatibility_flags": ["nodejs_compat"],
-  "observability": {
-    "enabled": true,
-    "head_sampling_rate": 1
-  },
-  "assets": {
-    "directory": "./dist/public",
-    "binding": "ASSETS",
-    "run_worker_first": ["/", "/404"]
-  },
-  "routes": [
-    {
-      "pattern": "apollo.tsc.hk",
-      "custom_domain": true
-    }
-  ]
+  "pages_build_output_dir": "./dist",
+  "compatibility_date": "2026-07-08"
 }
