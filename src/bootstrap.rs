@@ -47,15 +47,40 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
         crate::plugins::apply_workspace_manifest(&mut cfg, ws);
     }
 
-    if matches!(cfg.provider.name.as_str(), "anthropic" | "claude") {
-        cfg.provider.name = "chatgpt".to_string();
-        cfg.provider.api_key = None;
-        if cfg.model.starts_with("claude") {
-            cfg.model = "gpt-5.5".to_string();
+    // An explicit key for whatever provider the config names. This is how a
+    // custom OpenAI-compatible endpoint (`provider.name` not in the catalog,
+    // `provider.base_url` set) gets its key from `.env` instead of apollo.json.
+    // It runs before the ChatGPT-login and `OPENAI_API_KEY` probes because
+    // both of those *switch* the provider, which would silently discard the
+    // configured endpoint.
+    if cfg.provider.api_key.is_none() {
+        if let Some(key) = explicit_provider_key() {
+            cfg.provider.api_key = Some(key);
         }
     }
 
-    if cfg.provider.api_key.is_none() {
+    // A Claude config resolves its own credentials: `ANTHROPIC_API_KEY` for
+    // an API key, otherwise the shared OAuth store a Claude subscription
+    // login wrote. This must run before the ChatGPT-login and `OPENAI_API_KEY`
+    // probes and those must not fire for Claude — both switch the provider,
+    // and a Claude config without credentials has to stay Claude (and fail
+    // at request time) rather than silently become ChatGPT.
+    #[cfg(feature = "rs-ai")]
+    if cfg.provider.api_key.is_none() && is_anthropic(&cfg.provider.name) {
+        let key = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or_else(|| {
+                crate::providers::shared_credentials::load(rs_ai_oauth::OAuthProvider::Claude)
+                    .map(|(token, _, _)| token)
+            });
+        if let Some(key) = key {
+            cfg.provider.api_key = Some(key);
+        }
+    }
+
+    if cfg.provider.api_key.is_none() && !is_anthropic(&cfg.provider.name) {
         #[cfg(feature = "rs-ai")]
         if let Some((token, _, _)) =
             crate::providers::shared_credentials::load(rs_ai_oauth::OAuthProvider::ChatGpt)
@@ -65,7 +90,7 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
         }
     }
 
-    if cfg.provider.api_key.is_none() {
+    if cfg.provider.api_key.is_none() && !is_anthropic(&cfg.provider.name) {
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
             cfg.provider.name = "openai".to_string();
             cfg.provider.api_key = Some(key);
@@ -122,6 +147,22 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
     apply_default_model(&mut cfg);
 
     cfg
+}
+
+/// `APOLLO_PROVIDER_API_KEY`, when set to something non-blank.
+fn explicit_provider_key() -> Option<String> {
+    std::env::var("APOLLO_PROVIDER_API_KEY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The config named Anthropic/Claude, by either of its names.
+fn is_anthropic(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "anthropic" | "claude"
+    )
 }
 
 /// Fill in the model for the configured provider when none was chosen.
@@ -185,6 +226,14 @@ pub fn build_provider(cfg: &Config) -> Arc<dyn Provider> {
     match cfg.provider.name.as_str() {
         #[cfg(feature = "rs-ai")]
         "chatgpt" => Arc::new(CodexProvider::new(api_key)),
+        #[cfg(feature = "rs-ai")]
+        "anthropic" | "claude" => Arc::new(crate::providers::rs_ai::RsAiProvider::new(
+            "anthropic",
+            &cfg.model,
+            &api_key,
+            cfg.provider.base_url.clone(),
+            None,
+        )),
         #[cfg(feature = "provider-copilot")]
         "github-copilot" | "copilot" => {
             if let Ok(p) = crate::providers::copilot::CopilotProvider::from_openclaw() {
@@ -464,7 +513,7 @@ mod default_model_tests {
 
         let mut cfg = config_with("chatgpt", "");
         apply_default_model(&mut cfg);
-        assert_eq!(cfg.model, "gpt-5.5");
+        assert_eq!(cfg.model, "gpt-5.6");
     }
 
     #[test]
@@ -480,7 +529,7 @@ mod default_model_tests {
     fn whitespace_counts_as_unset() {
         let mut cfg = config_with("chatgpt", "   ");
         apply_default_model(&mut cfg);
-        assert_eq!(cfg.model, "gpt-5.5");
+        assert_eq!(cfg.model, "gpt-5.6");
     }
 
     #[test]
@@ -513,6 +562,166 @@ mod default_model_tests {
                 assert_eq!(catalog_env_key("xai"), None);
                 assert_eq!(catalog_env_key("groq"), None);
                 assert_eq!(catalog_env_key("not-a-provider"), None);
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod explicit_key_tests {
+    use super::*;
+
+    fn write_config(dir: &Path, json: &str) -> String {
+        let path = dir.join("apollo.json");
+        std::fs::write(&path, json).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn custom_endpoint_takes_its_key_from_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"provider":{"name":"custom","base_url":"https://llm.example/v1"},"model":"m1"}"#,
+        );
+        temp_env::with_vars(
+            [
+                ("APOLLO_PROVIDER_API_KEY", Some("sk-custom")),
+                // Must not win and flip the provider to OpenAI.
+                ("OPENAI_API_KEY", Some("sk-openai")),
+            ],
+            || {
+                let cfg = load_config_workspace(&path, None);
+                assert_eq!(cfg.provider.name, "custom");
+                assert_eq!(cfg.provider.api_key.as_deref(), Some("sk-custom"));
+                assert_eq!(
+                    cfg.provider.base_url.as_deref(),
+                    Some("https://llm.example/v1")
+                );
+                assert_eq!(cfg.model, "m1");
+            },
+        );
+    }
+
+    #[test]
+    fn a_key_in_the_config_is_not_overridden() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"provider":{"name":"custom","api_key":"from-file","base_url":"https://x/v1"}}"#,
+        );
+        temp_env::with_var("APOLLO_PROVIDER_API_KEY", Some("from-env"), || {
+            let cfg = load_config_workspace(&path, None);
+            assert_eq!(cfg.provider.api_key.as_deref(), Some("from-file"));
+        });
+    }
+
+    #[test]
+    fn a_blank_explicit_key_is_ignored() {
+        temp_env::with_var("APOLLO_PROVIDER_API_KEY", Some("  "), || {
+            assert_eq!(explicit_provider_key(), None);
+        });
+    }
+}
+
+#[cfg(all(test, feature = "rs-ai"))]
+mod anthropic_tests {
+    use super::*;
+
+    fn write_config(dir: &Path, json: &str) -> String {
+        let path = dir.join("apollo.json");
+        std::fs::write(&path, json).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// These tests redirect `HOME` and `RS_AI_CREDENTIALS_DIR`, which are
+    /// process-global — serialize them so they cannot disturb each other (or
+    /// read a real login through a legacy path mid-restore).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn anthropic_keeps_its_identity_and_takes_its_api_key_from_the_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"provider":{"name":"anthropic"}}"#);
+        let home = tempfile::tempdir().unwrap();
+        let creds = tempfile::tempdir().unwrap();
+        temp_env::with_vars(
+            [
+                (
+                    "ANTHROPIC_API_KEY",
+                    Some(std::ffi::OsString::from("sk-ant-api-test")),
+                ),
+                ("APOLLO_PROVIDER_API_KEY", None::<std::ffi::OsString>),
+                ("OPENAI_API_KEY", None::<std::ffi::OsString>),
+                ("HOME", Some(home.path().as_os_str().to_owned())),
+                (
+                    "RS_AI_CREDENTIALS_DIR",
+                    Some(creds.path().as_os_str().to_owned()),
+                ),
+            ],
+            || {
+                let cfg = load_config_workspace(&path, None);
+                assert_eq!(cfg.provider.name, "anthropic");
+                assert_eq!(cfg.provider.api_key.as_deref(), Some("sk-ant-api-test"));
+            },
+        );
+    }
+
+    #[test]
+    fn a_credentialless_claude_config_is_not_switched_to_openai() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"provider":{"name":"claude"}}"#);
+        let home = tempfile::tempdir().unwrap();
+        let creds = tempfile::tempdir().unwrap();
+        temp_env::with_vars(
+            [
+                ("ANTHROPIC_API_KEY", None::<std::ffi::OsString>),
+                ("APOLLO_PROVIDER_API_KEY", None::<std::ffi::OsString>),
+                // Must not win and flip the provider to OpenAI.
+                (
+                    "OPENAI_API_KEY",
+                    Some(std::ffi::OsString::from("sk-openai")),
+                ),
+                ("HOME", Some(home.path().as_os_str().to_owned())),
+                (
+                    "RS_AI_CREDENTIALS_DIR",
+                    Some(creds.path().as_os_str().to_owned()),
+                ),
+            ],
+            || {
+                let cfg = load_config_workspace(&path, None);
+                assert_eq!(cfg.provider.name, "claude");
+                assert_eq!(cfg.provider.api_key, None);
+            },
+        );
+    }
+
+    #[test]
+    fn anthropic_defaults_to_the_current_claude_model() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"provider":{"name":"anthropic"},"model":""}"#,
+        );
+        let home = tempfile::tempdir().unwrap();
+        let creds = tempfile::tempdir().unwrap();
+        temp_env::with_vars(
+            [
+                ("ANTHROPIC_API_KEY", None::<std::ffi::OsString>),
+                ("APOLLO_PROVIDER_API_KEY", None::<std::ffi::OsString>),
+                ("OPENAI_API_KEY", None::<std::ffi::OsString>),
+                ("HOME", Some(home.path().as_os_str().to_owned())),
+                (
+                    "RS_AI_CREDENTIALS_DIR",
+                    Some(creds.path().as_os_str().to_owned()),
+                ),
+            ],
+            || {
+                let cfg = load_config_workspace(&path, None);
+                assert_eq!(cfg.model, "claude-sonnet-5");
             },
         );
     }

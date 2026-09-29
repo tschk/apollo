@@ -1,0 +1,25 @@
+# Step 1 — what the next screens set up.
+div w-full flex flex-col gap-4
+  div w-full flex flex-col gap-3 p-5 rounded-md border border-[#27272a]
+    div flex flex-row gap-3
+      span text-sm text-[#52525b]
+        "01"
+      span text-sm text-[#d4d4d8]
+        "sign in with an account, or add an api key or custom endpoint"
+    div flex flex-row gap-3
+      span text-sm text-[#52525b]
+        "02"
+      span text-sm text-[#d4d4d8]
+        "one folder, or everywhere"
+    div flex flex-row gap-3
+      span text-sm text-[#52525b]
+        "03"
+      span text-sm text-[#d4d4d8]
+        "what the agent may do without asking"
+    div flex flex-row gap-3
+      span text-sm text-[#52525b]
+        "04"
+      span text-sm text-[#d4d4d8]
+        "a test prompt, then simple or advanced"
+  span text-xs text-[#52525b]
+    "{engine_line}"

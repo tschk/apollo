@@ -98,6 +98,7 @@ pub async fn evaluate_loop(
             model: &generator_model,
             temperature: config.generator_temperature,
             max_tokens: Some(4096),
+            reasoning_effort: None,
         };
 
         let gen_response = provider.chat(&gen_request).await?;
@@ -128,6 +129,7 @@ pub async fn evaluate_loop(
             model: &evaluator_model,
             temperature: config.evaluator_temperature,
             max_tokens: Some(1024),
+            reasoning_effort: None,
         };
 
         let eval_response = provider.chat(&eval_request).await?;

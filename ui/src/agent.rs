@@ -1,8 +1,9 @@
 //! Transport to a running apollo agent.
 //!
 //! Prefers the WebSocket stream at `/v1/chat/stream` so tool activity shows up
-//! live, falls back to the blocking `/v1/chat` POST, and finally to shelling
-//! out to `apollo ask` when no agent HTTP server is listening.
+//! live, and falls back to the blocking `/v1/chat` POST on the same server.
+//! [`ensure_daemon`] starts `apollo serve` (the full tool loop) when nothing
+//! is listening for this instance.
 
 use std::sync::mpsc::Sender;
 
@@ -37,8 +38,7 @@ fn auth_token() -> Option<String> {
             return Some(token.trim().to_string());
         }
     }
-    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
-    let path = std::path::PathBuf::from(home).join(".apollo/http-token");
+    let path = home_dir()?.join(".apollo").join("http-token");
     let token = std::fs::read_to_string(path).ok()?;
     let token = token.trim();
     (!token.is_empty()).then(|| token.to_string())
@@ -73,21 +73,17 @@ pub fn run_turn(prompt: &str, chat_id: &str, tx: &Sender<AgentEvent>) {
         }
         Err(failure) => {
             let ws_err = failure.reason;
-            // Nothing was forwarded — fall back to a blocking turn, then the CLI.
+            // Same daemon, one blocking turn. Never a fresh `apollo ask`:
+            // that path is a bare completion with no tools.
             match ask_via_http(prompt, chat_id) {
                 Ok(text) => {
                     let _ = tx.send(AgentEvent::Done(text));
                 }
-                Err(http_err) => match ask_via_cli(prompt) {
-                    Ok(text) => {
-                        let _ = tx.send(AgentEvent::Done(text));
-                    }
-                    Err(cli_err) => {
-                        let _ = tx.send(AgentEvent::Error(format!(
-                            "no agent reachable.\n  stream: {ws_err}\n  http: {http_err}\n  cli: {cli_err}"
-                        )));
-                    }
-                },
+                Err(http_err) => {
+                    let _ = tx.send(AgentEvent::Error(format!(
+                        "agent is not answering.\n  stream: {ws_err}\n  http: {http_err}"
+                    )));
+                }
             }
         }
     }
@@ -226,23 +222,6 @@ fn ask_via_http(prompt: &str, chat_id: &str) -> Result<String, String> {
         .ok_or_else(|| "unexpected /v1/chat response".into())
 }
 
-fn ask_via_cli(prompt: &str) -> Result<String, String> {
-    let apollo = find_apollo_bin().ok_or_else(|| {
-        "apollo binary not found — `cargo install apollo-agent`, then `apollo chat`".to_string()
-    })?;
-    let output = std::process::Command::new(apollo)
-        .args(["ask", prompt, "--config", "apollo.json"])
-        .output()
-        .map_err(|e| format!("failed to run apollo: {e}"))?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        let out = String::from_utf8_lossy(&output.stdout);
-        let detail = if !err.trim().is_empty() { err } else { out };
-        return Err(format!("apollo ask failed: {}", detail.trim()));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 /// Run an `apollo` subcommand and return what it printed.
 ///
 /// The CLI is the single implementation of `config`, `doctor` and friends —
@@ -274,10 +253,55 @@ pub fn run_apollo(args: &[&str]) -> Result<String, String> {
     })
 }
 
-fn find_apollo_bin() -> Option<std::path::PathBuf> {
+/// True when `name` resolves to a file on `PATH`.
+#[allow(dead_code)]
+pub fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path).any(|dir| {
+                let candidate = dir.join(name);
+                candidate.is_file()
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// The agent binary beside this app, on `PATH`, or built from this checkout.
+pub fn ensure_apollo_bin() -> Result<std::path::PathBuf, String> {
+    if let Some(path) = find_apollo_bin() {
+        return Ok(path);
+    }
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = if root.join("src").join("main.rs").is_file() {
+        root
+    } else if root
+        .parent()
+        .is_some_and(|parent| parent.join("src").join("main.rs").is_file())
+    {
+        root.parent().unwrap().to_path_buf()
+    } else {
+        return Err("couldn't start the agent".into());
+    };
+    let output = std::process::Command::new("cargo")
+        .args(["build", "-p", "apollo-agent", "--bin", "apollo"])
+        .current_dir(&root)
+        .output()
+        .map_err(|_| "couldn't start the agent".to_string())?;
+    if !output.status.success() {
+        return Err("couldn't start the agent".into());
+    }
+    find_apollo_bin()
+        .or_else(|| {
+            let built = root.join("target").join("debug").join(APOLLO_EXE);
+            built.is_file().then_some(built)
+        })
+        .ok_or_else(|| "couldn't start the agent".into())
+}
+
+pub fn find_apollo_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("apollo");
+            let candidate = dir.join(APOLLO_EXE);
             if candidate.is_file() {
                 return Some(candidate);
             }
@@ -285,9 +309,16 @@ fn find_apollo_bin() -> Option<std::path::PathBuf> {
     }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join("apollo"))
+        .map(|dir| dir.join(APOLLO_EXE))
         .find(|candidate| candidate.is_file())
 }
+
+/// `apollo` / `apollo.exe`.
+const APOLLO_EXE: &str = if cfg!(windows) {
+    "apollo.exe"
+} else {
+    "apollo"
+};
 
 /// Live agent state from `GET /v1/state`.
 ///
@@ -380,7 +411,193 @@ pub fn set_model(model: &str) -> Result<AgentState, String> {
     Ok(parse_state(&value))
 }
 
-/// Model and engine reported by the local config, for the status bar.
+/// Ask the agent to clear a chat's stored history.
+///
+/// `path` is `/v1/clear`. `/v1/compact` was removed rather than left as a
+/// permanent 501: compaction in apollo is turn-local, so there is no stored
+/// state for a server-side compaction to act on.
+///
+/// On failure the server's own explanation is returned and shown as-is — the
+/// UI must not claim work that did not happen.
+#[allow(dead_code)]
+pub fn post_chat_action(path: &str, chat_id: &str) -> Result<String, String> {
+    let url = format!("http://127.0.0.1:{}{}", http_port(), path);
+    let request = blocking_client(30_000)?
+        .post(&url)
+        .json(&serde_json::json!({ "chat_id": chat_id }));
+    let response = authed(request).send().map_err(|e| e.to_string())?;
+    let status = response.status();
+    let value: serde_json::Value = response.json().unwrap_or(serde_json::Value::Null);
+    let detail = value
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    if status.is_success() {
+        return Ok(detail.unwrap_or_else(|| "done".to_string()));
+    }
+    Err(detail.unwrap_or_else(|| format!("HTTP {status}")))
+}
+
+/// Start `apollo serve` for this instance's config, or keep the one already
+/// serving it. One process stays up across messages; a different instance
+/// replaces it. The server is the tool loop, not a one-shot completion.
+pub fn ensure_daemon(config_dir: &std::path::Path) -> Result<(), String> {
+    let config = config_dir.join("apollo.json");
+    if !config.is_file() {
+        return Err(format!("no config at {}", config.display()));
+    }
+    let config = config.canonicalize().unwrap_or(config);
+    if agent_online()
+        && daemon_config().as_ref() == Some(&config)
+        && daemon_stamp() == Some(config_stamp(&config))
+    {
+        return Ok(());
+    }
+    if agent_online() {
+        shutdown_daemon();
+    }
+    let apollo = ensure_apollo_bin()?;
+    let workspace = workspace_of(&config).unwrap_or_else(|| config_dir.to_path_buf());
+    let log_path = daemon_log_path();
+    if let Some(dir) = log_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let log =
+        std::fs::File::create(&log_path).map_err(|e| format!("could not open agent log: {e}"))?;
+    let mut child = std::process::Command::new(apollo)
+        .args([
+            "serve",
+            "--config",
+            &config.display().to_string(),
+            "--workspace",
+            &workspace.display().to_string(),
+        ])
+        .current_dir(config_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(log)
+        .spawn()
+        .map_err(|e| format!("could not start the agent: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if agent_online() {
+            remember_daemon(&config);
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let tail = std::fs::read_to_string(&log_path).unwrap_or_default();
+                let tail: Vec<&str> = tail.lines().rev().take(6).collect();
+                return Err(format!(
+                    "the agent exited ({status}) before it was ready.\n{}",
+                    tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+                ));
+            }
+            Ok(None) if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                return Err("the agent did not become ready within 30s".into());
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(150)),
+            Err(e) => return Err(format!("could not watch the agent: {e}")),
+        }
+    }
+}
+
+fn workspace_of(config: &std::path::Path) -> Option<std::path::PathBuf> {
+    let text = std::fs::read_to_string(config).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("workspace")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+fn home_dir() -> Option<std::path::PathBuf> {
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .find_map(|var| std::env::var_os(var).filter(|h| !h.is_empty()))
+        .map(std::path::PathBuf::from)
+}
+
+fn daemon_state_path() -> Option<std::path::PathBuf> {
+    home_dir().map(|h| h.join(".apollo").join("ui-daemon.json"))
+}
+
+fn daemon_log_path() -> std::path::PathBuf {
+    home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".apollo")
+        .join("serve.log")
+}
+
+fn daemon_config() -> Option<std::path::PathBuf> {
+    let text = std::fs::read_to_string(daemon_state_path()?).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let path = value.get("config")?.as_str()?;
+    Some(std::path::PathBuf::from(path))
+}
+
+fn remember_daemon(config: &std::path::Path) {
+    let Some(path) = daemon_state_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let body = serde_json::json!({ "config": config, "stamp": config_stamp(config) });
+    let _ = std::fs::write(path, body.to_string());
+}
+
+fn config_stamp(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn daemon_stamp() -> Option<u64> {
+    let text = std::fs::read_to_string(daemon_state_path()?).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("stamp")?.as_u64()
+}
+
+fn shutdown_daemon() {
+    let url = format!("http://127.0.0.1:{}/shutdown", http_port());
+    if let Ok(client) = blocking_client(2000) {
+        let _ = authed(client.post(url)).send();
+    }
+    for _ in 0..40 {
+        if !agent_online() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Model named in the instance config, for the status bar.
+pub fn config_model() -> String {
+    let Ok(text) = std::fs::read_to_string("apollo.json") else {
+        return "—".into();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return "—".into();
+    };
+    v.get("model")
+        .and_then(|m| m.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("—")
+        .to_string()
+}
+
+/// Model and engine reported by the local config. The TUI status bar still
+/// asks for both; the desktop shows the model only.
+#[allow(dead_code)]
 pub fn config_summary() -> (String, String) {
     let Ok(text) = std::fs::read_to_string("apollo.json") else {
         return ("—".into(), "—".into());
@@ -391,13 +608,15 @@ pub fn config_summary() -> (String, String) {
     let model = v
         .get("model")
         .and_then(|m| m.as_str())
+        .filter(|s| !s.is_empty())
         .unwrap_or("—")
         .to_string();
     let engine = v
         .get("agent")
         .and_then(|a| a.get("engine"))
         .and_then(|e| e.as_str())
-        .unwrap_or("legacy")
+        .filter(|s| !s.is_empty())
+        .unwrap_or("—")
         .to_string();
     (model, engine)
 }

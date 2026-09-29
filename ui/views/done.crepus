@@ -1,0 +1,5 @@
+# Last step — what was written, and (first run only) simple vs advanced.
+div w-full flex flex-col gap-5
+  div w-full flex flex-col p-4 rounded-md border border-[#27272a]
+    {summary}
+  {mode_cards}

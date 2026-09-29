@@ -151,6 +151,7 @@ impl DefaultCompactor {
                     model: &self.model,
                     temperature: 0.2,
                     max_tokens: Some(800),
+                    reasoning_effort: None,
                 };
                 match provider.chat(&request).await {
                     Ok(response) => {

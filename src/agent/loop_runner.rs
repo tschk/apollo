@@ -39,6 +39,9 @@ pub struct AgentRunner {
     cost_tracker: Arc<CostTracker>,
     pub steering_queue: Arc<std::sync::Mutex<Vec<String>>>,
     pub agent_config: crate::config::AgentConfig,
+    /// Instance `apollo.json`. Re-read at the start of a turn so a dial
+    /// change is what the next message sends, without restarting.
+    config_path: Option<PathBuf>,
     mode: Arc<std::sync::RwLock<AgentMode>>,
     #[cfg(feature = "swarm")]
     pub swarm: Arc<std::sync::RwLock<Option<Arc<crate::swarm::SwarmCoordinator>>>>,
@@ -83,6 +86,7 @@ impl AgentRunner {
             cost_tracker: Arc::new(CostTracker::new()),
             steering_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             agent_config: crate::config::AgentConfig::default(),
+            config_path: None,
             mode: Arc::new(std::sync::RwLock::new(AgentMode::default())),
             #[cfg(feature = "swarm")]
             swarm: Arc::new(std::sync::RwLock::new(None)),
@@ -124,6 +128,41 @@ impl AgentRunner {
     pub fn with_config(mut self, config: crate::config::AgentConfig) -> Self {
         self.agent_config = config;
         self
+    }
+
+    pub fn with_config_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config_path = Some(path.into());
+        self
+    }
+
+    /// Model and effort for this turn. The file wins over the copy taken
+    /// when the process started, so the chat dials apply on the next message.
+    fn turn_model_and_effort(&self) -> (String, Option<&'static str>) {
+        let current = self.get_model();
+        let Some(path) = &self.config_path else {
+            return (current, self.agent_config.main_effort());
+        };
+        let Ok(cfg) = crate::config::Config::load(&path.to_string_lossy()) else {
+            return (current, self.agent_config.main_effort());
+        };
+        let dialed = cfg.agent.roles.main.model.trim();
+        let model = if !dialed.is_empty() {
+            dialed.to_string()
+        } else if !cfg.model.trim().is_empty() {
+            cfg.model
+        } else {
+            current
+        };
+        if model != self.get_model() {
+            self.set_model(model.clone());
+        }
+        let effort = cfg
+            .agent
+            .roles
+            .main
+            .effort_level()
+            .or_else(|| cfg.agent.reasoning_effort_level());
+        (model, effort)
     }
 
     pub fn with_mode(self, mode: AgentMode) -> Self {
@@ -738,14 +777,20 @@ impl AgentRunner {
         messages.push(ChatMessage::user(&user_turn));
 
         let tools_snapshot: Vec<Arc<dyn Tool>> = self.tools.read().await.iter().cloned().collect();
-        let main_model = model
-            .map(str::to_string)
-            .unwrap_or_else(|| self.model.read().unwrap().clone());
+        let (dial_model, dial_effort) = self.turn_model_and_effort();
+        // An explicit per-call model still wins. Otherwise the main dial does.
+        let main_model = model.map(str::to_string).unwrap_or(dial_model);
 
         // ── rx4 engine ──
         // Context assembly above stays apollo's; from here rx4 owns the loop.
         let text = self
-            .run_via_rotary(&messages, &tools_snapshot, &main_model, &msg.chat_id)
+            .run_via_rotary(
+                &messages,
+                &tools_snapshot,
+                &main_model,
+                dial_effort,
+                &msg.chat_id,
+            )
             .await?;
         self.finish_execution(msg, &text, &delivery).await
     }
@@ -764,6 +809,7 @@ impl AgentRunner {
         messages: &[ChatMessage],
         tools: &[Arc<dyn Tool>],
         model: &str,
+        effort: Option<&str>,
         chat_id: &str,
     ) -> anyhow::Result<String> {
         use crate::agent::rotary_bridge::{
@@ -778,6 +824,23 @@ impl AgentRunner {
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
+        let mode_label = match self.get_mode() {
+            AgentMode::Auto => "auto",
+            AgentMode::BypassPermissions => "unattended",
+            AgentMode::Coding {
+                plan_approval: true,
+                ..
+            } => "coding, plan first",
+            AgentMode::Coding { .. } => "coding",
+            AgentMode::Swarm { .. } => "swarm",
+        };
+        let tool_names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+        let note = crate::prompt::situation_note(model, mode_label, &tool_names);
+        let system_prompt = if system_prompt.is_empty() {
+            note
+        } else {
+            format!("{system_prompt}\n\n{note}")
+        };
 
         let mut history: Vec<ChatMessage> = messages
             .iter()
@@ -800,6 +863,9 @@ impl AgentRunner {
         );
         model_info.supports_tools = capabilities.native_tools;
         model_info.supports_vision = capabilities.vision;
+        // rx4 only forwards reasoning_effort when the registered model claims
+        // support. This registry is ours, so the configured level is the claim.
+        model_info.supports_reasoning_effort = effort.is_some();
         let model_registry = rx4::ModelRegistry::from_models([model_info]);
 
         let mut bridge = RotaryAgentBridge::new_with_model_registry(
@@ -819,6 +885,7 @@ impl AgentRunner {
                 )
                 .with_hook_manager(Arc::clone(&self.hook_manager))
                 .with_stream(self.stream_sink()),
+                reasoning_effort: effort.map(str::to_string),
             },
             model_registry,
         )
