@@ -23,9 +23,9 @@ describe("worker", () => {
     const res = await worker.fetch(new Request("https://apollo.tsc.hk/"), env);
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain(
-      "A desktop agent you open, set up in a few screens, and talk to, with multiple instances and a simple or advanced mode.",
-    );
+    expect(html).toContain("The agent that sits on your computer.");
+    expect(html).toContain("Short setup. Several instances. A simple chat, or the full app.");
+    expect(html).not.toContain("A desktop agent you open");
     expect(html).toContain("#09090b");
     expect(html).toContain("/assets/app.css");
     expect(html).toContain("/shots/advanced.png");

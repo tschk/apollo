@@ -152,6 +152,23 @@ main,
   line-height: 1.45;
 }
 
+.headline {
+  margin-top: 28px;
+  max-width: 16em;
+  font-size: clamp(1.45rem, 2.6vw, 2rem);
+  font-weight: 500;
+  letter-spacing: -0.045em;
+  line-height: 1.2;
+}
+
+.subline {
+  margin-top: 12px;
+  max-width: 34rem;
+  color: var(--muted);
+  font-size: 1.02rem;
+  line-height: 1.45;
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;

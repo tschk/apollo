@@ -10,9 +10,9 @@ export type RouteMeta = {
 
 export const routes: Record<string, RouteMeta> = {
   "/": {
-    title: "Apollo — a desktop agent",
+    title: "Apollo — the agent on your computer",
     description:
-      "Apollo is a desktop agent you open, set up in a few screens, and talk to, with multiple instances and a simple or advanced mode.",
+      "The agent that sits on your computer. Short setup, several instances, a simple chat or the full app.",
     component: Home,
   },
 };

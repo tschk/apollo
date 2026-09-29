@@ -1,9 +1,10 @@
 # Apollo
 
-Apollo is a desktop agent from tsc.hk. The public site is https://apollo.tsc.hk
+Apollo is a desktop agent from tsc.hk.
+Site: https://apollo.tsc.hk
 Source: https://github.com/tschk/apollo
 
-You open the app, set it up in a few screens, and talk to it. Setup connects a
-model, chooses where the agent may work, and sets when it should ask. Then you
-pick simple (the conversation) or advanced (instances, tools, and a record of
-what happened). You can keep more than one instance, each with its own model.
+The agent that sits on your computer. Setup is a handful of screens: connect a
+model, choose a folder, set the rules, try one message. Then a simple chat, or
+the full app with several instances, tools, and a history of what happened.
+Mac and Linux.

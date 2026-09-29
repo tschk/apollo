@@ -5,7 +5,6 @@
   import { reducedMotion } from "../lib/store";
 
   let canvas: HTMLCanvasElement | undefined = $state();
-  let kicker = $state("desktop agent");
 
   const providers = [
     "chatgpt",
@@ -32,29 +31,6 @@
       });
     }
 
-    const final = "desktop agent";
-    let timer = 0;
-    if (!media.matches) {
-      const alphabet = "abcdefghijklmnopqrstuvwxyz.+";
-      let step = 0;
-      const total = 16;
-      timer = window.setInterval(() => {
-        step += 1;
-        const keep = Math.floor((step / total) * final.length);
-        kicker = final
-          .split("")
-          .map((ch, i) => {
-            if (ch === " " || ch === "·" || i < keep) return ch;
-            return alphabet[Math.floor(Math.random() * alphabet.length)] ?? ch;
-          })
-          .join("");
-        if (step >= total) {
-          kicker = final;
-          window.clearInterval(timer);
-        }
-      }, 42);
-    }
-
     void import("lenis").then(({ default: Lenis }) => {
       if (disposed || media.matches) return;
       const lenis = new Lenis({ lerp: 0.09 });
@@ -73,7 +49,6 @@
     return () => {
       disposed = true;
       media.removeEventListener("change", apply);
-      window.clearInterval(timer);
       for (const cleanup of cleanups) cleanup();
     };
   });
@@ -88,18 +63,16 @@
   <main>
     <section class="hero">
       <div class="wrap">
-        <p class="kicker">{kicker}</p>
         <h1 class="word">apollo</h1>
-        <p class="lede">
-          A desktop agent you open, set up in a few screens, and talk to, with multiple instances and a simple or advanced mode.
-        </p>
+        <p class="headline">The agent that sits on your computer.</p>
+        <p class="subline">Short setup. Several instances. A simple chat, or the full app.</p>
         <div class="actions">
-          <LetterSwap solid label="get started" href="#start" />
-          <LetterSwap label="view on github" href="https://github.com/tschk/apollo" />
+          <LetterSwap solid label="get apollo" href="#start" />
+          <LetterSwap label="see the app" href="#app" />
         </div>
         <p class="meta-row">
-          <span>mac and linux</span>
-          <span>desktop app</span>
+          <span>mac</span>
+          <span>linux</span>
           <span>tsc.hk</span>
         </p>
       </div>
@@ -119,25 +92,25 @@
       <div class="wrap">
         <div class="section-head">
           <span class="index">01</span>
-          <h2>An agent you open, not another browser tab.</h2>
+          <h2>Leave it open. Come back to the same conversation.</h2>
         </div>
         <div class="grid-3">
           <article class="card">
-            <h3>On your computer</h3>
+            <h3>Where you already work</h3>
             <p>
-              Apollo is a desktop app. You open it, and the conversation stays on your machine.
+              Apollo is an app on your computer. The thread stays there, not in a browser.
             </p>
           </article>
           <article class="card">
-            <h3>Ready in a few screens</h3>
+            <h3>A short setup</h3>
             <p>
-              Connect a model, choose what it can work on, decide when it should ask you, and send one test message.
+              Connect a model, choose a folder, set the rules, and send one message to see it work.
             </p>
           </article>
           <article class="card">
-            <h3>Simple or advanced</h3>
+            <h3>Quiet, or the whole app</h3>
             <p>
-              Simple is the chat. Advanced adds your instances, tools, and a record of what happened. Switch any time.
+              Stay in the chat. Or open your instances, tools, and a record of what happened. Switch whenever you like.
             </p>
           </article>
         </div>
@@ -149,13 +122,13 @@
         <div>
           <div class="section-head">
             <span class="index">02</span>
-            <h2>Set up once. Then just talk.</h2>
+            <h2>Four screens, and you are in.</h2>
           </div>
           <ol class="steps">
-            <li><span class="index">01</span><span><b>Connect a model.</b> Sign in with an account you already have, or add a key.</span></li>
-            <li><span class="index">02</span><span><b>Choose where it works.</b> One folder, or anywhere on your computer.</span></li>
-            <li><span class="index">03</span><span><b>Decide when it should ask.</b> You set what it may do on its own.</span></li>
-            <li><span class="index">04</span><span><b>Send a test message.</b> Then pick simple or advanced, and start.</span></li>
+            <li><span class="index">01</span><span><b>Connect a model.</b> Sign in, or paste a key you already have.</span></li>
+            <li><span class="index">02</span><span><b>Point it somewhere.</b> One folder, or the whole computer.</span></li>
+            <li><span class="index">03</span><span><b>Set the rules.</b> Say what it may do before it asks.</span></li>
+            <li><span class="index">04</span><span><b>Try one message.</b> Then choose simple or advanced.</span></li>
           </ol>
         </div>
         <figure class="shot">
@@ -169,7 +142,7 @@
       <div class="wrap">
         <div class="section-head">
           <span class="index">03</span>
-          <h2>Talk in simple. Open the full app when you want it.</h2>
+          <h2>Chat when you want quiet. Open the rest when you don't.</h2>
         </div>
         <div class="shots">
           <div class="pair">
@@ -204,22 +177,22 @@
       <div class="wrap">
         <div class="section-head">
           <span class="index">04</span>
-          <h2>Open it on your Mac or Linux machine.</h2>
+          <h2>Mac and Linux. Then the conversation.</h2>
         </div>
         <div class="install">
           <div class="card">
             <h3>Get Apollo</h3>
             <p>
-              The current release is on GitHub. Open Apollo, walk through setup, and start the conversation.
+              Install the latest release, open Apollo, and the setup is waiting.
             </p>
             <p class="fine" style="margin-top: 16px">
-              <a href="https://github.com/tschk/apollo/releases/tag/v0.7.2">Latest release</a>
+              <a href="https://github.com/tschk/apollo/releases/tag/v0.7.2">Get the release</a>
             </p>
           </div>
           <div class="card">
-            <h3>What you are opening</h3>
+            <h3>What is inside</h3>
             <p>
-              A desktop agent with multiple instances and two ways to use it: simple, for the chat, and advanced, for the full app.
+              More than one instance, each with its own model. A simple chat, and an advanced view when you want tools and history.
             </p>
             <p class="fine" style="margin-top: 16px">
               <a href="https://github.com/tschk/apollo">Source</a>
@@ -233,7 +206,7 @@
   </main>
   <div class="wrap">
     <footer>
-      <span>Apollo · a desktop agent</span>
+      <span>Apollo</span>
       <span>no trackers · no cookies</span>
     </footer>
   </div>
