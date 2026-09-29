@@ -393,33 +393,6 @@ pub fn set_model(model: &str) -> Result<AgentState, String> {
     Ok(parse_state(&value))
 }
 
-/// Ask the agent to clear a chat's stored history.
-///
-/// `path` is `/v1/clear`. `/v1/compact` was removed rather than left as a
-/// permanent 501: compaction in apollo is turn-local, so there is no stored
-/// state for a server-side compaction to act on.
-///
-/// On failure the server's own explanation is returned and shown as-is — the
-/// UI must not claim work that did not happen.
-#[allow(dead_code)]
-pub fn post_chat_action(path: &str, chat_id: &str) -> Result<String, String> {
-    let url = format!("http://127.0.0.1:{}{}", http_port(), path);
-    let request = blocking_client(30_000)?
-        .post(&url)
-        .json(&serde_json::json!({ "chat_id": chat_id }));
-    let response = authed(request).send().map_err(|e| e.to_string())?;
-    let status = response.status();
-    let value: serde_json::Value = response.json().unwrap_or(serde_json::Value::Null);
-    let detail = value
-        .get("error")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    if status.is_success() {
-        return Ok(detail.unwrap_or_else(|| "done".to_string()));
-    }
-    Err(detail.unwrap_or_else(|| format!("HTTP {status}")))
-}
-
 /// Model and engine reported by the local config, for the status bar.
 pub fn config_summary() -> (String, String) {
     let Ok(text) = std::fs::read_to_string("apollo.json") else {
