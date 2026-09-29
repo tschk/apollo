@@ -88,6 +88,13 @@ enum Entry {
     Error(String),
 }
 
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 impl Entry {
     fn view(&self, cursor: &'static str, index: usize) -> impl IntoElement {
         let row = match self {
@@ -220,6 +227,9 @@ struct ApolloView {
     picker: Option<shell::PickerState>,
     /// Which role dial the picker is writing, if it was opened from one.
     dial: Option<&'static str>,
+    /// Agent session. A new chat mints a new id so the next turn does not
+    /// continue the previous conversation.
+    chat_id: String,
 }
 
 impl ApolloView {
@@ -284,6 +294,7 @@ impl ApolloView {
             roster_menu: None,
             picker: None,
             dial: None,
+            chat_id: format!("desktop-{}", now_millis()),
         };
         view.supervise_agent(config_dir, cx);
         view
@@ -384,7 +395,9 @@ impl ApolloView {
 
         // Let the platform paste path through rather than swallowing it.
         if stroke.modifiers.platform || stroke.modifiers.control {
-            if key == "v" {
+            if key == "n" {
+                self.new_chat(cx);
+            } else if key == "v" {
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     self.draft.push_str(text.trim_end_matches('\n'));
                     cx.notify();
@@ -526,8 +539,22 @@ impl ApolloView {
     }
 
     fn clear_chat(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.new_chat(cx);
+    }
+
+    /// Drop the transcript and start a fresh agent session. The unsent draft
+    /// stays. Hermes does this with Ctrl+N; the previous chat id is abandoned
+    /// so the running agent does not keep that history on the next turn.
+    fn new_chat(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.chat_id = format!("desktop-{}", now_millis());
         self.entries.clear();
-        self.status = "cleared".into();
+        self.entries.push(Entry::Status("new chat".into()));
+        self.turns = 0;
+        self.status = "new chat".into();
+        self.log(shell::LogKind::Info, "new chat");
         cx.notify();
     }
 
@@ -563,8 +590,9 @@ impl ApolloView {
         // The transport is blocking, so it runs on its own thread and reports
         // back through a channel the UI drains on the foreground.
         let (tx, rx) = channel::<AgentEvent>();
+        let chat_id = self.chat_id.clone();
         std::thread::spawn(move || {
-            agent::run_turn(&prompt, "desktop", &tx);
+            agent::run_turn(&prompt, &chat_id, &tx);
         });
 
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {

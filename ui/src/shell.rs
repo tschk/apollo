@@ -1985,6 +1985,12 @@ impl ApolloView {
             .px_5()
             .child(self.instance_pill(cx))
             .child(Self::link(
+                "simple-new-chat",
+                "new chat",
+                false,
+                cx.listener(|view, _: &ClickEvent, _, cx| view.new_chat(cx)),
+            ))
+            .child(Self::link(
                 "simple-profile",
                 "profile",
                 profile_open,
@@ -2081,7 +2087,7 @@ impl ApolloView {
                             .child(SharedString::from(format!("· {}", self.status))),
                     )
                     .child(div().flex_1())
-                    .child("↑↓ history · esc clear"),
+                    .child("↑↓ history · ctrl+n new chat · esc clear"),
             )
             .into_any_element()
     }
@@ -2316,7 +2322,7 @@ impl ApolloView {
                                 .on_click(cx.listener(ApolloView::prompt_tools)),
                         )
                         .child(
-                            chip("chip-clear", "clear")
+                            chip("chip-new-chat", "new chat")
                                 .on_click(cx.listener(ApolloView::clear_chat)),
                         ),
                 )
