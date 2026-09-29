@@ -247,6 +247,72 @@ impl ApolloView {
         cx.notify();
     }
 
+    fn current_effort(&self) -> String {
+        setup::read_config(&self.instance.config_path())["agent"]["reasoning_effort"]
+            .as_str()
+            .and_then(setup::normalize_effort)
+            .unwrap_or("medium")
+            .to_string()
+    }
+
+    fn set_effort(&mut self, effort: &str, cx: &mut Context<Self>) {
+        let path = self.instance.config_path();
+        let dir = path.parent().map(|p| p.to_path_buf());
+        self.notice = match setup::update_config(&path, |c| {
+            if !c["agent"].is_object() {
+                c["agent"] = serde_json::json!({});
+            }
+            c["agent"]["reasoning_effort"] = serde_json::json!(effort);
+        }) {
+            Ok(_) => {
+                if let Some(dir) = dir {
+                    std::thread::spawn(move || {
+                        let _ = agent::ensure_daemon(&dir);
+                    });
+                }
+                format!("effort set to {effort} · the agent is restarting")
+            }
+            Err(e) => e,
+        };
+        cx.notify();
+    }
+
+    fn effort_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.current_effort();
+        let chips = setup::EFFORTS.iter().enumerate().map(|(i, (id, label))| {
+            let on = current == *id;
+            let id_owned = (*id).to_string();
+            div()
+                .id(("settings-effort", i))
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(if on { MUTED } else { SURFACE_2 }))
+                .bg(rgb(if on { SURFACE } else { BG }))
+                .text_xs()
+                .text_color(rgb(if on { ACCENT } else { SOFT }))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(SURFACE)))
+                .child(*label)
+                .on_click(
+                    cx.listener(move |view, _: &ClickEvent, _, cx| view.set_effort(&id_owned, cx)),
+                )
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().flex().flex_row().gap_2().children(chips))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child("how hard the model thinks. sent with every request."),
+            )
+            .into_any_element()
+    }
+
     // ── Profile panel ──────────────────────────────────────────────────────
 
     /// The current value of a profile field, straight from where it lives.
@@ -1548,6 +1614,7 @@ impl ApolloView {
                     .child(Self::kv("config", setup::display_path(&inst.config_path())))
                     .child(Self::kv("permissions", inst.permission_profile.clone())),
             )
+            .child(Self::section("effort").child(self.effort_row(cx)))
             .child(Self::section("keys & connections").children(keys).child(
                 div().text_xs().text_color(rgb(GHOST)).child(
                     "keys are write-only here — edit with `apollo init` or re-run \

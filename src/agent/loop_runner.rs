@@ -778,6 +778,10 @@ impl AgentRunner {
         );
         model_info.supports_tools = capabilities.native_tools;
         model_info.supports_vision = capabilities.vision;
+        let effort = self.agent_config.reasoning_effort_level();
+        // rx4 only forwards reasoning_effort when the registered model claims
+        // support. This registry is ours, so the configured level is the claim.
+        model_info.supports_reasoning_effort = effort.is_some();
         let model_registry = rx4::ModelRegistry::from_models([model_info]);
 
         let mut bridge = RotaryAgentBridge::new_with_model_registry(
@@ -797,6 +801,7 @@ impl AgentRunner {
                 )
                 .with_hook_manager(Arc::clone(&self.hook_manager))
                 .with_stream(self.stream_sink()),
+                reasoning_effort: effort.map(str::to_string),
             },
             model_registry,
         )

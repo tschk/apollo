@@ -415,7 +415,10 @@ pub fn ensure_daemon(config_dir: &std::path::Path) -> Result<(), String> {
         return Err(format!("no config at {}", config.display()));
     }
     let config = config.canonicalize().unwrap_or(config);
-    if agent_online() && daemon_config().as_ref() == Some(&config) {
+    if agent_online()
+        && daemon_config().as_ref() == Some(&config)
+        && daemon_stamp() == Some(config_stamp(&config))
+    {
         return Ok(());
     }
     if agent_online() {
@@ -509,8 +512,23 @@ fn remember_daemon(config: &std::path::Path) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let body = serde_json::json!({ "config": config });
+    let body = serde_json::json!({ "config": config, "stamp": config_stamp(config) });
     let _ = std::fs::write(path, body.to_string());
+}
+
+fn config_stamp(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn daemon_stamp() -> Option<u64> {
+    let text = std::fs::read_to_string(daemon_state_path()?).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("stamp")?.as_u64()
 }
 
 fn shutdown_daemon() {

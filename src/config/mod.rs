@@ -72,6 +72,14 @@ pub struct AgentConfig {
     /// Record ReAct trajectories per chat for RL export. Defaults to `true`,
     /// which is the historical behaviour; set to `false` to stop collecting.
     pub trajectory_enabled: bool,
+    /// Reasoning effort forwarded to the model on every turn.
+    /// rx4's values: `low`, `medium`, `high`, `xhigh`. Empty sends nothing.
+    #[serde(default = "default_reasoning_effort")]
+    pub reasoning_effort: String,
+}
+
+fn default_reasoning_effort() -> String {
+    "medium".into()
 }
 
 impl Default for AgentConfig {
@@ -87,6 +95,20 @@ impl Default for AgentConfig {
             permission_profile: "auto".to_string(),
             auto_compact_after: 0,
             trajectory_enabled: true,
+            reasoning_effort: default_reasoning_effort(),
+        }
+    }
+}
+
+impl AgentConfig {
+    /// A recognised effort, or nothing when the config asks not to send one.
+    pub fn reasoning_effort_level(&self) -> Option<&'static str> {
+        match self.reasoning_effort.trim() {
+            "low" => Some("low"),
+            "medium" => Some("medium"),
+            "high" => Some("high"),
+            "xhigh" => Some("xhigh"),
+            _ => None,
         }
     }
 }
@@ -635,6 +657,17 @@ mod config_path_tests {
         assert_eq!(cfg.get_path("model").unwrap(), cfg.model.as_str());
         assert_eq!(cfg.get_path("provider.name").unwrap(), "chatgpt");
         assert_eq!(cfg.get_path("agent.max_rounds").unwrap(), 50);
+        assert_eq!(cfg.agent.reasoning_effort_level(), Some("medium"));
+    }
+
+    #[test]
+    fn reasoning_effort_defaults_and_rejects_unknown() {
+        let cfg: AgentConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.reasoning_effort_level(), Some("medium"));
+        let cfg: AgentConfig = serde_json::from_str(r#"{"reasoning_effort":"xhigh"}"#).unwrap();
+        assert_eq!(cfg.reasoning_effort_level(), Some("xhigh"));
+        let cfg: AgentConfig = serde_json::from_str(r#"{"reasoning_effort":""}"#).unwrap();
+        assert_eq!(cfg.reasoning_effort_level(), None);
     }
 
     #[test]

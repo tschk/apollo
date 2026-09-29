@@ -128,6 +128,9 @@ pub struct ChatRequest<'a> {
     pub model: &'a str,
     pub temperature: f64,
     pub max_tokens: Option<u32>,
+    /// rx4 reasoning effort (`low`, `medium`, `high`, `xhigh`), when the
+    /// instance asked for one. Absent means the provider's own default.
+    pub reasoning_effort: Option<&'a str>,
 }
 
 /// Provider capabilities
@@ -179,6 +182,7 @@ pub trait Provider: Send + Sync {
             model,
             temperature: 0.7,
             max_tokens: None,
+            reasoning_effort: None,
         };
         let response = self.chat(&request).await?;
         Ok(response.text.unwrap_or_default())

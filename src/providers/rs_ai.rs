@@ -3,7 +3,8 @@
 
 use async_trait::async_trait;
 use rs_ai_core::{
-    GenerateOptions, GenerateResult, Message, Prompt, ToolCallRequest, ToolDefinition,
+    GenerateOptions, GenerateResult, Message, Prompt, ReasoningEffort, ThinkingConfig,
+    ToolCallRequest, ToolDefinition,
 };
 use rs_ai_oauth::{fetch_models_async, ModelInfo as OAuthModelInfo, OAuthProvider};
 
@@ -209,6 +210,15 @@ impl Provider for RsAiProvider {
                 .with_tools(tools)
                 .with_tool_choice(rs_ai_core::ToolChoice::Auto);
         }
+        if let Some(effort) = request.reasoning_effort.and_then(reasoning_effort) {
+            options = options.with_reasoning_effort(effort);
+            // Claude's request uses a thinking budget, not OpenAI's field.
+            if matches!(self.provider_name.as_str(), "anthropic" | "claude") {
+                options = options.with_thinking(ThinkingConfig::Budget {
+                    tokens: thinking_budget(request.reasoning_effort.unwrap_or("medium")),
+                });
+            }
+        }
 
         let result = model
             .generate(prompt, options)
@@ -266,4 +276,22 @@ fn map_generate_result(result: GenerateResult) -> anyhow::Result<ChatResponse> {
         tool_calls,
         usage: Some(usage),
     })
+}
+
+fn reasoning_effort(level: &str) -> Option<ReasoningEffort> {
+    match level {
+        "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" | "xhigh" => Some(ReasoningEffort::High),
+        _ => None,
+    }
+}
+
+fn thinking_budget(level: &str) -> u32 {
+    match level {
+        "low" => 2_048,
+        "high" => 16_384,
+        "xhigh" => 32_000,
+        _ => 8_192,
+    }
 }

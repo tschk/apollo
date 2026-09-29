@@ -218,6 +218,10 @@ impl Provider for OpenAiCompatProvider {
             body["max_tokens"] = Value::Number(max.into());
         }
 
+        if let Some(effort) = request.reasoning_effort {
+            body["reasoning_effort"] = Value::String(effort.to_string());
+        }
+
         if let Some(tools) = request.tools {
             if !tools.is_empty() {
                 body["tools"] = Value::Array(self.build_tools_payload(tools));

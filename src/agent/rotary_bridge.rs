@@ -425,7 +425,7 @@ impl Rx4Provider for RotaryProviderAdapter {
         system: &Option<String>,
         model: &str,
         tools: &[serde_json::Value],
-        _reasoning_effort: Option<&str>,
+        reasoning_effort: Option<&str>,
     ) -> Result<rx4::provider::StreamResult, Rx4ProviderError> {
         // Translate rx4 messages to apollo ChatMessages
         let mut chat_messages: Vec<ChatMessage> = Vec::new();
@@ -479,6 +479,7 @@ impl Rx4Provider for RotaryProviderAdapter {
             model,
             temperature: 0.7,
             max_tokens: Some(8192),
+            reasoning_effort,
         };
 
         if let Some(tracker) = &self.cost_tracker {
@@ -631,6 +632,8 @@ pub struct RotaryBridgeConfig {
     /// Pre/post tool hooks, so rx4 enforces the same permissions as the
     /// legacy loop.
     pub hook_ctx: ToolHookContext,
+    /// Forwarded to `Agent::set_reasoning_effort`. `None` sends nothing.
+    pub reasoning_effort: Option<String>,
 }
 
 fn model_registry_for(provider: &dyn UnthinkclawProvider, model: &str) -> rx4::ModelRegistry {
@@ -644,6 +647,9 @@ fn model_registry_for(provider: &dyn UnthinkclawProvider, model: &str) -> rx4::M
     );
     info.supports_tools = capabilities.native_tools;
     info.supports_vision = capabilities.vision;
+    // The host decides. rx4 drops the effort unless the model claims support,
+    // and this registry is the only metadata it consults.
+    info.supports_reasoning_effort = true;
     registry.register(info);
     registry
 }
@@ -700,6 +706,7 @@ impl RotaryAgentBridge {
         // compaction. Forward the configured threshold so a non-zero value
         // turns rx4's auto-compact on.
         agent.auto_compact_after = config.auto_compact_after;
+        agent.set_reasoning_effort(config.reasoning_effort.clone());
 
         // apollo, not rx4, is the authorization authority here.
         //

@@ -169,6 +169,8 @@ pub struct OnboardingView {
     prompt: String,
     /// Instance instructions, stored as apollo.json system_prompt.
     instructions: String,
+    /// `low` / `medium` / `high` / `xhigh`.
+    effort: String,
     test: TestState,
     written: Option<WrittenSetup>,
     error: String,
@@ -256,6 +258,15 @@ impl OnboardingView {
         })
         .detach();
 
+        let effort = match (&active, purpose) {
+            (Some(instance), Purpose::FirstRun) => setup::read_config(&instance.config_path())
+                ["agent"]["reasoning_effort"]
+                .as_str()
+                .and_then(setup::normalize_effort)
+                .unwrap_or("medium")
+                .to_string(),
+            _ => "medium".to_string(),
+        };
         let mode = state.mode;
         let mut view = Self {
             focus: cx.focus_handle(),
@@ -277,6 +288,7 @@ impl OnboardingView {
             models: None,
             models_loading: false,
             models_note: None,
+            effort,
             models_gen: 0,
             model_menu: false,
             everywhere,
@@ -381,6 +393,7 @@ impl OnboardingView {
             scope: self.scope(),
             profile: self.profile,
             system_prompt: self.instructions.clone(),
+            effort: self.effort.clone(),
         }
     }
 
@@ -410,6 +423,9 @@ impl OnboardingView {
         match self.step {
             Step::Welcome => self.go(Step::Provider, cx),
             Step::Provider => {
+                if self.models_loading {
+                    return;
+                }
                 if let Err((e, field)) = self.check_provider() {
                     return self.fail(e, field, cx);
                 }
@@ -695,6 +711,37 @@ impl OnboardingView {
         }
     }
 
+    /// Show the saved list immediately. A live refresh may replace it, but
+    /// the picker must not wait on that call.
+    fn seed_saved_models(&mut self, cache_as: &str) {
+        if self
+            .models
+            .as_ref()
+            .is_some_and(|list| !list.models.is_empty())
+        {
+            return;
+        }
+        let saved = models::cached(cache_as).filter(|list| !list.models.is_empty());
+        let list = saved.unwrap_or_else(|| {
+            let models = models::catalog_models(cache_as);
+            models::ModelList {
+                provider: cache_as.to_string(),
+                source: models::Source::Catalog,
+                fetched_at: 0,
+                models,
+            }
+        });
+        if list.models.is_empty() {
+            return;
+        }
+        if self.model.trim().is_empty() {
+            if let Some(first) = list.models.first() {
+                self.model = first.clone();
+            }
+        }
+        self.models = Some(list);
+    }
+
     /// Fetch the model list on a worker thread: live listing when there is
     /// a credential, else models.dev, else the built-in catalog.
     fn refresh_models(&mut self, cx: &mut Context<Self>) {
@@ -703,9 +750,7 @@ impl OnboardingView {
             _ if self.provider.catalog.is_empty() => self.provider.id.to_string(),
             _ => self.provider.catalog.to_string(),
         };
-        if self.models.is_none() {
-            self.models = models::cached(&cache_as);
-        }
+        self.seed_saved_models(&cache_as);
         let live = self.live_listing();
         let current = self.model.trim().to_string();
         self.models_gen += 1;
@@ -1346,8 +1391,10 @@ impl OnboardingView {
         };
         let field = self.text_field("model", Field::Model, self.model.clone(), &placeholder, cx);
         let count = self.models.as_ref().map_or(0, |m| m.models.len());
-        let picker_label = if self.models_loading {
-            "fetching…".to_string()
+        let picker_label = if self.models_loading && count == 0 {
+            "loading…".to_string()
+        } else if self.models_loading {
+            format!("{count} models · refreshing")
         } else if count == 0 {
             "no list".to_string()
         } else {
@@ -1437,18 +1484,29 @@ impl OnboardingView {
                 }))
         });
 
-        let note = match (&self.models, &self.models_note) {
-            _ if self.models_loading => "looking up models…".to_string(),
-            (Some(list), Some(why)) => {
-                format!(
-                    "list from {} · live /models failed: {why}",
-                    list.source.label()
-                )
+        let note = if self.models_loading {
+            if self
+                .models
+                .as_ref()
+                .is_some_and(|list| !list.models.is_empty())
+            {
+                "saved list · refreshing".to_string()
+            } else {
+                "loading models…".to_string()
             }
-            (Some(list), None) => {
-                format!("list from {} · or type any model id", list.source.label())
+        } else {
+            match (&self.models, &self.models_note) {
+                (Some(_), Some(_)) => {
+                    "couldn't load the live list, so this is the saved one".to_string()
+                }
+                (Some(list), None) => match list.source {
+                    models::Source::Live => "live list from the provider".to_string(),
+                    models::Source::ModelsDev | models::Source::Catalog => {
+                        "saved list · or type any model id".to_string()
+                    }
+                },
+                (None, _) => "type a model id".to_string(),
             }
-            (None, _) => "type a model id".to_string(),
         };
         div()
             .w_full()
@@ -1463,6 +1521,46 @@ impl OnboardingView {
                     .text_xs()
                     .text_color(rgb(GHOST))
                     .child(SharedString::from(note)),
+            )
+            .child(self.effort_row(cx))
+            .into_any_element()
+    }
+
+    fn effort_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let chips = setup::EFFORTS.iter().enumerate().map(|(i, (id, label))| {
+            let on = self.effort == *id;
+            let id_owned = (*id).to_string();
+            div()
+                .id(("effort", i))
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(if on { MUTED } else { SURFACE_2 }))
+                .bg(rgb(if on { SURFACE } else { BG }))
+                .text_xs()
+                .text_color(rgb(if on { ACCENT } else { SOFT }))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(SURFACE)))
+                .child(*label)
+                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                    view.effort = id_owned.clone();
+                    cx.notify();
+                }))
+        });
+        div()
+            .w_full()
+            .pt_2()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(div().text_xs().text_color(rgb(MUTED)).child("effort"))
+            .child(div().flex().flex_row().gap_2().children(chips))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child("how hard the model thinks. sent with every request."),
             )
             .into_any_element()
     }
@@ -1538,7 +1636,7 @@ impl OnboardingView {
                     (SignIn::Waiting(k, _), _) if *k == kind => {
                         ("sign-in opened in your browser".to_string(), WARN)
                     }
-                    (SignIn::Failed(k, e), _) if *k == kind => (e.clone(), DANGER),
+                    (SignIn::Failed(k, e), _) if *k == kind => (plain_failure(e), DANGER),
                     (_, Support::NeedsFeature(_)) if self.signed_in[i] => (
                         "signed in, but this build cannot use that login".into(),
                         WARN,
@@ -2082,6 +2180,11 @@ impl Render for OnboardingView {
                 },
             ),
         };
+        let next_label = if step == Step::Provider && self.models_loading {
+            "loading models…"
+        } else {
+            next_label
+        };
 
         let body: AnyElement = match step {
             Step::Welcome => {
@@ -2269,6 +2372,21 @@ pub fn probe(workspace: &std::path::Path, prompt: &str, has_credential: bool) ->
         true,
         mock_reply(prompt),
     )
+}
+
+fn plain_failure(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("403")
+        || lower.contains("401")
+        || lower.contains("forbidden")
+        || lower.contains("scope")
+    {
+        "that didn't work — the account refused the request".into()
+    } else if err.chars().count() > 120 {
+        "that didn't work".into()
+    } else {
+        err.to_string()
+    }
 }
 
 fn mock_reply(prompt: &str) -> String {

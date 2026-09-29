@@ -220,6 +220,8 @@ pub struct SetupChoices {
     pub profile: &'static ProfileInfo,
     /// Written to apollo.json `system_prompt`. Empty keeps the existing one.
     pub system_prompt: String,
+    /// `agent.reasoning_effort`: low, medium, high, or xhigh.
+    pub effort: String,
 }
 
 impl SetupChoices {
@@ -436,6 +438,24 @@ pub fn write_setup(choices: &SetupChoices) -> Result<WrittenSetup, String> {
     })
 }
 
+/// rx4's reasoning levels. The label is what the desktop shows.
+pub const EFFORTS: &[(&str, &str)] = &[
+    ("low", "low"),
+    ("medium", "medium"),
+    ("high", "high"),
+    ("xhigh", "max"),
+];
+
+pub fn normalize_effort(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" | "max" => Some("xhigh"),
+        _ => None,
+    }
+}
+
 /// Fold the choices into an apollo.json value. Mirrors `apollo init` and
 /// `config::apply_permission_profile`.
 pub fn apply_choices(config: &mut serde_json::Value, choices: &SetupChoices, workspace: &Path) {
@@ -464,12 +484,16 @@ pub fn apply_choices(config: &mut serde_json::Value, choices: &SetupChoices, wor
 
     root.insert("model".into(), json!(choices.resolved_model()));
     root.insert("workspace".into(), json!(workspace));
+    let effort = normalize_effort(&choices.effort).unwrap_or("medium");
     let instructions = choices.system_prompt.trim();
     if !instructions.is_empty() {
         root.insert("system_prompt".into(), json!(instructions));
     }
 
     apply_profile(config, choices.profile.id);
+    if let Some(agent) = config.get_mut("agent").and_then(|a| a.as_object_mut()) {
+        agent.insert("reasoning_effort".into(), json!(effort));
+    }
 }
 
 /// Set the permission profile the way `config::apply_permission_profile`
@@ -907,6 +931,7 @@ mod tests {
             scope: Scope::Folder(dir.to_path_buf()),
             profile: PROFILES.iter().find(|p| p.id == profile).unwrap(),
             system_prompt: String::new(),
+            effort: "medium".into(),
         }
     }
 

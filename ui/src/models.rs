@@ -124,7 +124,7 @@ fn client() -> Result<reqwest::blocking::Client, String> {
 pub fn fetch_live(base_url: &str, auth: &Auth) -> Result<Vec<String>, String> {
     if let Auth::OAuthPlan(provider, token) = auth {
         let models = rs_ai_oauth::fetch_models(*provider, token)
-            .map_err(|e| scrub(&e.to_string(), token))?;
+            .map_err(|e| plain_live_error(&scrub(&e.to_string(), token)))?;
         return Ok(dedupe(models.into_iter().map(|m| m.id)));
     }
     let url = format!("{}/models", base_url.trim().trim_end_matches('/'));
@@ -158,11 +158,7 @@ pub fn fetch_live(base_url: &str, auth: &Auth) -> Result<Vec<String>, String> {
         .map_err(|e| hide(format!("could not reach {url}: {e}")))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(match status.as_u16() {
-            401 | 403 => format!("{status} — the key was rejected"),
-            404 => format!("{status} — this endpoint has no /models listing"),
-            _ => format!("{status} from /models"),
-        });
+        return Err(plain_live_error(&status.as_u16().to_string()));
     }
     let value: serde_json::Value = resp
         .json()
@@ -175,6 +171,22 @@ pub fn fetch_live(base_url: &str, auth: &Auth) -> Result<Vec<String>, String> {
 }
 
 /// Never let a key end up in an error shown on screen.
+/// A sentence for the screen. Never the provider's raw body.
+fn plain_live_error(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("forbidden")
+        || lower.contains("scope")
+    {
+        "the account can't list models".into()
+    } else if lower.contains("404") {
+        "this provider has no model listing".into()
+    } else {
+        "the provider didn't answer".into()
+    }
+}
+
 fn scrub(text: &str, secret: &str) -> String {
     if secret.len() >= 6 {
         text.replace(secret, "***")
@@ -473,6 +485,13 @@ mod tests {
             assert_eq!(got.source, Source::Catalog);
             assert!(!got.models.is_empty());
         });
+    }
+
+    #[test]
+    fn live_errors_stay_short() {
+        let raw = "Network error: models request returned status 403 Forbidden: Missing scopes: api.model.read";
+        assert_eq!(plain_live_error(raw), "the account can't list models");
+        assert!(!plain_live_error(raw).contains("scope"));
     }
 
     #[test]

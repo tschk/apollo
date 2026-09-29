@@ -1093,6 +1093,7 @@ async fn main() -> anyhow::Result<()> {
                 model: &model,
                 temperature: 0.7,
                 max_tokens: None,
+                reasoning_effort: None,
             };
             let response = provider.chat(&request).await?;
             println!("{}", response.text.unwrap_or_default());
