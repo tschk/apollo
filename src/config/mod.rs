@@ -312,6 +312,8 @@ pub struct MemoryIdeasConfig {
     pub heartbeat_chat_id: Option<String>,
     /// After idle, expand open loops into dream nodes (graph).
     pub dream_on_heartbeat: bool,
+    /// Run daily consolidation from heartbeat (brief keys, timeline, zkr review).
+    pub consolidate_on_heartbeat: bool,
 }
 
 impl Default for MemoryIdeasConfig {
@@ -322,6 +324,7 @@ impl Default for MemoryIdeasConfig {
             graph_recall_limit: 5,
             heartbeat_chat_id: None,
             dream_on_heartbeat: false,
+            consolidate_on_heartbeat: true,
         }
     }
 }
@@ -723,8 +726,101 @@ impl Default for GroupChatConfig {
 }
 
 #[cfg(test)]
+mod is_secret_key_tests {
+    use super::*;
+
+    #[test]
+    fn exact_matches() {
+        assert!(is_secret_key("api_key"));
+        assert!(is_secret_key("token"));
+        assert!(is_secret_key("secret"));
+        assert!(is_secret_key("password"));
+    }
+
+    #[test]
+    fn suffix_matches() {
+        assert!(is_secret_key("openai_api_key"));
+        assert!(is_secret_key("bot_token"));
+        assert!(is_secret_key("client_secret"));
+        assert!(is_secret_key("admin_password"));
+    }
+
+    #[test]
+    fn case_insensitivity() {
+        assert!(is_secret_key("API_KEY"));
+        assert!(is_secret_key("Token"));
+        assert!(is_secret_key("SeCrEt"));
+        assert!(is_secret_key("PASSWORD"));
+        assert!(is_secret_key("Bot_Token"));
+    }
+
+    #[test]
+    fn negative_matches() {
+        // Missing underscore before the secret word
+        assert!(!is_secret_key("apitoken"));
+        assert!(!is_secret_key("mysecret"));
+
+        // Secret word is not at the end
+        assert!(!is_secret_key("token_id"));
+        assert!(!is_secret_key("secret_key")); // _key is not in the list, secret is at start
+        assert!(!is_secret_key("password_hash"));
+
+        // Similar but different words
+        assert!(!is_secret_key("key"));
+        assert!(!is_secret_key("pass"));
+        assert!(!is_secret_key("passwords"));
+
+        // Empty and unrelated
+        assert!(!is_secret_key(""));
+        assert!(!is_secret_key("user_name"));
+    }
+}
+
+#[cfg(test)]
 mod config_path_tests {
     use super::*;
+
+    #[test]
+    fn get_path_rejects_empty_keys() {
+        let cfg = Config::default_config();
+        let err = cfg.get_path("").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+
+        let err = cfg.get_path("   ").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+    }
+
+    #[test]
+    fn get_path_rejects_unknown_top_level_keys() {
+        let cfg = Config::default_config();
+        let err = cfg.get_path("unknown_key").unwrap_err().to_string();
+        assert!(err.contains("unknown config key `unknown_key`"), "{err}");
+        assert!(err.contains("<root>"), "{err}");
+    }
+
+    #[test]
+    fn get_path_rejects_unknown_nested_keys() {
+        let cfg = Config::default_config();
+        let err = cfg
+            .get_path("provider.unknown_key")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown config key `provider.unknown_key`"),
+            "{err}"
+        );
+        assert!(err.contains("Available under `provider`"), "{err}");
+    }
+
+    #[test]
+    fn get_path_rejects_indexing_into_non_objects() {
+        let cfg = Config::default_config();
+        let err = cfg
+            .get_path("provider.name.something")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not a section"), "{err}");
+    }
 
     #[test]
     fn get_reads_nested_and_top_level_keys() {
@@ -787,6 +883,17 @@ mod config_path_tests {
     }
 
     #[test]
+    fn empty_keys_are_rejected() {
+        let cfg = Config::default_config();
+
+        let err = cfg.set_path("", "value").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+
+        let err = cfg.set_path("   ", "value").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+    }
+
+    #[test]
     fn wrong_typed_values_are_rejected_before_they_reach_disk() {
         let cfg = Config::default_config();
         let err = cfg
@@ -800,6 +907,46 @@ mod config_path_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("expected `true` or `false`"), "{err}");
+    }
+
+    #[test]
+    fn arrays_can_be_updated_from_json_strings() {
+        let cfg = Config::default_config();
+        let json_arr = r#"["web", "memory"]"#;
+
+        let (cfg, written) = cfg.set_path("toolsets.enabled", json_arr).unwrap();
+        assert_eq!(
+            cfg.toolsets.enabled,
+            vec!["web".to_string(), "memory".to_string()]
+        );
+        assert_eq!(written, serde_json::json!(["web", "memory"]));
+    }
+
+    #[test]
+    fn objects_can_be_updated_from_json_strings() {
+        let cfg = Config::default_config();
+        let json_obj = r#"{"hello": "world"}"#;
+
+        let (cfg, written) = cfg.set_path("channel.settings", json_obj).unwrap();
+        assert_eq!(
+            cfg.channel.settings.get("hello").map(|s| s.as_str()),
+            Some("world")
+        );
+        assert_eq!(written, serde_json::json!({"hello": "world"}));
+    }
+
+    #[test]
+    fn invalid_json_for_arrays_is_rejected() {
+        let cfg = Config::default_config();
+
+        let err = cfg
+            .set_path("toolsets.enabled", "[invalid")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("expected JSON matching the existing value"),
+            "{err}"
+        );
     }
 
     #[test]

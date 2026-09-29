@@ -38,7 +38,7 @@ fn auth_token() -> Option<String> {
             return Some(token.trim().to_string());
         }
     }
-    let path = crate::setup::home_dir()?.join(".apollo").join("http-token");
+    let path = home_dir()?.join(".apollo").join("http-token");
     let token = std::fs::read_to_string(path).ok()?;
     let token = token.trim();
     (!token.is_empty()).then(|| token.to_string())
@@ -283,7 +283,7 @@ pub fn ensure_apollo_bin() -> Result<std::path::PathBuf, String> {
         return Err("couldn't start the agent".into());
     };
     let output = std::process::Command::new("cargo")
-        .args(["build", "-p", "apollo", "--bin", "apollo"])
+        .args(["build", "-p", "apollo-agent", "--bin", "apollo"])
         .current_dir(&root)
         .output()
         .map_err(|_| "couldn't start the agent".to_string())?;
@@ -516,12 +516,19 @@ fn workspace_of(config: &std::path::Path) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+fn home_dir() -> Option<std::path::PathBuf> {
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .find_map(|var| std::env::var_os(var).filter(|h| !h.is_empty()))
+        .map(std::path::PathBuf::from)
+}
+
 fn daemon_state_path() -> Option<std::path::PathBuf> {
-    crate::setup::home_dir().map(|h| h.join(".apollo").join("ui-daemon.json"))
+    home_dir().map(|h| h.join(".apollo").join("ui-daemon.json"))
 }
 
 fn daemon_log_path() -> std::path::PathBuf {
-    crate::setup::home_dir()
+    home_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(".apollo")
         .join("serve.log")
@@ -586,6 +593,32 @@ pub fn config_model() -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("—")
         .to_string()
+}
+
+/// Model and engine reported by the local config. The TUI status bar still
+/// asks for both; the desktop shows the model only.
+#[allow(dead_code)]
+pub fn config_summary() -> (String, String) {
+    let Ok(text) = std::fs::read_to_string("apollo.json") else {
+        return ("—".into(), "—".into());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return ("—".into(), "—".into());
+    };
+    let model = v
+        .get("model")
+        .and_then(|m| m.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("—")
+        .to_string();
+    let engine = v
+        .get("agent")
+        .and_then(|a| a.get("engine"))
+        .and_then(|e| e.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("—")
+        .to_string();
+    (model, engine)
 }
 
 #[cfg(test)]

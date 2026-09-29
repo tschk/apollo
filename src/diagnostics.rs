@@ -458,4 +458,115 @@ mod tests {
         assert!(!check.soft_warn);
         assert!(check.detail.contains("parses OK"));
     }
+
+    #[test]
+    fn audit_config_clean_baseline_has_no_findings() {
+        let mut cfg = Config::default();
+        // Ensure all policies are disabled so no warnings are emitted
+        cfg.policy.allow_shell = false;
+        cfg.policy.allow_dynamic_tools = false;
+        cfg.policy.allow_plugin_shell = false;
+        cfg.policy.allow_plugin_git = false;
+
+        // Ensure a valid workspace
+        let dir = tempfile::tempdir().unwrap();
+        cfg.workspace = dir.path().to_path_buf();
+
+        // Provide API key
+        cfg.provider.api_key = Some("test-key".into());
+
+        let findings = audit_config(&cfg);
+        assert!(
+            findings.is_empty(),
+            "Expected 0 findings for clean config, got: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn audit_config_reports_policy_flags() {
+        let mut cfg = Config::default();
+        cfg.policy.allow_shell = true;
+        cfg.policy.allow_dynamic_tools = true;
+        cfg.policy.allow_plugin_shell = true;
+        cfg.policy.allow_plugin_git = true;
+
+        let dir = tempfile::tempdir().unwrap();
+        cfg.workspace = dir.path().to_path_buf();
+        cfg.provider.api_key = Some("test-key".into());
+
+        let findings = audit_config(&cfg);
+
+        let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
+        assert!(codes.contains(&"policy_shell_enabled"));
+        assert!(codes.contains(&"policy_dynamic_tools_enabled"));
+        assert!(codes.contains(&"policy_plugin_shell_enabled"));
+        assert!(codes.contains(&"policy_plugin_git_enabled"));
+        // Ensure we got exactly those 4
+        assert_eq!(findings.len(), 4);
+    }
+
+    #[test]
+    fn audit_config_reports_missing_workspace() {
+        let mut cfg = Config::default();
+        cfg.policy.allow_shell = false;
+        cfg.policy.allow_dynamic_tools = false;
+        cfg.policy.allow_plugin_shell = false;
+        cfg.policy.allow_plugin_git = false;
+        cfg.provider.api_key = Some("test-key".into());
+
+        // Use a path that is highly unlikely to exist
+        cfg.workspace = std::path::PathBuf::from("/tmp/does-not-exist-apollo-doctor-12345");
+
+        let findings = audit_config(&cfg);
+        let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
+        assert!(codes.contains(&"workspace_missing"));
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn audit_config_reports_missing_credentials() {
+        let mut cfg = Config::default();
+        cfg.policy.allow_shell = false;
+        cfg.policy.allow_dynamic_tools = false;
+        cfg.policy.allow_plugin_shell = false;
+        cfg.policy.allow_plugin_git = false;
+
+        let dir = tempfile::tempdir().unwrap();
+        cfg.workspace = dir.path().to_path_buf();
+
+        // Remove api key from config
+        cfg.provider.api_key = None;
+
+        // Mask out OPENAI_API_KEY from environment to test missing credential check cleanly
+        temp_env::with_var("OPENAI_API_KEY", None::<String>, || {
+            let findings = audit_config(&cfg);
+            let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
+            assert!(codes.contains(&"provider_credentials_missing"));
+            assert_eq!(findings.len(), 1);
+        });
+    }
+
+    #[test]
+    fn audit_config_accepts_env_credentials() {
+        let mut cfg = Config::default();
+        cfg.policy.allow_shell = false;
+        cfg.policy.allow_dynamic_tools = false;
+        cfg.policy.allow_plugin_shell = false;
+        cfg.policy.allow_plugin_git = false;
+
+        let dir = tempfile::tempdir().unwrap();
+        cfg.workspace = dir.path().to_path_buf();
+
+        cfg.provider.api_key = None;
+
+        // Set OPENAI_API_KEY in env
+        temp_env::with_var("OPENAI_API_KEY", Some("env-test-key"), || {
+            let findings = audit_config(&cfg);
+            assert!(
+                findings.is_empty(),
+                "Should be empty when OPENAI_API_KEY is present"
+            );
+        });
+    }
 }

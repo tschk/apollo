@@ -43,17 +43,9 @@ struct CronArgs {
     /// Goal/task description (required for schedule)
     #[serde(default)]
     goal: String,
-    /// Priority 1-10 (default 5)
-    #[serde(default = "default_priority")]
-    #[allow(dead_code)]
-    priority: u8,
     /// Schedule ID (required for enable/disable/delete)
     #[serde(default)]
     id: String,
-}
-
-fn default_priority() -> u8 {
-    5
 }
 
 #[async_trait]
@@ -87,12 +79,6 @@ impl Tool for CronTool {
                     "goal": {
                         "type": "string",
                         "description": "What the agent should do when this schedule fires"
-                    },
-                    "priority": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 10,
-                        "description": "Task priority 1-10 (default 5)"
                     },
                     "id": {
                         "type": "string",

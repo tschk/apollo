@@ -513,7 +513,7 @@ mod default_model_tests {
 
         let mut cfg = config_with("chatgpt", "");
         apply_default_model(&mut cfg);
-        assert_eq!(cfg.model, "gpt-5.5");
+        assert_eq!(cfg.model, "gpt-5.6");
     }
 
     #[test]
@@ -529,7 +529,7 @@ mod default_model_tests {
     fn whitespace_counts_as_unset() {
         let mut cfg = config_with("chatgpt", "   ");
         apply_default_model(&mut cfg);
-        assert_eq!(cfg.model, "gpt-5.5");
+        assert_eq!(cfg.model, "gpt-5.6");
     }
 
     #[test]
