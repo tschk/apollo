@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "apollo",
+    "slug": "apollo-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#09090b",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "hk.tsc.apollo"
+    },
+    "android": {
+      "package": "hk.tsc.apollo",
+      "adaptiveIcon": {
+        "backgroundColor": "#09090b",
+        "foregroundImage": "./assets/android-icon-foreground.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "backgroundColor": "#09090b"
+    }
+  }
+}

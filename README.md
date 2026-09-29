@@ -127,6 +127,19 @@ cargo build --release
 ./target/release/apollo-install install
 ```
 
+## Mobile
+
+`apps/mobile` is the iPhone and Android app. Same zinc-950 and Chivo Mono as the desktop.
+
+It records the same document the desktop keeps at `~/.apollo/desktop.json`: onboarding, simple or advanced, and instances (provider, model, permission profile, one folder or everywhere). Keys are not fields in that document. On a phone the copy lives in app storage. See `apps/mobile/README.md`.
+
+```bash
+cd apps/mobile
+npm install
+npm test
+npx expo start
+```
+
 ## Agent HTTP API
 
 `apollo chat` and `apollo serve` expose the agent on `127.0.0.1:31338`
