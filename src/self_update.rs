@@ -433,8 +433,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_repo() {
-        let mut env = MockUpdateEnv::default();
-        env.is_git_repo = false;
+        let env = MockUpdateEnv {
+            is_git_repo: false,
+            ..Default::default()
+        };
         let updater = SelfUpdater::with_env(PathBuf::from("."), mock_config(true), env);
         let outcome = updater.run_once().await.unwrap();
         assert_eq!(outcome, UpdateOutcome::NoRepo);
@@ -442,8 +444,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_dirty_worktree() {
-        let mut env = MockUpdateEnv::default();
-        env.worktree_is_clean = false;
+        let env = MockUpdateEnv {
+            worktree_is_clean: false,
+            ..Default::default()
+        };
         let updater = SelfUpdater::with_env(PathBuf::from("."), mock_config(true), env);
         let outcome = updater.run_once().await.unwrap();
         assert_eq!(outcome, UpdateOutcome::DirtyWorktree);
@@ -451,9 +455,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_already_current() {
-        let mut env = MockUpdateEnv::default();
-        env.current_head = "aaaa".to_string();
-        env.upstream_head = "aaaa".to_string();
+        let env = MockUpdateEnv {
+            current_head: "aaaa".to_string(),
+            upstream_head: "aaaa".to_string(),
+            ..Default::default()
+        };
         let updater = SelfUpdater::with_env(PathBuf::from("."), mock_config(true), env);
         let outcome = updater.run_once().await.unwrap();
         assert_eq!(outcome, UpdateOutcome::AlreadyCurrent);
@@ -484,8 +490,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_updated_no_restart() {
-        let mut env = MockUpdateEnv::default();
-        env.restart_success = false;
+        let env = MockUpdateEnv {
+            restart_success: false,
+            ..Default::default()
+        };
         let updater = SelfUpdater::with_env(PathBuf::from("."), mock_config(true), env);
         let outcome = updater.run_once().await.unwrap();
         assert_eq!(outcome, UpdateOutcome::Updated { restarted: false });
