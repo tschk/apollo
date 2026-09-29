@@ -215,6 +215,8 @@ pub struct MemoryIdeasConfig {
     pub heartbeat_chat_id: Option<String>,
     /// After idle, expand open loops into dream nodes (graph).
     pub dream_on_heartbeat: bool,
+    /// Run daily consolidation from heartbeat (brief keys, timeline, zkr review).
+    pub consolidate_on_heartbeat: bool,
 }
 
 impl Default for MemoryIdeasConfig {
@@ -225,6 +227,7 @@ impl Default for MemoryIdeasConfig {
             graph_recall_limit: 5,
             heartbeat_chat_id: None,
             dream_on_heartbeat: false,
+            consolidate_on_heartbeat: true,
         }
     }
 }

@@ -618,6 +618,28 @@ impl AgentRunner {
         };
         #[cfg(not(feature = "zkr-memory"))]
         let system_prompt = base_prompt;
+        #[cfg(feature = "zkr-memory")]
+        let system_prompt = if self.memory_enabled {
+            if let Some(store) = &self.zkr {
+                match store
+                    .profile_pager(self.zkr_config.recall_limit.max(8))
+                    .await
+                {
+                    Ok(Some(pager)) => format!(
+                        "{system_prompt}\n\n<memory_one_pager>\n{pager}\n</memory_one_pager>"
+                    ),
+                    Ok(None) => system_prompt,
+                    Err(error) => {
+                        tracing::warn!("zkr profile pager failed: {error}");
+                        system_prompt
+                    }
+                }
+            } else {
+                system_prompt
+            }
+        } else {
+            system_prompt
+        };
         let mut messages = vec![ChatMessage::system(&system_prompt)];
         if let Some(guidance) = crate::context::routing_guidance(msg.is_group, channel.name()) {
             messages.push(ChatMessage::system(guidance));

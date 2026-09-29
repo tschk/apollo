@@ -924,6 +924,28 @@ async fn main() -> anyhow::Result<()> {
                 cron_runtime = Some((cron_rx, cron_shutdown, cron_sched));
             }
 
+            let _consolidation_handle = if cfg.memory.consolidate_on_heartbeat {
+                let chat_id = cfg
+                    .memory
+                    .heartbeat_chat_id
+                    .clone()
+                    .unwrap_or_else(|| scheduled_chat_id.clone());
+                Some(apollo::memory::consolidation::start_daily_consolidation(
+                    apollo::memory::consolidation::ConsolidationTicker {
+                        workspace: workspace.clone(),
+                        memory: memory.clone(),
+                        chat_id,
+                        interval_secs: 6 * 60 * 60,
+                        quiet_start_hour: 23,
+                        quiet_end_hour: 8,
+                        #[cfg(feature = "zkr-memory")]
+                        zkr: zkr_store.clone(),
+                    },
+                ))
+            } else {
+                None
+            };
+
             let _self_update_handle = self_updater.start();
 
             // Every channel arm parks forever; `/shutdown` unwinds this scope

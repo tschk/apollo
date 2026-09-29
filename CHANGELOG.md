@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Daily memory consolidation writes `time_contexts` / `open_loops`, a timeline digest, dream graph nodes, and a cited zkr daily review (`memory.consolidate_on_heartbeat`).
+- Session-start zkr profile one-pager with a generation timestamp.
+- `DefaultCompactor` now calls the LLM summarizer and keeps identifier/open-loop recap text on fallback.
+
 ## [0.7.1]
 
 ### Security

@@ -10,7 +10,7 @@
 | hermes-rs streaming parser | `streaming_parser.rs` |
 | OpenClaw auth paths | `~/.openclaw/...` in `bootstrap.rs`, `copilot.rs` |
 | Host plugin scan | `plugin_hosts.rs` — `.openclaw/plugins`, `.hermes/plugins`, workspace `plugins/` |
-| zkr | feature `zkr-memory`, `zkr_memory` tool, recall inject, auto capture |
+| zkr | feature `zkr-memory`, `zkr_memory` tool, recall inject, auto capture, profile pager |
 
 ## v2 absorbed on main (partial)
 
@@ -28,9 +28,10 @@
 
 ## zkr integration
 
-- Crate: **zkr** `0.2` on crates.io, feature `zkr-memory`.
+- Crate: **zkr** `0.4` on crates.io, feature `zkr-memory`.
 - Config: `[zkr]` — `enabled`, `database`, `tenant_id`, `person_id`, `auto_capture`, `inject_recall`, `recall_limit`.
-- Tool: `zkr_memory` — `remember`, `search`, `get`, `correct`, `delete`, `profiles`.
+- Tool: `zkr_memory` — `remember`, `search`, `get`, `correct`, `delete`, `profiles`, `profile_pager`.
+- Daily consolidation (`memory.consolidate_on_heartbeat`) writes brief keys, a timeline digest, dream graph nodes, and a cited zkr daily review.
 - Evidence-backed temporal memory with citations; replaces the former rs_gbrain integration.
 
 ## Consolidation goal
