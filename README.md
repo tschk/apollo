@@ -137,28 +137,73 @@ Telekinesis portal tokens (zinc-950, Chivo Mono — bundled, SIL OFL).
 cargo build -p apollo-ui -p apollo-agent   # keep `apollo` next to `apollo-ui`
 ./target/debug/apollo-ui                   # first launch: onboarding (or `apollo ui`)
 ./target/debug/apollo-ui --onboarding      # run the onboarding again
+./target/debug/apollo-ui --advanced        # or --simple: switch mode (saved)
 ```
 
-The first launch walks through setup as screens: welcome → provider + API key
-(masked field) → workspace folder → permission profile → a test prompt →
-done, then opens the chat window. It writes what `apollo init` writes:
+The first launch walks through setup: welcome → connect a model → where it
+works → permission profile → a test prompt → simple or advanced. There is no
+title bar, just a 2px progress line and `n / 6` in the footer.
 
-- `<workspace>/apollo.json` — provider, model, workspace, permission profile;
-  `provider.api_key` stays `null`.
-- `<workspace>/.env` — the key, under the variable apollo reads for that
-  provider (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, …), mode `0600`. The key
-  is never logged or shown back, not even its length.
-- `~/.apollo/desktop.json` — "onboarded" plus the workspace to open. No
-  secrets. With it present, later launches go straight to the chat window.
+**Connect a model.** Three sign-in providers are pinned at the top; everything
+else is in a dropdown.
+
+| Option | How it signs in | Works end to end? |
+| --- | --- | --- |
+| ChatGPT | browser OAuth (PKCE, callback on `localhost:1455`) via `rs_ai_oauth` | yes: apollo reads the shared ChatGPT login when `provider.api_key` is unset |
+| GitHub Copilot | browser OAuth (callback on `localhost:9876`) | the sign-in is saved, but apollo only uses it when built with `--features provider-copilot`. The card says so |
+| Claude | none | no: apollo routes `anthropic`/`claude` configs to ChatGPT. Shown as "not supported by apollo" |
+| OpenRouter, OpenAI, Gemini, xAI, DeepSeek, Moonshot | API key | yes |
+| Ollama | none (local) | yes |
+| Custom endpoint | base URL + optional key + model | yes, any OpenAI-compatible `/chat/completions` API |
+
+Sign-ins land in the shared credential store,
+`~/.config/rs_ai/credentials/<provider>.json` (0600). The app only ever sees
+whether a sign-in succeeded, never the token.
+
+A custom endpoint's key goes in `.env` as `APOLLO_PROVIDER_API_KEY`, which
+apollo now reads for any provider whose `provider.api_key` is unset. It is
+read before the ChatGPT-login and `OPENAI_API_KEY` fallbacks, so a custom
+config is never silently switched to another provider.
+
+**Where it works.** Pick one folder, which holds `apollo.json`, `.env` and
+`.apollo/` like `apollo init` does. Or pick **works everywhere**: the workspace
+is `~` and the config lives in `~/.apollo/instances/<id>/`.
+
+**Instances.** Each instance is its own config dir with its own provider,
+model and permissions. Add one with "+ new instance" in the instance pill
+(simple mode) or in the roster sidebar (advanced mode). Two instances cannot
+share a folder. Switching instances re-roots the chat in that instance's
+config dir.
+
+**Modes.** Simple mode is the chat plus an instance pill and a settings link.
+Advanced mode adds:
+- a roster sidebar (initial, name, model; click to switch);
+- **tools**: switch the permission profile (writes apollo.json) and see policy flags and toolsets;
+- **model parameters**: steppers for `agent.max_rounds`, `agent.max_history_messages` and `agent.auto_compact_after`;
+- **logs**: the session's turns, tool calls, timings and errors.
+
+Settings has the simple/advanced toggle in both modes.
+
+Files written:
+
+- `<config dir>/apollo.json`: provider, base URL (Ollama and custom only),
+  model, workspace, permission profile. `provider.api_key` stays `null`.
+- `<config dir>/.env`: the key, under the variable apollo reads for that
+  provider, mode `0600`. A key is never logged or shown back, not even its
+  length.
+- `~/.apollo/desktop.json`: mode, the active instance and the instance list
+  (name, scope, config dir, provider, model, profile). No secrets. The older
+  single-workspace format is migrated automatically.
 
 The test prompt uses the most real path available: a running agent server
-(`apollo chat`, full rx4 turn), else `apollo ask` in the new workspace, else a
-local reply that is labelled **offline mock**.
+(`apollo chat`, full rx4 turn), else `apollo ask` in the instance's config
+dir, else a local reply labelled **offline mock**.
 
 On Linux the window opens through X11 or Wayland (Vulkan via Blade; Mesa's
-lavapipe works for headless/Xvfb). Layouts live in `ui/views/*.crepus`.
+lavapipe works for headless/Xvfb). Layouts live in `ui/views/*.crepus` and
+`ui/src/shell.rs`.
 
-Screenshots: [`docs/screenshots/apollo-ui/`](docs/screenshots/apollo-ui/).
+Screenshots: [`docs/screenshots/apollo-ui/v2/`](docs/screenshots/apollo-ui/v2/).
 
 ## Agent HTTP API
 
