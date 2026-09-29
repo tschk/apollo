@@ -759,3 +759,71 @@ impl RocksCache {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_rockscache_put_get_delete() {
+        let dir = tempdir().unwrap();
+        let cache = RocksCache::new(dir.path()).expect("Failed to create RocksCache");
+
+        let cf = "agent_cache";
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // Test get on non-existent key
+        let get_res = cache.get(cf, key).expect("Failed to get");
+        assert_eq!(get_res, None);
+
+        // Test put
+        cache.put(cf, key, value).expect("Failed to put");
+
+        // Test get
+        let get_res = cache.get(cf, key).expect("Failed to get");
+        assert_eq!(get_res, Some(value.to_vec()));
+
+        // Test delete
+        cache.delete(cf, key).expect("Failed to delete");
+
+        // Test get after delete
+        let get_res = cache.get(cf, key).expect("Failed to get");
+        assert_eq!(get_res, None);
+    }
+
+    #[test]
+    fn test_rockscache_invalid_cf() {
+        let dir = tempdir().unwrap();
+        let cache = RocksCache::new(dir.path()).expect("Failed to create RocksCache");
+
+        let cf = "invalid_cf";
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // Test put
+        let put_res = cache.put(cf, key, value);
+        assert!(put_res.is_err());
+        assert_eq!(
+            put_res.unwrap_err().to_string(),
+            "Column family invalid_cf not found"
+        );
+
+        // Test get
+        let get_res = cache.get(cf, key);
+        assert!(get_res.is_err());
+        assert_eq!(
+            get_res.unwrap_err().to_string(),
+            "Column family invalid_cf not found"
+        );
+
+        // Test delete
+        let delete_res = cache.delete(cf, key);
+        assert!(delete_res.is_err());
+        assert_eq!(
+            delete_res.unwrap_err().to_string(),
+            "Column family invalid_cf not found"
+        );
+    }
+}
