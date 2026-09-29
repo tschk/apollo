@@ -71,10 +71,7 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
-            .or_else(|| {
-                crate::providers::shared_credentials::load(rs_ai_oauth::OAuthProvider::Claude)
-                    .map(|(token, _, _)| token)
-            });
+            .or_else(|| crate::providers::chatgpt_login::load_claude_access());
         if let Some(key) = key {
             cfg.provider.api_key = Some(key);
         }
@@ -82,11 +79,10 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
 
     if cfg.provider.api_key.is_none() && !is_anthropic(&cfg.provider.name) {
         #[cfg(feature = "rs-ai")]
-        if let Some((token, _, _)) =
-            crate::providers::shared_credentials::load(rs_ai_oauth::OAuthProvider::ChatGpt)
-        {
+        if let Some(login) = crate::providers::chatgpt_login::load() {
             cfg.provider.name = "chatgpt".to_string();
-            cfg.provider.api_key = Some(token);
+            cfg.provider.api_key = Some(login.access_token);
+            cfg.provider.account_id = login.account_id;
         }
     }
 
@@ -225,7 +221,9 @@ pub fn build_provider(cfg: &Config) -> Arc<dyn Provider> {
 
     match cfg.provider.name.as_str() {
         #[cfg(feature = "rs-ai")]
-        "chatgpt" => Arc::new(CodexProvider::new(api_key)),
+        "chatgpt" => {
+            Arc::new(CodexProvider::new(api_key).with_account_id(cfg.provider.account_id.clone()))
+        }
         #[cfg(feature = "rs-ai")]
         "anthropic" | "claude" => Arc::new(crate::providers::rs_ai::RsAiProvider::new(
             "anthropic",
@@ -513,7 +511,7 @@ mod default_model_tests {
 
         let mut cfg = config_with("chatgpt", "");
         apply_default_model(&mut cfg);
-        assert_eq!(cfg.model, "gpt-5.6");
+        assert_eq!(cfg.model, "gpt-6-luna");
     }
 
     #[test]
@@ -529,7 +527,7 @@ mod default_model_tests {
     fn whitespace_counts_as_unset() {
         let mut cfg = config_with("chatgpt", "   ");
         apply_default_model(&mut cfg);
-        assert_eq!(cfg.model, "gpt-5.6");
+        assert_eq!(cfg.model, "gpt-6-luna");
     }
 
     #[test]
@@ -721,7 +719,7 @@ mod anthropic_tests {
             ],
             || {
                 let cfg = load_config_workspace(&path, None);
-                assert_eq!(cfg.model, "claude-sonnet-5");
+                assert_eq!(cfg.model, "claude-sonnet-5-5");
             },
         );
     }

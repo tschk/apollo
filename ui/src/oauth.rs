@@ -98,16 +98,37 @@ impl OAuthKind {
         }
     }
 
-    /// A usable login is already in the shared store (live, or refreshable).
+    /// A usable login is already on this machine. ChatGPT counts the Codex
+    /// CLI file as well as the shared store, so a desktop that already has
+    /// that login does not start a fresh browser flow.
     pub fn signed_in(self) -> bool {
+        if self == OAuthKind::ChatGpt && codex_cli_access_token().is_some() {
+            return true;
+        }
+        if self == OAuthKind::Claude && claude_code_access_token().is_some() {
+            return true;
+        }
         credentials::load(&self.provider())
             .map(|t| !credentials::is_expired(&t) || t.refresh_token.is_some())
             .unwrap_or(false)
     }
 
     /// The stored access token, for listing the plan's models. Stays on the
-    /// worker thread that asked; never shown.
+    /// worker thread that asked; never shown. ChatGPT prefers the Codex CLI
+    /// login, which is the one the agent sends.
     pub fn access_token(self) -> Option<String> {
+        if self == OAuthKind::ChatGpt {
+            if let Some(token) = codex_cli_access_token() {
+                return Some(token);
+            }
+        }
+        if self == OAuthKind::Claude {
+            if credentials::load(&self.provider()).is_none() {
+                if let Some(token) = claude_code_access_token() {
+                    return Some(token);
+                }
+            }
+        }
         credentials::load(&self.provider())
             .filter(|t| !credentials::is_expired(t))
             .map(|t| t.access_token)
@@ -132,6 +153,37 @@ impl OAuthKind {
         self.release();
         result
     }
+}
+
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}
+
+fn json_at(path: std::path::PathBuf, pointer: &str) -> Option<String> {
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    value
+        .pointer(pointer)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn codex_cli_access_token() -> Option<String> {
+    json_at(
+        home_dir()?.join(".codex").join("auth.json"),
+        "/tokens/access_token",
+    )
+}
+
+fn claude_code_access_token() -> Option<String> {
+    json_at(
+        home_dir()?.join(".claude").join(".credentials.json"),
+        "/claudeAiOauth/accessToken",
+    )
 }
 
 #[cfg(test)]
@@ -161,5 +213,31 @@ mod tests {
                 "expired but refreshable counts"
             );
         });
+    }
+
+    #[test]
+    fn chatgpt_signed_in_reads_the_codex_cli_file() {
+        let home = tempfile::tempdir().unwrap();
+        let creds = tempfile::tempdir().unwrap();
+        let auth = home.path().join(".codex/auth.json");
+        std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+        std::fs::write(
+            &auth,
+            r#"{"tokens":{"access_token":"from-codex","account_id":"acct"}}"#,
+        )
+        .unwrap();
+        temp_env::with_vars(
+            [
+                ("HOME", Some(home.path().as_os_str())),
+                ("RS_AI_CREDENTIALS_DIR", Some(creds.path().as_os_str())),
+            ],
+            || {
+                assert!(OAuthKind::ChatGpt.signed_in());
+                assert_eq!(
+                    OAuthKind::ChatGpt.access_token().as_deref(),
+                    Some("from-codex")
+                );
+            },
+        );
     }
 }
