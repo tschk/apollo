@@ -13,6 +13,8 @@
 /// Provider name (and common aliases) to the model it defaults to.
 const DEFAULTS: &[(&str, &str)] = &[
     ("chatgpt", "gpt-5.5"),
+    ("anthropic", "claude-sonnet-4-6"),
+    ("claude", "claude-sonnet-4-6"),
     ("openai", "gpt-5.4"),
     ("copilot", "gpt-5.4"),
     ("github-copilot", "gpt-5.4"),

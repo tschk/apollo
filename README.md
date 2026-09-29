@@ -38,7 +38,7 @@ a mock server by `tests/channel_conformance.rs`. Verify one against its real
 service with `apollo channel-check --channel <name>`.
 
 ### LLM Providers
-Anthropic (default), OpenAI-compat, Ollama, Copilot, OpenRouter, Groq, Together,
+Anthropic (API key or Claude subscription login), ChatGPT login, OpenAI-compat, Ollama, Copilot, OpenRouter, Groq, Together,
 Mistral, DeepSeek, Fireworks, Perplexity, xAI, Moonshot, Venice, HuggingFace,
 SiliconFlow, Cerebras, MiniMax, Vercel, Cloudflare
 
@@ -144,26 +144,50 @@ The first launch walks through setup: welcome → connect a model → where it
 works → permission profile → a test prompt → simple or advanced. There is no
 title bar, just a 2px progress line and `n / 6` in the footer.
 
-**Connect a model.** Three sign-in providers are pinned at the top; everything
-else is in a dropdown.
+**Connect a model.** Three sign-in cards are pinned at the top. Clicking a
+card starts that login straight away: the browser opens on the provider's
+sign-in page and the login comes back to a localhost port. Everything else is
+in a dropdown you can type into to filter.
 
 | Option | How it signs in | Works end to end? |
 | --- | --- | --- |
 | ChatGPT | browser OAuth (PKCE, callback on `localhost:1455`) via `rs_ai_oauth` | yes: apollo reads the shared ChatGPT login when `provider.api_key` is unset |
+| Claude | browser OAuth (PKCE, callback on `localhost:53692`) via `rs_ai_oauth` | yes: `provider.name = "anthropic"` runs rs_ai's `ClaudeProvider` with the shared Claude login, sent the way Claude Code sends it, refreshed when it expires. Anthropic may bill subscription logins used outside Claude Code as "extra usage" |
 | GitHub Copilot | browser OAuth (callback on `localhost:9876`) | the sign-in is saved, but apollo only uses it when built with `--features provider-copilot`. The card says so |
-| Claude | none | no: apollo routes `anthropic`/`claude` configs to ChatGPT. Shown as "not supported by apollo" |
-| OpenRouter, OpenAI, Gemini, xAI, DeepSeek, Moonshot | API key | yes |
+| Anthropic API key | `ANTHROPIC_API_KEY` | yes, same `ClaudeProvider` with `x-api-key` |
+| ~90 API-key providers | API key | yes. The list is `rs_ai_providers::catalog` (the catalog telekinesis uses): OpenRouter, OpenAI, Gemini, xAI, DeepSeek, Z.ai / Z.ai coding plan, Kimi for coding, Moonshot, Qwen (DashScope and the coding plan), MiniMax, Xiaomi MiMo, OpenCode Zen, Groq, Mistral, Together, Fireworks, Cerebras, DeepInfra, NVIDIA, Hugging Face and the rest |
 | Ollama | none (local) | yes |
-| Custom endpoint | base URL + optional key + model | yes, any OpenAI-compatible `/chat/completions` API |
+| Custom endpoint | name + base URL + API key, never OAuth | yes, any OpenAI-compatible `/chat/completions` API |
+
+Providers apollo constructs itself (OpenAI, Anthropic, Gemini, OpenRouter,
+xAI, DeepSeek, Groq, Together, Mistral, Fireworks, Perplexity, Moonshot,
+Venice, Hugging Face, SiliconFlow, Cerebras, MiniMax) get their key under
+their own variable. Every other catalog provider runs through apollo's
+OpenAI-compatible client: `provider.name` is the catalog id, `provider.base_url`
+the catalog URL, and the key goes in `.env` as `APOLLO_PROVIDER_API_KEY`.
+
+**The model list fills itself.** Picking a provider, pasting a key or finishing
+a sign-in looks the models up on a background thread, in this order:
+
+1. **live**: the provider's own `GET {base_url}/models` with the key just
+   entered (Anthropic uses `x-api-key`; sign-ins use the plan's listing). When
+   the provider answers, that answer is the list.
+2. **models.dev**: `https://models.dev/api.json`, cached for 24 hours.
+3. **built-in**: the model ids in the rs_ai catalog.
+
+The note under the field says which one the list came from, and why the live
+listing failed if it did. Network lists are cached in
+`~/.apollo/models/<provider>.json`. You can always type any model id instead.
 
 Sign-ins land in the shared credential store,
 `~/.config/rs_ai/credentials/<provider>.json` (0600). The app only ever sees
 whether a sign-in succeeded, never the token.
 
-A custom endpoint's key goes in `.env` as `APOLLO_PROVIDER_API_KEY`, which
-apollo now reads for any provider whose `provider.api_key` is unset. It is
-read before the ChatGPT-login and `OPENAI_API_KEY` fallbacks, so a custom
-config is never silently switched to another provider.
+A custom endpoint is saved as `provider.name = "custom-<your name>"` with its
+base URL; its key goes in `.env` as `APOLLO_PROVIDER_API_KEY`, which apollo
+reads for any provider whose `provider.api_key` is unset. It is read before
+the ChatGPT-login and `OPENAI_API_KEY` fallbacks, so a configured provider is
+never silently switched to another one.
 
 **Where it works.** Pick one folder, which holds `apollo.json`, `.env` and
 `.apollo/` like `apollo init` does. Or pick **works everywhere**: the workspace
@@ -186,7 +210,8 @@ Settings has the simple/advanced toggle in both modes.
 
 Files written:
 
-- `<config dir>/apollo.json`: provider, base URL (Ollama and custom only),
+- `<config dir>/apollo.json`: provider, base URL (Ollama, custom and
+  catalog providers apollo runs through its OpenAI-compatible client),
   model, workspace, permission profile. `provider.api_key` stays `null`.
 - `<config dir>/.env`: the key, under the variable apollo reads for that
   provider, mode `0600`. A key is never logged or shown back, not even its
@@ -203,7 +228,7 @@ On Linux the window opens through X11 or Wayland (Vulkan via Blade; Mesa's
 lavapipe works for headless/Xvfb). Layouts live in `ui/views/*.crepus` and
 `ui/src/shell.rs`.
 
-Screenshots: [`docs/screenshots/apollo-ui/v2/`](docs/screenshots/apollo-ui/v2/).
+Screenshots: [`docs/screenshots/apollo-ui/v3/`](docs/screenshots/apollo-ui/v3/).
 
 ## Agent HTTP API
 

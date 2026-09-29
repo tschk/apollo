@@ -37,8 +37,7 @@ fn auth_token() -> Option<String> {
             return Some(token.trim().to_string());
         }
     }
-    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
-    let path = std::path::PathBuf::from(home).join(".apollo/http-token");
+    let path = crate::setup::home_dir()?.join(".apollo").join("http-token");
     let token = std::fs::read_to_string(path).ok()?;
     let token = token.trim();
     (!token.is_empty()).then(|| token.to_string())
@@ -290,7 +289,7 @@ pub fn on_path(name: &str) -> bool {
 pub fn find_apollo_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("apollo");
+            let candidate = dir.join(APOLLO_EXE);
             if candidate.is_file() {
                 return Some(candidate);
             }
@@ -298,9 +297,16 @@ pub fn find_apollo_bin() -> Option<std::path::PathBuf> {
     }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join("apollo"))
+        .map(|dir| dir.join(APOLLO_EXE))
         .find(|candidate| candidate.is_file())
 }
+
+/// `apollo` / `apollo.exe`.
+const APOLLO_EXE: &str = if cfg!(windows) {
+    "apollo.exe"
+} else {
+    "apollo"
+};
 
 /// Live agent state from `GET /v1/state`.
 ///

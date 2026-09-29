@@ -53,6 +53,11 @@ pub struct ProviderInfo {
     /// Pre-filled model. Matches `providers::defaults` where apollo has one.
     pub default_model: &'static str,
     pub blurb: &'static str,
+    /// `rs_ai_providers::catalog` id, for the model list (empty: none).
+    pub catalog: &'static str,
+    /// Written to `provider.base_url` for catalog providers apollo runs
+    /// through its generic OpenAI-compatible client.
+    pub base_url: Option<&'static str>,
 }
 
 impl ProviderInfo {
@@ -77,6 +82,8 @@ pub const OAUTH_PROVIDERS: &[ProviderInfo] = &[
         auth: Auth::OAuth(crate::oauth::OAuthKind::ChatGpt),
         default_model: "gpt-5.5",
         blurb: "sign in with your chatgpt plan",
+        catalog: "openai",
+        base_url: None,
     },
     ProviderInfo {
         id: "github-copilot",
@@ -84,83 +91,27 @@ pub const OAUTH_PROVIDERS: &[ProviderInfo] = &[
         auth: Auth::OAuth(crate::oauth::OAuthKind::Copilot),
         default_model: "gpt-5.4",
         blurb: "sign in with github",
+        catalog: "github-copilot",
+        base_url: None,
     },
     ProviderInfo {
         id: "claude",
         label: "Claude",
         auth: Auth::OAuth(crate::oauth::OAuthKind::Claude),
-        default_model: "",
-        blurb: "sign in with claude.ai",
+        default_model: "claude-sonnet-4-6",
+        blurb: "sign in with your claude plan",
+        catalog: "anthropic",
+        base_url: None,
     },
 ];
 
-/// Everything else, behind the dropdown: API-key providers apollo constructs
-/// directly and whose key its credential detection
-/// (`bootstrap::catalog_env_key`) reads, then Ollama and a custom endpoint.
-///
-/// OpenAI's key goes in `OPENAI_API_KEY`, which apollo also treats as "use
-/// OpenAI" — so it is only ever written for the OpenAI entry. Writing it for
-/// another provider would silently switch that config to OpenAI.
-pub const PROVIDERS: &[ProviderInfo] = &[
-    ProviderInfo {
-        id: "openrouter",
-        label: "OpenRouter",
-        auth: Auth::ApiKey("OPENROUTER_API_KEY"),
-        default_model: "z-ai/glm-5.2",
-        blurb: "one key, many models",
-    },
-    ProviderInfo {
-        id: "openai",
-        label: "OpenAI",
-        auth: Auth::ApiKey("OPENAI_API_KEY"),
-        default_model: "gpt-5.4",
-        blurb: "gpt models",
-    },
-    ProviderInfo {
-        id: "gemini",
-        label: "Gemini",
-        auth: Auth::ApiKey("GEMINI_API_KEY"),
-        default_model: "gemini-3.1-pro-preview",
-        blurb: "ai studio key",
-    },
-    ProviderInfo {
-        id: "xai",
-        label: "xAI",
-        auth: Auth::ApiKey("XAI_API_KEY"),
-        default_model: "grok-build-0.1",
-        blurb: "grok models",
-    },
-    ProviderInfo {
-        id: "deepseek",
-        label: "DeepSeek",
-        auth: Auth::ApiKey("DEEPSEEK_API_KEY"),
-        default_model: "deepseek-v4-pro",
-        blurb: "platform key",
-    },
-    ProviderInfo {
-        id: "moonshot",
-        label: "Moonshot",
-        auth: Auth::ApiKey("MOONSHOT_API_KEY"),
-        default_model: "kimi-k3",
-        blurb: "kimi models",
-    },
-    ProviderInfo {
-        id: "ollama",
-        label: "Ollama",
-        auth: Auth::Local,
-        default_model: "llama3.2",
-        blurb: "local models, no key",
-    },
-    ProviderInfo {
-        id: "custom",
-        label: "Custom endpoint",
-        auth: Auth::Custom,
-        default_model: "",
-        blurb: "any openai-compatible api",
-    },
-];
+/// Everything else, behind the dropdown — built from the rs_ai catalog.
+pub use crate::catalog::PROVIDERS;
 
 pub fn provider(id: &str) -> Option<&'static ProviderInfo> {
+    if id == "custom" || id.starts_with("custom-") {
+        return PROVIDERS.iter().find(|p| p.is_custom());
+    }
     OAUTH_PROVIDERS
         .iter()
         .chain(PROVIDERS.iter())
@@ -262,6 +213,8 @@ pub struct SetupChoices {
     pub api_key: Secret,
     /// Custom endpoints only.
     pub base_url: String,
+    /// Custom endpoints only: what the user called it.
+    pub custom_name: String,
     pub model: String,
     pub scope: Scope,
     pub profile: &'static ProfileInfo,
@@ -279,6 +232,20 @@ impl SetupChoices {
         match &self.scope {
             Scope::Folder(p) => p.clone(),
             Scope::Everywhere => instances_root().join(&self.instance_id),
+        }
+    }
+
+    /// `provider.name` in apollo.json. A custom endpoint is named after
+    /// what the user called it (`custom-<slug>`).
+    pub fn provider_name(&self) -> String {
+        if !self.provider.is_custom() {
+            return self.provider.id.to_string();
+        }
+        let slug = instance_id(&self.custom_name, &[]);
+        if self.custom_name.trim().is_empty() || slug == "apollo" {
+            "custom".into()
+        } else {
+            format!("custom-{slug}")
         }
     }
 
@@ -363,9 +330,11 @@ pub fn validate_custom(base_url: &str, model: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `$HOME`, or `%USERPROFILE%` on Windows where HOME is usually unset.
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .find_map(|var| std::env::var_os(var).filter(|h| !h.is_empty()))
         .map(PathBuf::from)
 }
 
@@ -437,7 +406,7 @@ pub fn write_setup(choices: &SetupChoices) -> Result<WrittenSetup, String> {
     let mut env = std::fs::read_to_string(&env_path).unwrap_or_default();
     // A leftover custom-endpoint key would override whatever provider is
     // chosen now, since apollo reads it first.
-    if !choices.provider.is_custom() {
+    if choices.provider.env_var() != Some(CUSTOM_KEY_VAR) {
         env = remove_env_line(&env, CUSTOM_KEY_VAR);
     }
     match choices.provider.auth {
@@ -479,7 +448,7 @@ pub fn apply_choices(config: &mut serde_json::Value, choices: &SetupChoices, wor
         *provider = json!({});
     }
     let provider = provider.as_object_mut().expect("object");
-    provider.insert("name".into(), json!(choices.provider.id));
+    provider.insert("name".into(), json!(choices.provider_name()));
     // Secrets stay in .env.
     provider.insert("api_key".into(), Value::Null);
     provider.insert(
@@ -487,7 +456,7 @@ pub fn apply_choices(config: &mut serde_json::Value, choices: &SetupChoices, wor
         match choices.provider.auth {
             Auth::Local => json!("http://localhost:11434"),
             Auth::Custom => json!(choices.base_url.trim().trim_end_matches('/')),
-            _ => Value::Null,
+            _ => choices.provider.base_url.map_or(Value::Null, |u| json!(u)),
         },
     );
 
@@ -670,7 +639,7 @@ impl Instance {
             everywhere: choices.scope == Scope::Everywhere,
             workspace: written.workspace.clone(),
             config_dir: written.config_dir.clone(),
-            provider: choices.provider.id.to_string(),
+            provider: choices.provider_name(),
             model: choices.resolved_model(),
             permission_profile: choices.profile.id.to_string(),
         }
@@ -818,6 +787,7 @@ mod tests {
             provider: provider(provider_id).unwrap(),
             api_key: Secret::new(key),
             base_url: String::new(),
+            custom_name: String::new(),
             model: String::new(),
             scope: Scope::Folder(dir.to_path_buf()),
             profile: PROFILES.iter().find(|p| p.id == profile).unwrap(),
@@ -959,11 +929,53 @@ mod tests {
     #[test]
     fn only_openai_writes_openai_api_key() {
         // apollo reads OPENAI_API_KEY as "switch to OpenAI".
-        for p in OAUTH_PROVIDERS.iter().chain(PROVIDERS) {
+        for p in OAUTH_PROVIDERS.iter().chain(PROVIDERS.iter()) {
             if p.id != "openai" {
                 assert_ne!(p.env_var(), Some("OPENAI_API_KEY"), "{}", p.id);
             }
         }
+    }
+
+    #[test]
+    fn generic_catalog_provider_writes_base_url_and_shared_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = choices(dir.path(), "zai-coding-plan", "zk-test-1234", "auto");
+        c.model = "glm-5.1".into();
+        let written = write_setup(&c).unwrap();
+        let cfg = read_config(&written.config_path);
+        assert_eq!(cfg["provider"]["name"], "zai-coding-plan");
+        assert_eq!(
+            cfg["provider"]["base_url"],
+            "https://api.z.ai/api/coding/paas/v4"
+        );
+        assert!(cfg["provider"]["api_key"].is_null());
+        let env = std::fs::read_to_string(written.env_path.unwrap()).unwrap();
+        assert!(env.contains("APOLLO_PROVIDER_API_KEY=\"zk-test-1234\""));
+
+        // Switching to a native provider drops the shared key.
+        let c = choices(dir.path(), "openrouter", "or-test-1234", "auto");
+        let written = write_setup(&c).unwrap();
+        let env = std::fs::read_to_string(written.env_path.unwrap()).unwrap();
+        assert!(!env.contains("APOLLO_PROVIDER_API_KEY"));
+        assert!(env.contains("OPENROUTER_API_KEY=\"or-test-1234\""));
+        let cfg = read_config(&written.config_path);
+        assert!(cfg["provider"]["base_url"].is_null());
+    }
+
+    #[test]
+    fn custom_endpoint_is_named_after_the_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = choices(dir.path(), "custom", "", "auto");
+        assert_eq!(c.provider_name(), "custom");
+        c.custom_name = "Work Gateway".into();
+        c.base_url = "https://llm.example.com/v1/".into();
+        c.model = "m1".into();
+        assert_eq!(c.provider_name(), "custom-work-gateway");
+        let written = write_setup(&c).unwrap();
+        let cfg = read_config(&written.config_path);
+        assert_eq!(cfg["provider"]["name"], "custom-work-gateway");
+        assert_eq!(cfg["provider"]["base_url"], "https://llm.example.com/v1");
+        assert_eq!(provider("custom-work-gateway").unwrap().id, "custom");
     }
 
     #[test]

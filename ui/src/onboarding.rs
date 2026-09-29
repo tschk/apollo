@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crepuscularity_gpui::prelude::*;
 use gpui::{relative, AnyElement, ClickEvent, KeyDownEvent, PathPromptOptions, SharedString};
 
+use crate::models::{self, ModelList};
 use crate::oauth::{OAuthKind, Support};
 use crate::setup::{
     self, Auth, DesktopState, Instance, Mode, ProfileInfo, ProviderInfo, Scope, Secret,
@@ -67,6 +68,7 @@ enum Field {
     None,
     ApiKey,
     BaseUrl,
+    CustomName,
     Model,
     Workspace,
     Name,
@@ -119,6 +121,12 @@ enum SignIn {
     Failed(OAuthKind, String),
 }
 
+/// Where the model list's live half comes from.
+enum LiveListing {
+    Http(String, models::Auth),
+    OAuth(OAuthKind),
+}
+
 /// Called once: `Some(state)` when an instance was saved, `None` when a
 /// new-instance flow was cancelled.
 type OnFinish = Box<dyn FnOnce(Option<DesktopState>, &mut Window, &mut App) + 'static>;
@@ -139,9 +147,20 @@ pub struct OnboardingView {
     field: Field,
     provider: &'static ProviderInfo,
     dropdown_open: bool,
+    /// Typed while the provider dropdown is open.
+    filter: String,
     api_key: Secret,
     base_url: String,
+    custom_name: String,
     model: String,
+    /// Model list for the selected provider (see `models.rs`).
+    models: Option<ModelList>,
+    models_loading: bool,
+    /// Why the live listing failed, if it did.
+    models_note: Option<String>,
+    /// Bumped per fetch so a slow, stale answer is dropped.
+    models_gen: u64,
+    model_menu: bool,
     everywhere: bool,
     workspace: String,
     name: String,
@@ -210,14 +229,20 @@ impl OnboardingView {
             .as_ref()
             .and_then(|i| PROFILES.iter().find(|p| p.id == i.permission_profile))
             .unwrap_or(&PROFILES[0]);
-        let base_url = if provider.is_custom() {
-            active
+        let (base_url, custom_name) = if provider.is_custom() {
+            let url = active
                 .as_ref()
                 .map(|i| setup::read_config(&i.config_path()))
                 .and_then(|c| c["provider"]["base_url"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            let name = active
+                .as_ref()
+                .and_then(|i| i.provider.strip_prefix("custom-"))
                 .unwrap_or_default()
+                .to_string();
+            (url, name)
         } else {
-            String::new()
+            (String::new(), String::new())
         };
 
         // Repaint for the blinking caret, the test spinner and sign-in wait.
@@ -244,9 +269,16 @@ impl OnboardingView {
             field: Field::None,
             provider,
             dropdown_open: false,
+            filter: String::new(),
             api_key: Secret::default(),
             base_url,
+            custom_name,
             model,
+            models: None,
+            models_loading: false,
+            models_note: None,
+            models_gen: 0,
+            model_menu: false,
             everywhere,
             workspace,
             name,
@@ -262,6 +294,7 @@ impl OnboardingView {
             on_finish: Some(Box::new(on_finish)),
         };
         view.field = view.default_field();
+        view.refresh_models(cx);
         // A flow started before this view (e.g. a cancelled new instance) is
         // still listening: show it and pick up its result.
         if let Auth::OAuth(kind) = view.provider.auth {
@@ -293,7 +326,12 @@ impl OnboardingView {
                 Auth::OAuth(kind) if matches!(kind.support(), Support::Unsupported(_)) => vec![],
                 Auth::OAuth(_) | Auth::Local => vec![Field::Model],
                 Auth::ApiKey(_) => vec![Field::ApiKey, Field::Model],
-                Auth::Custom => vec![Field::BaseUrl, Field::ApiKey, Field::Model],
+                Auth::Custom => vec![
+                    Field::CustomName,
+                    Field::BaseUrl,
+                    Field::ApiKey,
+                    Field::Model,
+                ],
             },
             Step::Workspace if self.everywhere => vec![Field::Name],
             Step::Workspace => vec![Field::Workspace, Field::Name],
@@ -336,6 +374,7 @@ impl OnboardingView {
             provider: self.provider,
             api_key: self.api_key.clone(),
             base_url: self.base_url.trim().to_string(),
+            custom_name: self.custom_name.trim().to_string(),
             model: self.model.clone(),
             scope: self.scope(),
             profile: self.profile,
@@ -348,6 +387,7 @@ impl OnboardingView {
         self.step = step;
         self.error.clear();
         self.dropdown_open = false;
+        self.model_menu = false;
         self.field = self.default_field();
         self.cursor_start = Instant::now();
         cx.notify();
@@ -573,16 +613,170 @@ impl OnboardingView {
     }
 
     fn pick_provider(&mut self, provider: &'static ProviderInfo, cx: &mut Context<Self>) {
-        if self.provider.id != provider.id {
+        let changed = self.provider.id != provider.id;
+        if changed {
             // A key for one provider is never valid for another.
             self.api_key.clear();
             self.model = provider.default_model.to_string();
+            self.models = None;
+            self.models_note = None;
         }
         self.provider = provider;
         self.dropdown_open = false;
+        self.model_menu = false;
+        self.filter.clear();
         self.error.clear();
         self.field = self.default_field();
+        if changed {
+            self.refresh_models(cx);
+        }
         cx.notify();
+    }
+
+    /// A sign-in card: selecting it *is* signing in. The browser opens
+    /// straight away unless this login is already stored (then the card
+    /// just selects it, with "sign in again" beside it).
+    fn click_card(&mut self, provider: &'static ProviderInfo, cx: &mut Context<Self>) {
+        self.pick_provider(provider, cx);
+        if let Auth::OAuth(kind) = provider.auth {
+            let waiting = matches!(self.sign_in, SignIn::Waiting(k, _) if k == kind);
+            if !waiting && !self.signed_in[kind_index(kind)] {
+                self.start_sign_in(kind, cx);
+            }
+        }
+    }
+
+    /// Where a live `/models` listing can come from for the current
+    /// provider and credential, if anywhere.
+    fn live_listing(&self) -> Option<LiveListing> {
+        match self.provider.auth {
+            Auth::OAuth(kind) if self.signed_in[kind_index(kind)] => Some(LiveListing::OAuth(kind)),
+            Auth::OAuth(_) => None,
+            Auth::Local => Some(LiveListing::Http(
+                "http://localhost:11434/v1".into(),
+                models::Auth::None,
+            )),
+            Auth::Custom => {
+                let url = self.base_url.trim();
+                if setup::validate_custom(url, "m").is_err() {
+                    return None;
+                }
+                let key = self.api_key.expose().trim().to_string();
+                let auth = if key.is_empty() {
+                    models::Auth::None
+                } else {
+                    models::Auth::Bearer(key)
+                };
+                Some(LiveListing::Http(url.to_string(), auth))
+            }
+            Auth::ApiKey(_) => {
+                let key = self.api_key.expose().trim().to_string();
+                if key.is_empty() {
+                    return None;
+                }
+                let spec = rs_ai_providers::catalog::by_id(self.provider.catalog)?;
+                let (base, auth) = match spec.id {
+                    "anthropic" => (spec.base_url.to_string(), models::Auth::AnthropicKey(key)),
+                    // Gemini's OpenAI-compatible surface takes a Bearer key.
+                    "google" => (
+                        "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+                        models::Auth::Bearer(key),
+                    ),
+                    _ => (
+                        self.provider.base_url.unwrap_or(spec.base_url).to_string(),
+                        models::Auth::Bearer(key),
+                    ),
+                };
+                Some(LiveListing::Http(base, auth))
+            }
+        }
+    }
+
+    /// Fetch the model list on a worker thread: live listing when there is
+    /// a credential, else models.dev, else the built-in catalog.
+    fn refresh_models(&mut self, cx: &mut Context<Self>) {
+        let cache_as = match self.provider.auth {
+            Auth::Custom => self.choices().provider_name(),
+            _ if self.provider.catalog.is_empty() => self.provider.id.to_string(),
+            _ => self.provider.catalog.to_string(),
+        };
+        if self.models.is_none() {
+            self.models = models::cached(&cache_as);
+        }
+        let live = self.live_listing();
+        let current = self.model.trim().to_string();
+        self.models_gen += 1;
+        let gen = self.models_gen;
+        self.models_loading = true;
+        cx.notify();
+        let (tx, rx) = channel::<(ModelList, Option<String>)>();
+        std::thread::spawn(move || {
+            let live = match live {
+                Some(LiveListing::Http(url, auth)) => Some((url, auth)),
+                Some(LiveListing::OAuth(kind)) => kind.access_token().map(|t| {
+                    let auth = match kind {
+                        OAuthKind::Claude => models::Auth::ClaudeLogin(t),
+                        _ => models::Auth::OAuthPlan(kind.provider(), t),
+                    };
+                    ("https://api.anthropic.com/v1".to_string(), auth)
+                }),
+                None => None,
+            };
+            let extra: Vec<&str> = [current.as_str()]
+                .into_iter()
+                .filter(|m| !m.is_empty())
+                .collect();
+            let out = models::resolve(
+                &cache_as,
+                live.as_ref().map(|(u, a)| (u.as_str(), a.clone())),
+                &extra,
+            );
+            let _ = tx.send(out);
+        });
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
+            match rx.try_recv() {
+                Ok((list, note)) => {
+                    this.update(cx, |view, cx| {
+                        if view.models_gen == gen {
+                            view.models_loading = false;
+                            view.models_note = note;
+                            if view.model.trim().is_empty() {
+                                if let Some(first) = list.models.first() {
+                                    view.model = first.clone();
+                                }
+                            }
+                            view.models = Some(list);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+        })
+        .detach();
+    }
+
+    /// Providers shown in the open dropdown, narrowed by what was typed.
+    fn filtered(&self) -> Vec<(usize, &'static ProviderInfo)> {
+        let q = self.filter.trim().to_ascii_lowercase();
+        PROVIDERS
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.is_custom())
+            .filter(|(_, p)| {
+                q.is_empty()
+                    || p.label.to_ascii_lowercase().contains(&q)
+                    || p.catalog.contains(&q)
+                    || p.id.contains(&q)
+                    || p.blurb.contains(&q)
+            })
+            .collect()
     }
 
     /// Start the browser sign-in for `kind` on a worker thread. The flow
@@ -653,6 +847,10 @@ impl OnboardingView {
                 Err(e) => SignIn::Failed(kind, e),
             };
         }
+        // Signed in: the plan's own model list replaces the offline one.
+        if self.signed_in[i] && self.provider.auth == Auth::OAuth(kind) {
+            self.refresh_models(cx);
+        }
         cx.notify();
     }
 
@@ -683,13 +881,38 @@ impl OnboardingView {
             if key == "v" {
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     self.insert(text.trim(), cx);
+                    // A pasted key or URL is the moment a live listing works.
+                    if matches!(self.field, Field::ApiKey | Field::BaseUrl) && !self.dropdown_open {
+                        self.refresh_models(cx);
+                    }
                 }
             }
             return;
         }
 
-        if self.dropdown_open && matches!(key, "enter" | "escape") {
-            self.dropdown_open = false;
+        if self.dropdown_open {
+            match key {
+                "escape" => {
+                    self.dropdown_open = false;
+                    self.filter.clear();
+                }
+                "enter" => {
+                    if let Some((_, p)) = self.filtered().first().copied() {
+                        self.pick_provider(p, cx);
+                    }
+                }
+                "backspace" => {
+                    self.filter.pop();
+                }
+                "space" => self.filter.push(' '),
+                _ => {
+                    if let Some(ch) = stroke.key_char.as_deref() {
+                        if !ch.chars().any(char::is_control) {
+                            self.filter.push_str(ch);
+                        }
+                    }
+                }
+            }
             cx.notify();
             return;
         }
@@ -704,6 +927,9 @@ impl OnboardingView {
             }
             "tab" => {
                 let fields = self.fields();
+                if matches!(self.field, Field::ApiKey | Field::BaseUrl) {
+                    self.refresh_models(cx);
+                }
                 if !fields.is_empty() {
                     let at = fields.iter().position(|f| *f == self.field);
                     self.field = fields[at.map(|i| (i + 1) % fields.len()).unwrap_or(0)];
@@ -716,6 +942,9 @@ impl OnboardingView {
                     Field::ApiKey => self.api_key.pop(),
                     Field::BaseUrl => {
                         self.base_url.pop();
+                    }
+                    Field::CustomName => {
+                        self.custom_name.pop();
                     }
                     Field::Model => {
                         self.model.pop();
@@ -737,6 +966,7 @@ impl OnboardingView {
                 match self.field {
                     Field::ApiKey => self.api_key.clear(),
                     Field::BaseUrl => self.base_url.clear(),
+                    Field::CustomName => self.custom_name.clear(),
                     Field::Model => self.model.clear(),
                     Field::Workspace => self.workspace.clear(),
                     Field::Name => self.name.clear(),
@@ -767,6 +997,7 @@ impl OnboardingView {
             // Whitespace never belongs in a key or URL; a paste often carries some.
             Field::ApiKey => self.api_key.push_str(&compact()),
             Field::BaseUrl => self.base_url.push_str(&compact()),
+            Field::CustomName => self.custom_name.push_str(&text),
             Field::Model => self.model.push_str(text.trim()),
             Field::Workspace => self.workspace.push_str(&text),
             Field::Name => self.name.push_str(&text),
@@ -824,6 +1055,7 @@ impl OnboardingView {
             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                 view.field = field;
                 view.dropdown_open = false;
+                view.model_menu = false;
                 view.cursor_start = Instant::now();
                 cx.notify();
             }))
@@ -864,9 +1096,9 @@ impl OnboardingView {
             Support::NeedsFeature(_) if self.signed_in[i] => {
                 ("✓ signed in · needs build flag".into(), WARN)
             }
-            Support::NeedsFeature(_) => ("needs build flag".into(), WARN),
+            Support::NeedsFeature(_) => ("click to sign in · needs build flag".into(), WARN),
             Support::Live if self.signed_in[i] => ("✓ signed in".into(), SUCCESS),
-            Support::Live => ("browser sign-in".into(), MUTED),
+            Support::Live => ("click to sign in".into(), MUTED),
         }
     }
 
@@ -919,7 +1151,7 @@ impl OnboardingView {
                             .child(SharedString::from(status)),
                     )
                     .on_click(
-                        cx.listener(move |view, _: &ClickEvent, _, cx| view.pick_provider(p, cx)),
+                        cx.listener(move |view, _: &ClickEvent, _, cx| view.click_card(p, cx)),
                     )
                     .into_any_element()
             }))
@@ -940,11 +1172,68 @@ impl OnboardingView {
             .into_any_element()
     }
 
+    fn provider_row(
+        &self,
+        id: (&'static str, usize),
+        p: &'static ProviderInfo,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let selected = p.id == self.provider.id;
+        let right = match p.auth {
+            Auth::ApiKey(var) if var == setup::CUSTOM_KEY_VAR => "api key".to_string(),
+            Auth::ApiKey(var) => var.to_string(),
+            Auth::Local => "no key".into(),
+            Auth::Custom => "never oauth".into(),
+            Auth::OAuth(_) => String::new(),
+        };
+        div()
+            .id(id)
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py(px(6.))
+            .cursor_pointer()
+            .bg(rgb(if selected { SURFACE_2 } else { SURFACE }))
+            .hover(|s| s.bg(rgb(SURFACE_2)))
+            .child(
+                div()
+                    .w(px(190.))
+                    .text_sm()
+                    .text_color(rgb(if selected { ACCENT } else { TEXT }))
+                    .child(p.label),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(p.blurb),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child(SharedString::from(right)),
+            )
+            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| view.pick_provider(p, cx)))
+    }
+
     fn dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
         let chosen = PROVIDERS.iter().find(|p| p.id == self.provider.id);
-        let trigger_label = match chosen {
-            Some(p) => format!("{} · {}", p.label, p.blurb),
-            None => "api key, local model or custom endpoint".to_string(),
+        let trigger_label = if self.dropdown_open {
+            if self.filter.is_empty() {
+                format!("type to filter {} providers…", PROVIDERS.len() - 1)
+            } else {
+                format!("{}{}", self.filter, self.caret())
+            }
+        } else {
+            match chosen {
+                Some(p) => format!("{} · {}", p.label, p.blurb),
+                None => "api key, local model or custom endpoint".to_string(),
+            }
         };
         let trigger = div()
             .id("provider-dropdown")
@@ -968,7 +1257,13 @@ impl OnboardingView {
                 div()
                     .flex_1()
                     .text_sm()
-                    .text_color(rgb(if chosen.is_some() { ACCENT } else { SOFT }))
+                    .text_color(rgb(if self.dropdown_open && !self.filter.is_empty() {
+                        TEXT
+                    } else if chosen.is_some() && !self.dropdown_open {
+                        ACCENT
+                    } else {
+                        SOFT
+                    }))
                     .child(SharedString::from(trigger_label)),
             )
             .child(
@@ -979,65 +1274,53 @@ impl OnboardingView {
             )
             .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
                 view.dropdown_open = !view.dropdown_open;
+                view.filter.clear();
+                view.model_menu = false;
                 cx.notify();
             }));
 
-        let list =
-            self.dropdown_open.then(|| {
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .py_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(SURFACE_2))
-                    .bg(rgb(SURFACE))
-                    .children(PROVIDERS.iter().enumerate().map(|(i, p)| {
-                        let selected = p.id == self.provider.id;
-                        let right = match p.auth {
-                            Auth::ApiKey(var) => var.to_string(),
-                            Auth::Local => "no key".into(),
-                            Auth::Custom => "base url + key".into(),
-                            Auth::OAuth(_) => String::new(),
-                        };
-                        div()
-                            .id(("provider-option", i))
-                            .w_full()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_3()
-                            .px_3()
-                            .py(px(7.))
-                            .cursor_pointer()
-                            .bg(rgb(if selected { SURFACE_2 } else { SURFACE }))
-                            .hover(|s| s.bg(rgb(SURFACE_2)))
-                            .child(
+        let list = self.dropdown_open.then(|| {
+            let rows = self.filtered();
+            let empty = rows.is_empty();
+            let custom = PROVIDERS
+                .iter()
+                .find(|p| p.is_custom())
+                .expect("custom endpoint is always offered");
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(SURFACE_2))
+                .bg(rgb(SURFACE))
+                .child(
+                    div()
+                        .id("provider-list")
+                        .w_full()
+                        .max_h(px(330.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .py_1()
+                        .children(
+                            rows.into_iter()
+                                .map(|(i, p)| self.provider_row(("provider-option", i), p, cx)),
+                        )
+                        .when(empty, |d| {
+                            d.child(
                                 div()
-                                    .w(px(150.))
-                                    .text_sm()
-                                    .text_color(rgb(if selected { ACCENT } else { TEXT }))
-                                    .child(p.label),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child(p.blurb),
-                            )
-                            .child(
-                                div()
+                                    .px_3()
+                                    .py_2()
                                     .text_xs()
                                     .text_color(rgb(GHOST))
-                                    .child(SharedString::from(right)),
+                                    .child("no provider matches — use a custom endpoint"),
                             )
-                            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                                view.pick_provider(p, cx)
-                            }))
-                    }))
-            });
+                        }),
+                )
+                .child(div().w_full().h(px(1.)).bg(rgb(SURFACE_2)))
+                .child(self.provider_row(("provider-custom", 0), custom, cx))
+        });
 
         div()
             .w_full()
@@ -1051,12 +1334,131 @@ impl OnboardingView {
 
     fn model_field(&self, cx: &mut Context<Self>) -> AnyElement {
         let placeholder = if self.provider.default_model.is_empty() {
-            "model name, e.g. llama-3.3-70b".to_string()
+            "pick from the list or type a model id".to_string()
         } else {
             self.provider.default_model.to_string()
         };
         let field = self.text_field("model", Field::Model, self.model.clone(), &placeholder, cx);
-        Self::labelled("model", field, None)
+        let count = self.models.as_ref().map_or(0, |m| m.models.len());
+        let picker_label = if self.models_loading {
+            "fetching…".to_string()
+        } else if count == 0 {
+            "no list".to_string()
+        } else {
+            format!("{count} models {}", if self.model_menu { "▴" } else { "▾" })
+        };
+        let picker = div()
+            .id("model-list-toggle")
+            .flex_shrink_0()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(if self.model_menu { MUTED } else { SURFACE_2 }))
+            .text_xs()
+            .text_color(rgb(if count > 0 { TEXT } else { GHOST }))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(SURFACE)))
+            .child(SharedString::from(picker_label))
+            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                if view.models.as_ref().is_some_and(|m| !m.models.is_empty()) {
+                    view.model_menu = !view.model_menu;
+                    view.dropdown_open = false;
+                }
+                cx.notify();
+            }));
+        let refresh = div()
+            .id("model-refresh")
+            .flex_shrink_0()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(SURFACE_2))
+            .text_xs()
+            .text_color(rgb(SOFT))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(SURFACE)))
+            .child("↻")
+            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| view.refresh_models(cx)));
+        let row = div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(div().flex_1().min_w(px(0.)).child(field))
+            .child(picker)
+            .child(refresh);
+
+        let menu = (self.model_menu && count > 0).then(|| {
+            let models = self
+                .models
+                .as_ref()
+                .map(|m| m.models.clone())
+                .unwrap_or_default();
+            div()
+                .id("model-list")
+                .w_full()
+                .max_h(px(190.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(SURFACE_2))
+                .bg(rgb(SURFACE))
+                .children(models.into_iter().enumerate().map(|(i, m)| {
+                    let selected = m == self.model.trim();
+                    let pick = m.clone();
+                    div()
+                        .id(("model-option", i))
+                        .w_full()
+                        .px_3()
+                        .py(px(5.))
+                        .text_sm()
+                        .text_color(rgb(if selected { ACCENT } else { TEXT }))
+                        .bg(rgb(if selected { SURFACE_2 } else { SURFACE }))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(SURFACE_2)))
+                        .child(SharedString::from(m))
+                        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            view.model = pick.clone();
+                            view.model_menu = false;
+                            view.error.clear();
+                            cx.notify();
+                        }))
+                }))
+        });
+
+        let note = match (&self.models, &self.models_note) {
+            _ if self.models_loading => "looking up models…".to_string(),
+            (Some(list), Some(why)) => {
+                format!(
+                    "list from {} · live /models failed: {why}",
+                    list.source.label()
+                )
+            }
+            (Some(list), None) => {
+                format!("list from {} · or type any model id", list.source.label())
+            }
+            (None, _) => "type a model id".to_string(),
+        };
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(div().text_xs().text_color(rgb(MUTED)).child("model"))
+            .child(row)
+            .children(menu)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(GHOST))
+                    .child(SharedString::from(note)),
+            )
+            .into_any_element()
     }
 
     fn key_field(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1232,6 +1634,13 @@ impl OnboardingView {
                 .child(self.model_field(cx))
                 .into_any_element(),
             Auth::Custom => {
+                let name = self.text_field(
+                    "custom-name",
+                    Field::CustomName,
+                    self.custom_name.clone(),
+                    "e.g. work gateway",
+                    cx,
+                );
                 let url = self.text_field(
                     "base-url",
                     Field::BaseUrl,
@@ -1241,7 +1650,15 @@ impl OnboardingView {
                 );
                 col()
                     .child(Self::labelled(
-                        "base url · openai-compatible (/chat/completions)",
+                        "name",
+                        name,
+                        Some(format!(
+                            "saved as provider \"{}\"",
+                            self.choices().provider_name()
+                        )),
+                    ))
+                    .child(Self::labelled(
+                        "base url · openai-compatible (/chat/completions, /models)",
                         url,
                         None,
                     ))
@@ -1894,10 +2311,7 @@ pub fn probe(workspace: &std::path::Path, prompt: &str, has_credential: bool) ->
         }
         Ok(Err(e)) => done(ProbeRoute::Cli, false, format!("apollo ask failed: {e}")),
         Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
-            #[cfg(unix)]
-            unsafe {
-                libc_kill(pid as i32);
-            }
+            kill_process(pid);
             done(
                 ProbeRoute::Cli,
                 false,
@@ -1907,12 +2321,25 @@ pub fn probe(workspace: &std::path::Path, prompt: &str, has_credential: bool) ->
     }
 }
 
+/// Stop a hung `apollo ask`.
 #[cfg(unix)]
-unsafe fn libc_kill(pid: i32) {
+fn kill_process(pid: u32) {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
-    kill(pid, 9);
+    // SAFETY: plain syscall on a pid this process spawned.
+    unsafe {
+        kill(pid as i32, 9);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 fn mock_reply(prompt: &str) -> String {

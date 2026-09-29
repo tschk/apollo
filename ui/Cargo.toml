@@ -20,6 +20,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tungstenite = "0.24"
 # Browser sign-in + the shared credential store apollo reads.
 rs_ai_oauth = "0.2.31"
+# Provider catalog (ids, base URLs, key variables, default and known models) —
+# the same `rs_ai_providers::catalog` telekinesis builds its picker from.
+rs_ai_providers = { version = "0.2.36", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # gpui is pulled in without its default platform backends, so on Linux the

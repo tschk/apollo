@@ -15,6 +15,8 @@
 //! zinc-950 surfaces, Chivo Mono.
 
 mod agent;
+mod catalog;
+mod models;
 mod oauth;
 mod onboarding;
 mod setup;

@@ -291,6 +291,7 @@ dependencies = [
  "gpui",
  "reqwest",
  "rs_ai_oauth",
+ "rs_ai_providers",
  "serde",
  "serde_json",
  "temp-env",
@@ -7230,9 +7231,9 @@ dependencies = [
 
 [[package]]
 name = "rs_ai_core"
-version = "0.2.31"
+version = "0.2.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aea8e877a8e860b22f62f5ad9dd0eb6b391ff1216a3194af1f51f6e0d11f94d"
+checksum = "e8a1ed6030bbc50c958a3d99362757e10487e0c0116af6281eaf00f6d14b8493"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7256,9 +7257,9 @@ dependencies = [
 
 [[package]]
 name = "rs_ai_oauth"
-version = "0.2.31"
+version = "0.2.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8f7d741961ccc16c78ee188eb78d5ad3284b4e8ae41560af1dee0d1b7acc334"
+checksum = "e108f0f4b31bcd2ba1acc80c6f6e586dc2fa9080ef71a38cd98c79796ab92949"
 dependencies = [
  "base64 0.22.1",
  "oauth2",
@@ -7272,9 +7273,9 @@ dependencies = [
 
 [[package]]
 name = "rs_ai_providers"
-version = "0.2.31"
+version = "0.2.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bacda6312ade1b018c12337af3b831b2148f01ecf9786b0d8e36653655b0b85"
+checksum = "35952b16ae85e83fe259bf715cd86bdd207360045e3bfaa44350c5c1867fd42d"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

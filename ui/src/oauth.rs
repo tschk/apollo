@@ -11,8 +11,10 @@
 //! - GitHub Copilot: the login lands in the shared store and apollo's
 //!   Copilot provider reads it — but that provider is behind the
 //!   non-default `provider-copilot` feature.
-//! - Claude: apollo rewrites `anthropic`/`claude` configs to ChatGPT, so a
-//!   Claude login would never be used. Offered as a visible, disabled option.
+//! - Claude: apollo's `anthropic` provider (rs_ai's `ClaudeProvider`) uses
+//!   the shared Claude login when no `ANTHROPIC_API_KEY` is set, sending it
+//!   the way Claude Code does and refreshing it when it expires. Anthropic
+//!   may bill this as "extra usage" rather than against the plan.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -40,7 +42,9 @@ pub enum Support {
     Live,
     /// Sign-in works; apollo needs a non-default build to use it.
     NeedsFeature(&'static str),
-    /// apollo cannot use this login; sign-in is not offered.
+    /// apollo cannot use this login; sign-in is not offered. (No provider
+    /// is in this state today; kept so the UI handles one honestly.)
+    #[allow(dead_code)]
     Unsupported(&'static str),
 }
 
@@ -63,7 +67,7 @@ impl OAuthKind {
         self.slot().store(false, Ordering::SeqCst);
     }
 
-    fn provider(self) -> OAuthProvider {
+    pub fn provider(self) -> OAuthProvider {
         match self {
             OAuthKind::ChatGpt => OAuthProvider::ChatGpt,
             OAuthKind::Copilot => OAuthProvider::Copilot,
@@ -75,9 +79,7 @@ impl OAuthKind {
         match self {
             OAuthKind::ChatGpt => Support::Live,
             OAuthKind::Copilot => Support::NeedsFeature("provider-copilot"),
-            OAuthKind::Claude => Support::Unsupported(
-                "apollo routes anthropic configs to chatgpt, so a claude login would go unused",
-            ),
+            OAuthKind::Claude => Support::Live,
         }
     }
 
@@ -97,6 +99,14 @@ impl OAuthKind {
         credentials::load(&self.provider())
             .map(|t| !credentials::is_expired(&t) || t.refresh_token.is_some())
             .unwrap_or(false)
+    }
+
+    /// The stored access token, for listing the plan's models. Stays on the
+    /// worker thread that asked; never shown.
+    pub fn access_token(self) -> Option<String> {
+        credentials::load(&self.provider())
+            .filter(|t| !credentials::is_expired(t))
+            .map(|t| t.access_token)
     }
 
     /// Run the browser flow and store the tokens (call [`claim`] first; this
@@ -131,11 +141,7 @@ mod tests {
             OAuthKind::Copilot.support(),
             Support::NeedsFeature(_)
         ));
-        assert!(matches!(
-            OAuthKind::Claude.support(),
-            Support::Unsupported(_)
-        ));
-        assert!(OAuthKind::Claude.sign_in().is_err());
+        assert_eq!(OAuthKind::Claude.support(), Support::Live);
     }
 
     #[test]
