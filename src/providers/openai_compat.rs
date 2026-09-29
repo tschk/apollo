@@ -410,7 +410,7 @@ fn parse_pricing(value: Option<&Value>) -> Option<ModelPricing> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_model_info;
+    use super::{parse_model_info, OpenAiCompatProvider};
 
     #[test]
     fn parses_openrouter_limits_and_capabilities() {
@@ -429,5 +429,82 @@ mod tests {
         assert!(model.capabilities.contains("image_input"));
         assert!(model.capabilities.contains("tool_calling"));
         assert_eq!(model.pricing.unwrap().input_per_token, Some(0.00000015));
+    }
+
+    #[test]
+    fn test_provider_constructors() {
+        let key = "test_key";
+
+        let p = OpenAiCompatProvider::openai(key);
+        assert_eq!(p.api_key, key);
+        assert_eq!(p.base_url, "https://api.openai.com/v1");
+        assert_eq!(p.provider_name, "openai");
+
+        let p = OpenAiCompatProvider::openrouter(key);
+        assert_eq!(p.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(p.provider_name, "openrouter");
+
+        let p = OpenAiCompatProvider::groq(key);
+        assert_eq!(p.base_url, "https://api.groq.com/openai/v1");
+        assert_eq!(p.provider_name, "groq");
+
+        let p = OpenAiCompatProvider::together(key);
+        assert_eq!(p.base_url, "https://api.together.xyz/v1");
+        assert_eq!(p.provider_name, "together");
+
+        let p = OpenAiCompatProvider::mistral(key);
+        assert_eq!(p.base_url, "https://api.mistral.ai/v1");
+        assert_eq!(p.provider_name, "mistral");
+
+        let p = OpenAiCompatProvider::deepseek(key);
+        assert_eq!(p.base_url, "https://api.deepseek.com/v1");
+        assert_eq!(p.provider_name, "deepseek");
+
+        let p = OpenAiCompatProvider::fireworks(key);
+        assert_eq!(p.base_url, "https://api.fireworks.ai/inference/v1");
+        assert_eq!(p.provider_name, "fireworks");
+
+        let p = OpenAiCompatProvider::perplexity(key);
+        assert_eq!(p.base_url, "https://api.perplexity.ai");
+        assert_eq!(p.provider_name, "perplexity");
+
+        let p = OpenAiCompatProvider::xai(key);
+        assert_eq!(p.base_url, "https://api.x.ai/v1");
+        assert_eq!(p.provider_name, "xai");
+
+        let p = OpenAiCompatProvider::moonshot(key);
+        assert_eq!(p.base_url, "https://api.moonshot.ai/v1");
+        assert_eq!(p.provider_name, "moonshot");
+
+        let p = OpenAiCompatProvider::venice(key);
+        assert_eq!(p.base_url, "https://api.venice.ai/api/v1");
+        assert_eq!(p.provider_name, "venice");
+
+        let p = OpenAiCompatProvider::huggingface(key);
+        assert_eq!(p.base_url, "https://api-inference.huggingface.co/v1");
+        assert_eq!(p.provider_name, "huggingface");
+
+        let p = OpenAiCompatProvider::siliconflow(key);
+        assert_eq!(p.base_url, "https://api.siliconflow.cn/v1");
+        assert_eq!(p.provider_name, "siliconflow");
+
+        let p = OpenAiCompatProvider::cerebras(key);
+        assert_eq!(p.base_url, "https://api.cerebras.ai/v1");
+        assert_eq!(p.provider_name, "cerebras");
+
+        let p = OpenAiCompatProvider::minimax(key);
+        assert_eq!(p.base_url, "https://api.minimax.io/v1");
+        assert_eq!(p.provider_name, "minimax");
+
+        let p = OpenAiCompatProvider::vercel(key);
+        assert_eq!(p.base_url, "https://gateway.vercel.ai/v1");
+        assert_eq!(p.provider_name, "vercel");
+
+        let p = OpenAiCompatProvider::cloudflare(key, "account_123");
+        assert_eq!(
+            p.base_url,
+            "https://api.cloudflare.com/client/v4/accounts/account_123/ai/v1"
+        );
+        assert_eq!(p.provider_name, "cloudflare");
     }
 }
