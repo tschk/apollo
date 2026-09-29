@@ -1,11 +1,19 @@
 //! apollo desktop app — Crepuscularity + GPUI.
 //!
-//! Layout and palette follow telekinesis' UI: zinc surfaces with an indigo
-//! accent, tool calls rendered as `| tool` with indented detail, a blinking
-//! input cursor, a braille spinner while busy, and a status bar carrying
-//! model, engine and connection state.
+//! First launch runs the onboarding (`onboarding.rs`, `views/*.crepus`):
+//! provider + key, workspace, permissions and a test prompt, written where
+//! the `apollo` CLI reads them. Later launches open the chat window directly
+//! in the onboarded workspace; `--onboarding` runs the setup again.
+//!
+//! Palette and type follow the Telekinesis portal tokens (`theme.rs`):
+//! zinc-950 surfaces, Chivo Mono. Tool calls render as `| tool` with
+//! indented detail, a blinking input cursor, a braille spinner while busy,
+//! and a status bar carrying model, engine and connection state.
 
 mod agent;
+mod onboarding;
+mod setup;
+mod theme;
 
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
@@ -27,16 +35,16 @@ const SPINNER_FRAMES: [&str; 10] = [
 
 const MAX_HISTORY: usize = 100;
 
-// ── Palette (tailwind zinc/indigo, matching telekinesis) ────────────────────
+// ── Palette (Telekinesis portal tokens, see theme.rs) ───────────────────────
 // Surface and border tones live as literals in the `view!` template below;
 // these are the ones the Rust-built transcript rows need.
-const TEXT: u32 = 0xf4f4f5; // zinc-100
-const TEXT_FAINT: u32 = 0x71717a; // zinc-500
+const TEXT: u32 = theme::TEXT;
+const TEXT_FAINT: u32 = theme::MUTED;
 const TEXT_GHOST: u32 = 0x52525b; // zinc-600
-const ACCENT: u32 = 0x818cf8; // indigo-400
-const USER: u32 = 0x60a5fa; // blue-400
-const OK: u32 = 0x4ade80; // green-400
-const ERR: u32 = 0xf87171; // red-400
+const ACCENT: u32 = theme::ACCENT;
+const USER: u32 = 0xa1a1aa; // zinc-400
+const OK: u32 = theme::SUCCESS;
+const ERR: u32 = theme::DANGER;
 
 fn spinner_frame(start: Instant) -> &'static str {
     let idx = ((start.elapsed().as_millis() / 100) % SPINNER_FRAMES.len() as u128) as usize;
@@ -201,7 +209,8 @@ impl ApolloView {
             entries: vec![Entry::Status(if online {
                 "connected — streaming tool activity live".into()
             } else {
-                "no agent listening. run `apollo chat` in this workspace, then send a message"
+                "no agent server running — messages go through `apollo ask` in this workspace. \
+                 run `apollo chat` here for tools and live streaming"
                     .into()
             })],
             status: if online {
@@ -420,6 +429,8 @@ impl ApolloView {
                 false
             }
             AgentEvent::ToolStart { name, hint } => {
+                // Tool and delta events only arrive over the server's stream.
+                self.online = true;
                 self.entries.push(Entry::Tool {
                     name: name.clone(),
                     hint,
@@ -448,6 +459,7 @@ impl ApolloView {
                 false
             }
             AgentEvent::Delta(text) => {
+                self.online = true;
                 match self.entries.last_mut() {
                     Some(Entry::Agent {
                         text: existing,
@@ -476,8 +488,9 @@ impl ApolloView {
                     }),
                     _ => {}
                 }
+                // Not `online = true`: a reply can also come from the
+                // `apollo ask` fallback with no agent server listening.
                 self.busy = false;
-                self.online = true;
                 self.status = "ready".into();
                 true
             }
@@ -532,15 +545,22 @@ impl Render for ApolloView {
             "○ offline".to_string()
         });
         let transcript = self.transcript();
+        let workspace = SharedString::from(
+            std::env::current_dir()
+                .map(|d| setup::display_path(&d))
+                .unwrap_or_default(),
+        );
 
         view! {r#"
-            div w-full h-full bg-[#09090b] text-[#f4f4f5] flex flex-col @keydown=on_key_down
+            div w-full h-full bg-[#09090b] text-[#d4d4d8] font-[Chivo_Mono] flex flex-col @keydown=on_key_down
 
-                div h-12 w-full flex flex-row items-center px-5 gap-3 border-b border-[#27272a]
-                    span text-lg font-semibold text-[#818cf8]
+                div h-11 w-full flex flex-row items-center px-4 gap-3 border-b border-[#3f3f46] bg-[#18181b]
+                    div w-6 h-6 flex items-center justify-center rounded-md border border-[#3f3f46] bg-[#27272a] text-[#fafafa] text-xs font-bold
+                        "a"
+                    span text-sm font-semibold text-[#d4d4d8]
                         "apollo"
-                    span text-xs text-[#52525b]
-                        "v0.2.2"
+                    span text-xs text-[#71717a]
+                        "{workspace}"
                     if {busy}
                         span text-xs text-[#fbbf24]
                             "{spinner}"
@@ -550,7 +570,7 @@ impl Render for ApolloView {
                     span text-xs text-[#52525b]
                         "{engine}"
                     if {online}
-                        span text-xs text-[#4ade80]
+                        span text-xs text-[#34d399]
                             "{link}"
                     else
                         span text-xs text-[#52525b]
@@ -559,30 +579,30 @@ impl Render for ApolloView {
                 div flex-1 w-full px-5 py-4 overflow-hidden
                     {transcript}
 
-                div w-full px-5 py-2 flex flex-row gap-2 border-t border-[#27272a]
-                    button bg-[#18181b] border border-[#27272a] text-[#a1a1aa] text-xs px-3 py-1 rounded-md @click=prompt_doctor
+                div w-full px-5 py-2 flex flex-row gap-2 border-t border-[#3f3f46]
+                    button bg-[#18181b] border border-[#3f3f46] text-[#a1a1aa] text-xs px-3 py-1 rounded-md hover:bg-[#27272a] @click=prompt_doctor
                         "doctor"
-                    button bg-[#18181b] border border-[#27272a] text-[#a1a1aa] text-xs px-3 py-1 rounded-md @click=prompt_tools
+                    button bg-[#18181b] border border-[#3f3f46] text-[#a1a1aa] text-xs px-3 py-1 rounded-md hover:bg-[#27272a] @click=prompt_tools
                         "tools"
-                    button bg-[#18181b] border border-[#27272a] text-[#a1a1aa] text-xs px-3 py-1 rounded-md @click=clear_chat
+                    button bg-[#18181b] border border-[#3f3f46] text-[#a1a1aa] text-xs px-3 py-1 rounded-md hover:bg-[#27272a] @click=clear_chat
                         "clear"
 
-                div w-full flex flex-row items-center px-5 py-3 gap-3 border-t border-[#27272a]
-                    span text-sm text-[#818cf8]
+                div w-full flex flex-row items-center px-5 py-3 gap-3 border-t border-[#3f3f46]
+                    span text-sm text-[#fafafa]
                         "›"
                     if {draft_empty}
                         span flex-1 text-sm text-[#52525b]
                             "{draft_display}"
                     else
-                        span flex-1 text-sm text-[#f4f4f5]
+                        span flex-1 text-sm text-[#d4d4d8]
                             "{draft_display}"
-                    button bg-[#818cf8] text-[#09090b] text-xs font-semibold px-4 py-2 rounded-md disabled={busy} @click=submit
+                    button bg-[#fafafa] text-[#09090b] text-xs font-semibold px-4 py-2 rounded-md disabled={busy} @click=submit
                         if {busy}
                             "…"
                         else
                             "send"
 
-                div h-7 w-full flex flex-row items-center px-5 gap-3 border-t border-[#27272a] bg-[#18181b]
+                div h-7 w-full flex flex-row items-center px-5 gap-3 border-t border-[#3f3f46] bg-[#18181b]
                     span text-xs text-[#71717a]
                         "{status}"
                     span flex-1
@@ -592,16 +612,47 @@ impl Render for ApolloView {
                         "↑↓ history · esc clear · enter send"
         "#}
         .track_focus(&self.focus)
+        .key_context(CHAT_CONTEXT)
         .on_action(cx.listener(Self::submit_action))
         .on_action(cx.listener(Self::clear_action))
     }
 }
 
+/// Key context of the chat view, so its enter/escape bindings do not fire
+/// while the onboarding has focus.
+const CHAT_CONTEXT: &str = "ApolloChat";
+
+fn open_chat(workspace: &std::path::Path, window: &mut Window, cx: &mut App) {
+    // The chat view, `apollo ask` fallback and status bar all resolve
+    // `apollo.json` relative to the working directory.
+    if let Err(e) = std::env::set_current_dir(workspace) {
+        eprintln!("apollo-ui: cannot enter {}: {e}", workspace.display());
+    }
+    let view = window.replace_root(cx, |_, cx| ApolloView::new(cx));
+    window.focus(&view.read(cx).focus);
+}
+
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    let force_onboarding = std::env::args().skip(1).any(|a| a == "--onboarding");
+    if std::env::args().skip(1).any(|a| a == "--help" || a == "-h") {
+        println!(
+            "apollo-ui — desktop app for apollo\n\n\
+             usage: apollo-ui [--onboarding]\n\n\
+             first launch walks through setup; later launches open the chat window\n\
+             in the onboarded workspace. --onboarding runs setup again.\n\
+             state: ~/.apollo/desktop.json (no secrets)"
+        );
+        return;
+    }
+    let ready = setup::DesktopState::load()
+        .and_then(|s| s.ready().map(|p| p.to_path_buf()))
+        .filter(|_| !force_onboarding);
+
+    Application::new().run(move |cx: &mut App| {
+        theme::load_fonts(cx);
         cx.bind_keys([
-            gpui::KeyBinding::new("enter", SubmitMessage, None),
-            gpui::KeyBinding::new("escape", ClearDraft, None),
+            gpui::KeyBinding::new("enter", SubmitMessage, Some(CHAT_CONTEXT)),
+            gpui::KeyBinding::new("escape", ClearDraft, Some(CHAT_CONTEXT)),
         ]);
 
         let window_options = gpui_window_options(
@@ -614,14 +665,41 @@ fn main() {
             Some(size(px(640.), px(480.))),
         );
 
-        let opened = cx.open_window(window_options, |window, cx| {
-            let view = cx.new(ApolloView::new);
-            // Without this the root div never receives keystrokes.
-            window.focus(&view.read(cx).focus);
-            view
+        let opened = cx.open_window(window_options, move |window, cx| {
+            let root = match ready {
+                Some(workspace) => {
+                    let _ = std::env::set_current_dir(&workspace);
+                    let view = cx.new(ApolloView::new);
+                    window.focus(&view.read(cx).focus);
+                    gpui::AnyView::from(view)
+                }
+                None => {
+                    let view = cx.new(|cx| {
+                        onboarding::OnboardingView::new(cx, |workspace, window, cx| {
+                            open_chat(&workspace, window, cx)
+                        })
+                    });
+                    window.focus(&view.read(cx).focus);
+                    gpui::AnyView::from(view)
+                }
+            };
+            cx.new(|_| Root(root))
         });
         if let Err(e) = opened {
             eprintln!("failed to open apollo ui: {e:?}");
         }
     });
+}
+
+/// Window root holding whichever view launch picked; `replace_root` swaps
+/// it for the chat view when onboarding finishes.
+struct Root(gpui::AnyView);
+
+impl Render for Root {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .font_family(theme::FONT)
+            .child(self.0.clone())
+    }
 }

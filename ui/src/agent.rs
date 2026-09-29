@@ -287,7 +287,7 @@ pub fn on_path(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn find_apollo_bin() -> Option<std::path::PathBuf> {
+pub fn find_apollo_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let candidate = dir.join("apollo");
@@ -437,7 +437,8 @@ pub fn config_summary() -> (String, String) {
         .get("agent")
         .and_then(|a| a.get("engine"))
         .and_then(|e| e.as_str())
-        .unwrap_or("legacy")
+        // rx4 is the only engine since the legacy state machine was removed.
+        .unwrap_or("rx4")
         .to_string();
     (model, engine)
 }

@@ -1,0 +1,18 @@
+# Step 5 — send one prompt through the agent.
+div w-full flex flex-col gap-4
+  div w-full flex flex-col gap-2
+    span text-xs text-[#71717a]
+      "test prompt"
+    div w-full flex flex-row gap-2 items-center
+      div flex-1
+        {prompt_field}
+      button bg-[#fafafa] text-[#09090b] text-sm font-semibold px-4 py-2 rounded-md hover:bg-[#d4d4d8] @click=on_run_test
+        "{run_label}"
+  div w-full flex flex-col gap-2 p-4 rounded-lg border border-[#3f3f46] bg-[#18181b] min-h-32
+    div flex flex-row gap-2 items-center
+      span text-xs text-[#71717a]
+        "{route_label}"
+      span flex-1
+      span text-xs text-[#71717a]
+        "{elapsed}"
+    {transcript}

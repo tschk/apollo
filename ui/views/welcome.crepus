@@ -1,0 +1,28 @@
+# Step 1 — what apollo is and what the next screens will set up.
+div w-full flex flex-col gap-4
+  div w-full flex flex-col gap-3 p-5 rounded-lg border border-[#3f3f46] bg-[#18181b]
+    div flex flex-row gap-3
+      span text-sm text-[#fafafa]
+        "01"
+      span text-sm text-[#d4d4d8]
+        "model provider + api key — stored locally, owner-only"
+    div flex flex-row gap-3
+      span text-sm text-[#fafafa]
+        "02"
+      span text-sm text-[#d4d4d8]
+        "workspace folder — where apollo reads, writes and remembers"
+    div flex flex-row gap-3
+      span text-sm text-[#fafafa]
+        "03"
+      span text-sm text-[#d4d4d8]
+        "permission profile — what the agent may do without asking"
+    div flex flex-row gap-3
+      span text-sm text-[#fafafa]
+        "04"
+      span text-sm text-[#d4d4d8]
+        "a test prompt through the agent to prove it answers"
+  div flex flex-row gap-2 items-center
+    span text-xs text-[#34d399]
+      "●"
+    span text-xs text-[#71717a]
+      "{engine_line}"

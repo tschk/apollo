@@ -1,0 +1,9 @@
+# Step 6 — summary before the main window.
+div w-full flex flex-col gap-4
+  div w-full flex flex-col gap-2 p-5 rounded-lg border border-[#3f3f46] bg-[#18181b]
+    {summary}
+  div flex flex-row gap-2 items-center
+    span text-xs text-[#34d399]
+      "✓"
+    span text-xs text-[#71717a]
+      "next launch opens straight into the main window — `apollo-ui --onboarding` re-runs this"

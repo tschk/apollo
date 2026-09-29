@@ -1,0 +1,13 @@
+# Step 2 — provider picker, masked key field, model.
+div w-full flex flex-col gap-4
+  {provider_grid}
+  div w-full flex flex-col gap-2
+    span text-xs text-[#71717a]
+      "{key_label}"
+    {key_field}
+    span text-xs text-[#52525b]
+      "{key_note}"
+  div w-full flex flex-col gap-2
+    span text-xs text-[#71717a]
+      "model"
+    {model_field}

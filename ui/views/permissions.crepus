@@ -1,0 +1,5 @@
+# Step 4 — permission / policy defaults.
+div w-full flex flex-col gap-3
+  {profile_list}
+  span text-xs text-[#52525b]
+    "change later with `apollo config set agent.permission_profile <name>`"
