@@ -114,7 +114,7 @@ apollo doctor        # diagnose config / deps
 apollo audit         # security/config audit
 
 cargo build --release -p apollo-tui   # build the terminal UI
-cargo run -p apollo-ui                # desktop UI (or `apollo ui` after install)
+cargo run -p apollo-ui                # desktop UI (or `apollo ui`); onboarding on first launch
 ```
 
 Other subcommands: `status`, `mcp`, `message` (`msg`), `cron`, `autonomous`,
@@ -126,6 +126,39 @@ Install from a release binary (after build):
 cargo build --release
 ./target/release/apollo-install install
 ```
+
+## Desktop app (apollo-ui)
+
+`apollo-ui` is the desktop app, built with
+[Crepuscularity](https://crepuscularity.tsc.hk) on GPUI and styled with the
+Telekinesis portal tokens (zinc-950, Chivo Mono — bundled, SIL OFL).
+
+```bash
+cargo build -p apollo-ui -p apollo-agent   # keep `apollo` next to `apollo-ui`
+./target/debug/apollo-ui                   # first launch: onboarding (or `apollo ui`)
+./target/debug/apollo-ui --onboarding      # run the onboarding again
+```
+
+The first launch walks through setup as screens: welcome → provider + API key
+(masked field) → workspace folder → permission profile → a test prompt →
+done, then opens the chat window. It writes what `apollo init` writes:
+
+- `<workspace>/apollo.json` — provider, model, workspace, permission profile;
+  `provider.api_key` stays `null`.
+- `<workspace>/.env` — the key, under the variable apollo reads for that
+  provider (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, …), mode `0600`. The key
+  is never logged or shown back, not even its length.
+- `~/.apollo/desktop.json` — "onboarded" plus the workspace to open. No
+  secrets. With it present, later launches go straight to the chat window.
+
+The test prompt uses the most real path available: a running agent server
+(`apollo chat`, full rx4 turn), else `apollo ask` in the new workspace, else a
+local reply that is labelled **offline mock**.
+
+On Linux the window opens through X11 or Wayland (Vulkan via Blade; Mesa's
+lavapipe works for headless/Xvfb). Layouts live in `ui/views/*.crepus`.
+
+Screenshots: [`docs/screenshots/apollo-ui/`](docs/screenshots/apollo-ui/).
 
 ## Agent HTTP API
 
