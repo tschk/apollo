@@ -71,3 +71,138 @@ pub fn apply_workspace_manifest(cfg: &mut Config, workspace: &Path) {
         Err(e) => tracing::warn!("plugin manifest skipped: {:#}", e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_load_manifest_disabled() {
+        let dir = tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.plugin_layer.enabled = false;
+
+        let result = load_manifest(dir.path(), &cfg).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_manifest_not_found() {
+        let dir = tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.plugin_layer.enabled = true;
+        cfg.plugin_layer.manifest_path = std::path::PathBuf::from("plugins/manifest.json");
+
+        let result = load_manifest(dir.path(), &cfg).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_manifest_success() {
+        let dir = tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.plugin_layer.enabled = true;
+        cfg.plugin_layer.manifest_path = std::path::PathBuf::from("plugins/manifest.json");
+
+        let manifest_dir = dir.path().join(".apollo/plugins");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+
+        let manifest_path = manifest_dir.join("manifest.json");
+        std::fs::write(
+            &manifest_path,
+            r#"{
+            "version": 1,
+            "packages": ["pkg1"],
+            "toolsets": {
+                "enabled": ["t1"],
+                "disabled": ["t2"]
+            },
+            "system_prompt_suffix": "suffix"
+        }"#,
+        )
+        .unwrap();
+
+        let result = load_manifest(dir.path(), &cfg).unwrap().unwrap();
+        assert_eq!(result.version, 1);
+        assert_eq!(result.packages, vec!["pkg1".to_string()]);
+        assert_eq!(result.toolsets.enabled, vec!["t1".to_string()]);
+        assert_eq!(result.toolsets.disabled, vec!["t2".to_string()]);
+        assert_eq!(result.system_prompt_suffix, "suffix");
+    }
+
+    #[test]
+    fn test_load_manifest_invalid_json() {
+        let dir = tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.plugin_layer.enabled = true;
+        cfg.plugin_layer.manifest_path = std::path::PathBuf::from("plugins/manifest.json");
+
+        let manifest_dir = dir.path().join(".apollo/plugins");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+
+        let manifest_path = manifest_dir.join("manifest.json");
+        std::fs::write(&manifest_path, r#"{ invalid json }"#).unwrap();
+
+        let result = load_manifest(dir.path(), &cfg);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("parse plugin manifest"));
+    }
+
+    #[test]
+    fn test_merge_manifest_into_config() {
+        let mut cfg = Config::default();
+        cfg.toolsets.enabled = vec!["existing_e".to_string()];
+        cfg.toolsets.disabled = vec!["existing_d".to_string()];
+        cfg.system_prompt = "base prompt".to_string();
+
+        let manifest = PluginManifestFile {
+            version: 1,
+            packages: vec![],
+            toolsets: ToolsetPatch {
+                enabled: vec!["existing_e".to_string(), "new_e".to_string()],
+                disabled: vec!["existing_d".to_string(), "new_d".to_string()],
+            },
+            system_prompt_suffix: " new suffix ".to_string(),
+        };
+
+        merge_manifest_into_config(&mut cfg, &manifest);
+
+        assert_eq!(
+            cfg.toolsets.enabled,
+            vec!["existing_e".to_string(), "new_e".to_string()]
+        );
+        assert_eq!(
+            cfg.toolsets.disabled,
+            vec!["existing_d".to_string(), "new_d".to_string()]
+        );
+        assert_eq!(cfg.system_prompt, "base prompt\nnew suffix");
+    }
+
+    #[test]
+    fn test_apply_workspace_manifest() {
+        let dir = tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.plugin_layer.enabled = true;
+        cfg.plugin_layer.manifest_path = std::path::PathBuf::from("plugins/manifest.json");
+        cfg.system_prompt = "base".to_string();
+
+        let manifest_dir = dir.path().join(".apollo/plugins");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+
+        let manifest_path = manifest_dir.join("manifest.json");
+        std::fs::write(
+            &manifest_path,
+            r#"{
+            "system_prompt_suffix": "suffix"
+        }"#,
+        )
+        .unwrap();
+
+        apply_workspace_manifest(&mut cfg, dir.path());
+        assert_eq!(cfg.system_prompt, "base\nsuffix");
+    }
+}
