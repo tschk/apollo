@@ -989,9 +989,15 @@ impl ApolloView {
 
     fn starters(&self, cx: &mut Context<Self>) -> AnyElement {
         let prompts = [
-            ("Look around", "Look at this workspace and tell me what is here."),
+            (
+                "Look around",
+                "Look at this workspace and tell me what is here.",
+            ),
             ("Run a check", "Run doctor and summarize any issues."),
-            ("What can you use", "List your available tools, grouped by purpose."),
+            (
+                "What can you use",
+                "List your available tools, grouped by purpose.",
+            ),
         ];
         div()
             .w_full()
