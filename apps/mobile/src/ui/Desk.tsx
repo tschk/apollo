@@ -116,7 +116,7 @@ export function Desk({
 
         <Text style={styles.section}>chat</Text>
         {messages.length === 0 ? (
-          <Text style={styles.empty}>a prompt stays on this device. oauth sign-in is not replayed from here.</Text>
+          <Text style={styles.empty}>write the first message.</Text>
         ) : null}
         {messages.map((message, index) => (
           <View key={`${message.role}-${index}`} style={[styles.bubble, message.role === "user" ? styles.user : styles.assistant]}>

@@ -66,13 +66,13 @@ export const sampleMessages = [
   { role: "user" as const, text: "what is on this desk?" },
   {
     role: "assistant" as const,
-    text: "offline mock · no key in this session. nothing was sent.",
-    route: "offline mock · no key in this session",
+    text: "not sent · no key yet. nothing was sent.",
+    route: "not sent · no key yet",
   },
 ];
 
 export const sampleLog = [
   { t: "14:02", line: "saved instance research" },
   { t: "14:02", line: "mode advanced" },
-  { t: "14:03", line: "chat stayed on this device" },
+  { t: "14:03", line: "ready to chat" },
 ];

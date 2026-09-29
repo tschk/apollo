@@ -1,13 +1,8 @@
 /**
- * Chat from this device.
+ * Chat from the phone.
  *
- * A key-based provider is called at its own API. Ollama is called on
- * 127.0.0.1 of this device. OAuth choices do not carry a token here, so
- * the reply is an offline mock and labeled as one — the same idea as the
- * desktop probe when no credential is available.
- *
- * This module never calls the apollo agent HTTP API. That API is the
- * process on the machine where the binary runs.
+ * A key calls that model's API. Ollama is 127.0.0.1 on the phone.
+ * An account sign-in has no token here, so the reply is a labeled stand-in.
  */
 
 import type { AuthKind } from "./providers";
@@ -38,26 +33,26 @@ export function planRoute(input: {
   if (input.auth === "oauth") {
     return {
       kind: "offline",
-      label: "offline mock · sign-in stays on the machine running apollo",
+      label: "not sent · sign-in is not on this phone",
     };
   }
   if (input.auth === "local") {
     const url = chatCompletionsUrl(input.baseUrl ?? "");
-    if (!url) return { kind: "offline", label: "offline mock · ollama has no base url" };
-    return { kind: "provider", label: "live · ollama on this device", url };
+    if (!url) return { kind: "offline", label: "not sent · ollama needs an address" };
+    return { kind: "provider", label: "live · ollama", url };
   }
   const key = input.key?.trim() ?? "";
   if (input.auth === "api-key" && !key) {
-    return { kind: "offline", label: "offline mock · no key in this session" };
+    return { kind: "offline", label: "not sent · no key yet" };
   }
   const url = chatCompletionsUrl(input.baseUrl ?? "");
   if (!url) {
-    return { kind: "offline", label: "offline mock · custom endpoint needs a base url" };
+    return { kind: "offline", label: "not sent · add an address" };
   }
   if (input.auth === "custom" && !key) {
-    return { kind: "provider", label: "live · custom endpoint, no key", url };
+    return { kind: "provider", label: "live · custom", url };
   }
-  return { kind: "provider", label: "live · provider api", url };
+  return { kind: "provider", label: "live", url };
 }
 
 export function scrub(text: string, secret: string): string {
@@ -117,7 +112,7 @@ export async function complete(input: {
     const raw = await response.text();
     if (!response.ok) {
       return {
-        text: `the provider returned ${response.status}. the body is not shown.`,
+        text: `the model said no (${response.status}).`,
         label: plan.label,
         live: true,
       };
@@ -126,18 +121,18 @@ export async function complete(input: {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return { text: "the provider did not return json.", label: plan.label, live: true };
+      return { text: "the reply was not readable.", label: plan.label, live: true };
     }
     const text = parseCompletion(parsed);
     if (!text) {
-      return { text: "the provider returned no message.", label: plan.label, live: true };
+      return { text: "no reply came back.", label: plan.label, live: true };
     }
     return { text: scrub(text, key), label: plan.label, live: true };
   } catch (error) {
     const reason = error instanceof Error ? error.message : "request failed";
     const aborted = reason.toLowerCase().includes("abort");
     return {
-      text: scrub(aborted ? "the provider timed out." : "the provider could not be reached.", key),
+      text: scrub(aborted ? "the model timed out." : "the model could not be reached.", key),
       label: plan.label,
       live: true,
     };

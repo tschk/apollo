@@ -27,7 +27,7 @@ export const OAUTH_PROVIDERS: readonly ProviderInfo[] = [
     auth: "oauth",
     defaultModel: "gpt-5.6",
     blurb: "sign in with your chatgpt plan",
-    note: "the login stays in the rs_ai credential store on the machine running apollo. this phone records the choice, not the token.",
+    note: "your chatgpt plan. the phone keeps the choice, not the token.",
   },
   {
     id: "github-copilot",
@@ -35,15 +35,15 @@ export const OAUTH_PROVIDERS: readonly ProviderInfo[] = [
     auth: "oauth",
     defaultModel: "gpt-5.4",
     blurb: "sign in with github",
-    note: "apollo uses this only when the binary is built with provider-copilot. no token is stored here.",
+    note: "github sign-in, when copilot is included. the phone does not keep the token.",
   },
   {
     id: "claude",
     label: "Claude",
     auth: "oauth",
     defaultModel: "claude-sonnet-5",
-    blurb: "not a sign-in on this phone",
-    note: "apollo routes anthropic and claude configs to chatgpt today. the card is here so the choice matches the desktop.",
+    blurb: "through chatgpt for now",
+    note: "not a sign-in here. claude is sent through chatgpt for now.",
   },
 ];
 
@@ -55,7 +55,7 @@ export const KEY_PROVIDERS: readonly ProviderInfo[] = [
     envVar: "OPENROUTER_API_KEY",
     defaultModel: "z-ai/glm-5.2",
     blurb: "one key, many models",
-    note: "the key is held in memory for this session and written, on the desktop, to the instance .env.",
+    note: "one key, for this session. it is not saved in the shared config.",
     baseUrl: "https://openrouter.ai/api/v1",
   },
   {
@@ -65,7 +65,7 @@ export const KEY_PROVIDERS: readonly ProviderInfo[] = [
     envVar: "OPENAI_API_KEY",
     defaultModel: "gpt-5.4",
     blurb: "api key",
-    note: "sent only as a bearer token to the provider. it is not put in desktop.json.",
+    note: "for this session. not saved in the shared config.",
     baseUrl: "https://api.openai.com/v1",
   },
   {
@@ -75,7 +75,7 @@ export const KEY_PROVIDERS: readonly ProviderInfo[] = [
     envVar: "GEMINI_API_KEY",
     defaultModel: "gemini-3.1-pro-preview",
     blurb: "google ai",
-    note: "uses the openai-compatible gemini endpoint.",
+    note: "a gemini key, for this session.",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
   },
   {
@@ -85,7 +85,7 @@ export const KEY_PROVIDERS: readonly ProviderInfo[] = [
     envVar: "XAI_API_KEY",
     defaultModel: "grok-build-0.1",
     blurb: "api key",
-    note: "sent only as a bearer token to the provider.",
+    note: "for this session. not saved in the shared config.",
     baseUrl: "https://api.x.ai/v1",
   },
   {
@@ -95,7 +95,7 @@ export const KEY_PROVIDERS: readonly ProviderInfo[] = [
     envVar: "DEEPSEEK_API_KEY",
     defaultModel: "deepseek-v4-pro",
     blurb: "api key",
-    note: "sent only as a bearer token to the provider.",
+    note: "for this session. not saved in the shared config.",
     baseUrl: "https://api.deepseek.com",
   },
   {
@@ -105,7 +105,7 @@ export const KEY_PROVIDERS: readonly ProviderInfo[] = [
     envVar: "MOONSHOT_API_KEY",
     defaultModel: "kimi-k3",
     blurb: "api key",
-    note: "sent only as a bearer token to the provider.",
+    note: "for this session. not saved in the shared config.",
     baseUrl: "https://api.moonshot.ai/v1",
   },
   {
@@ -114,7 +114,7 @@ export const KEY_PROVIDERS: readonly ProviderInfo[] = [
     auth: "local",
     defaultModel: "llama3.2",
     blurb: "no key",
-    note: "talks to ollama on this device at 127.0.0.1. a model server somewhere else is a custom endpoint you type.",
+    note: "ollama on this phone. another address is a custom endpoint.",
     baseUrl: "http://127.0.0.1:11434/v1",
   },
   {
@@ -124,7 +124,7 @@ export const KEY_PROVIDERS: readonly ProviderInfo[] = [
     envVar: "APOLLO_PROVIDER_API_KEY",
     defaultModel: "",
     blurb: "any openai-compatible api",
-    note: "base url, optional key, model. the key variable matches the desktop: APOLLO_PROVIDER_API_KEY.",
+    note: "an address, an optional key, and a model.",
   },
 ];
 
@@ -145,10 +145,10 @@ export interface ProfileInfo {
 
 /** Same ids `apollo init` writes. Enforcement happens in the agent, not here. */
 export const PROFILES: readonly ProfileInfo[] = [
-  { id: "auto", label: "auto", detail: "default heuristics, shell enabled — recommended" },
-  { id: "prompt", label: "prompt", detail: "approve plans before tools run" },
+  { id: "auto", label: "auto", detail: "the usual choices. shell is on — recommended" },
+  { id: "prompt", label: "prompt", detail: "ask before tools run" },
   { id: "tools_only", label: "tools only", detail: "web, memory and sessions — no shell, no file writes" },
-  { id: "full", label: "full", detail: "autonomous on this workspace — shell and file writes" },
+  { id: "full", label: "full", detail: "shell and file writes, without asking first" },
 ];
 
 export function profileById(id: string): ProfileInfo {

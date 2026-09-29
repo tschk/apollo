@@ -1,7 +1,5 @@
 /**
- * Apollo desktop tokens (ui/src/theme.rs on the gui branch): zinc-950,
- * Chivo Mono. Crepuscularity is a GPUI layer and does not ship a phone
- * target, so these constants are the React Native stand-in.
+ * Desktop colors, used here as React Native constants: zinc-950, Chivo Mono.
  */
 import type { TextStyle, ViewStyle } from "react-native";
 

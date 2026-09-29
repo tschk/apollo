@@ -120,12 +120,12 @@ test("keys are checked and masked, never echoed by length past 24", () => {
 
 test("oauth and missing keys stay offline; ollama stays on this device", () => {
   assert.equal(planRoute({ auth: "oauth" }).kind, "offline");
-  assert.match(planRoute({ auth: "oauth" }).label, /machine running apollo/);
+  assert.match(planRoute({ auth: "oauth" }).label, /not on this phone/);
   assert.equal(planRoute({ auth: "api-key", baseUrl: "https://api.openai.com/v1", key: "" }).kind, "offline");
   const local = planRoute({ auth: "local", baseUrl: "http://127.0.0.1:11434/v1" });
   assert.equal(local.kind, "provider");
   assert.equal(local.url, "http://127.0.0.1:11434/v1/chat/completions");
-  assert.match(local.label, /this device/);
+  assert.match(local.label, /ollama/);
   const custom = planRoute({
     auth: "custom",
     baseUrl: "https://models.example/v1/chat/completions",

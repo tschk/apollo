@@ -129,7 +129,7 @@ cargo build --release
 
 ## Mobile
 
-`apps/mobile` is the iOS and Android desk, one Expo app. Crepuscularity targets GPUI, so the phone UI is React Native with the same zinc-950 field and Chivo Mono as `apollo-ui`.
+`apps/mobile` is the iPhone and Android app. Same zinc-950 and Chivo Mono as the desktop.
 
 It records the same document the desktop keeps at `~/.apollo/desktop.json`: onboarding, simple or advanced, and instances (provider, model, permission profile, one folder or everywhere). Keys are not fields in that document. On a phone the copy lives in app storage. See `apps/mobile/README.md`.
 

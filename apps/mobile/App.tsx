@@ -207,8 +207,8 @@ function renderPreview(id: PreviewId) {
       previewProbe={
         step === "test"
           ? {
-              label: "offline mock · no key in this session",
-              text: "offline mock · no key in this session. nothing was sent.",
+              label: "not sent · no key yet",
+              text: "not sent · no key yet. nothing was sent.",
             }
           : null
       }

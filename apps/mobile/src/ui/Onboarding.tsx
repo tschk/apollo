@@ -260,11 +260,10 @@ export function Onboarding({
 function Welcome() {
   return (
     <View>
-      <Text style={styles.kicker}>first run</Text>
+      <Text style={styles.kicker}>welcome</Text>
       <Text style={styles.title}>meet apollo</Text>
       <Text style={styles.lede}>
-        a local-first agent. this phone is the desk: a provider, a workspace, then chat.
-        the binary stays where you installed it.
+        the agent that comes with you. a model, a place to work, then the conversation.
       </Text>
       <View style={styles.stack}>
         {["sign in, or a key", "one folder, or everywhere", "what it may do", "a test prompt, then simple or advanced"].map(
@@ -311,7 +310,7 @@ function ProviderStep({
     <View>
       <Text style={styles.kicker}>provider</Text>
       <Text style={styles.title}>connect a model</Text>
-      <Text style={styles.hint}>three sign-in choices, then everything else. tokens are not kept in the shared config.</Text>
+      <Text style={styles.hint}>an account, or a key. the key never goes in the shared config.</Text>
       {OAUTH_PROVIDERS.map((item) => (
         <Pressable
           key={item.id}
@@ -355,7 +354,7 @@ function ProviderStep({
           label={provider.envVar ?? "api key"}
           value={secret}
           onChange={onSecret}
-          placeholder={provider.auth === "custom" ? "optional" : "paste, not saved to disk"}
+          placeholder={provider.auth === "custom" ? "optional" : "for this session"}
           secure
           autoCapitalize="none"
         />
@@ -394,18 +393,18 @@ function WorkspaceStep({
     <View>
       <Text style={styles.kicker}>scope</Text>
       <Text style={styles.title}>where it works</Text>
-      <Text style={styles.hint}>a directory on the machine that runs apollo. this phone only records the path.</Text>
+      <Text style={styles.hint}>the place this agent is allowed to touch.</Text>
       <Field label="instance name" value={name} onChange={onName} placeholder="apollo" autoCapitalize="none" />
       <Pressable onPress={() => onEverywhere(false)} style={[styles.card, !everywhere ? styles.cardOn : null]}>
         <Text style={styles.cardTitle}>one folder</Text>
-        <Text style={styles.cardBody}>config, .env and .apollo live in that folder, as with apollo init.</Text>
+        <Text style={styles.cardBody}>setup stays in that folder.</Text>
       </Pressable>
       <Pressable onPress={() => onEverywhere(true)} style={[styles.card, everywhere ? styles.cardOn : null]}>
         <Text style={styles.cardTitle}>everywhere</Text>
-        <Text style={styles.cardBody}>workspace is home. config goes in ~/.apollo/instances/&lt;id&gt;.</Text>
+        <Text style={styles.cardBody}>home, not one folder. setup goes under ~/.apollo/instances.</Text>
       </Pressable>
       {everywhere ? (
-        <Field label="home, if you know it" value={home} onChange={onHome} placeholder="~" autoCapitalize="none" />
+        <Field label="home folder" value={home} onChange={onHome} placeholder="~" autoCapitalize="none" />
       ) : (
         <Field label="folder" value={folder} onChange={onFolder} placeholder="~/src/apollo" autoCapitalize="none" />
       )}
@@ -418,7 +417,7 @@ function PermissionsStep({ profile, onProfile }: { profile: string; onProfile: (
     <View>
       <Text style={styles.kicker}>permissions</Text>
       <Text style={styles.title}>what it may do</Text>
-      <Text style={styles.hint}>saved on the instance. the agent enforces it where apollo runs.</Text>
+      <Text style={styles.hint}>what it may do without asking. set this before the first real turn.</Text>
       {PROFILES.map((item) => (
         <Pressable key={item.id} onPress={() => onProfile(item.id)} style={[styles.card, profile === item.id ? styles.cardOn : null]}>
           <Text style={styles.cardTitle}>{item.label}</Text>
@@ -446,7 +445,7 @@ function TestStep({
     <View>
       <Text style={styles.kicker}>test</Text>
       <Text style={styles.title}>a test prompt</Text>
-      <Text style={styles.hint}>a missing token stays a labeled mock. a key calls that provider from this device.</Text>
+      <Text style={styles.hint}>send one line. without a key, the reply is a stand-in, and it says so.</Text>
       <Field label="prompt" value={prompt} onChange={onPrompt} placeholder="say hello in one line" />
       <Pressable onPress={onRun} style={styles.primary}>
         <Text style={styles.primaryText}>{running ? "running" : "run"}</Text>
@@ -468,11 +467,11 @@ function ModeStep({ mode, onMode }: { mode: Mode; onMode: (mode: Mode) => void }
       <Text style={styles.title}>how much app</Text>
       <Pressable onPress={() => onMode("simple")} style={[styles.card, mode === "simple" ? styles.cardOn : null]}>
         <Text style={styles.cardTitle}>simple</Text>
-        <Text style={styles.cardBody}>chat, and a way to switch instances. nothing else.</Text>
+        <Text style={styles.cardBody}>chat, and a switcher. nothing else.</Text>
       </Pressable>
       <Pressable onPress={() => onMode("advanced")} style={[styles.card, mode === "advanced" ? styles.cardOn : null]}>
         <Text style={styles.cardTitle}>advanced</Text>
-        <Text style={styles.cardBody}>the roster, the permission profile, and a local log. switch any time.</Text>
+        <Text style={styles.cardBody}>the roster, tools, and a log. switch any time.</Text>
       </Pressable>
     </View>
   );
