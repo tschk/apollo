@@ -46,6 +46,75 @@ pub struct EmbeddingsConfig {
     pub base_url: Option<String>,
 }
 
+/// Model and effort for one role. An empty model means "the instance default".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RoleChoice {
+    pub model: String,
+    pub effort: String,
+}
+
+impl Default for RoleChoice {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            effort: default_reasoning_effort(),
+        }
+    }
+}
+
+/// A models.dev effort token, or nothing when the string is not one.
+pub fn recognized_effort(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "none" => Some("none"),
+        "minimal" => Some("minimal"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
+        _ => None,
+    }
+}
+
+impl RoleChoice {
+    pub fn effort_level(&self) -> Option<&'static str> {
+        recognized_effort(&self.effort)
+    }
+}
+
+/// How the three roles are asked to run.
+///
+/// The main dial is what a chat turn uses (model + effort), re-read each
+/// turn. Oracle is copied onto `fast_model`. Subagents are stored and copied
+/// onto `heavy_model`; rx4 does not run a separate subagent model yet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RoleDials {
+    pub oracle: RoleChoice,
+    pub main: RoleChoice,
+    pub subagents: RoleChoice,
+}
+
+impl Default for RoleDials {
+    fn default() -> Self {
+        Self {
+            oracle: RoleChoice {
+                model: String::new(),
+                effort: "low".into(),
+            },
+            main: RoleChoice {
+                model: String::new(),
+                effort: default_reasoning_effort(),
+            },
+            subagents: RoleChoice {
+                model: String::new(),
+                effort: "low".into(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
@@ -72,6 +141,17 @@ pub struct AgentConfig {
     /// Record ReAct trajectories per chat for RL export. Defaults to `true`,
     /// which is the historical behaviour; set to `false` to stop collecting.
     pub trajectory_enabled: bool,
+    /// Reasoning effort forwarded to the model on every turn.
+    /// rx4's values: `low`, `medium`, `high`, `xhigh`. Empty sends nothing.
+    #[serde(default = "default_reasoning_effort")]
+    pub reasoning_effort: String,
+    /// Per-role model and effort. Missing on old configs.
+    #[serde(default)]
+    pub roles: RoleDials,
+}
+
+fn default_reasoning_effort() -> String {
+    "medium".into()
 }
 
 impl Default for AgentConfig {
@@ -87,7 +167,24 @@ impl Default for AgentConfig {
             permission_profile: "auto".to_string(),
             auto_compact_after: 0,
             trajectory_enabled: true,
+            reasoning_effort: default_reasoning_effort(),
+            roles: RoleDials::default(),
         }
+    }
+}
+
+impl AgentConfig {
+    /// A recognised effort, or nothing when the config asks not to send one.
+    pub fn reasoning_effort_level(&self) -> Option<&'static str> {
+        recognized_effort(&self.reasoning_effort)
+    }
+
+    /// Effort for the chat turn: the main dial, then `reasoning_effort`.
+    pub fn main_effort(&self) -> Option<&'static str> {
+        self.roles
+            .main
+            .effort_level()
+            .or_else(|| self.reasoning_effort_level())
     }
 }
 
@@ -215,6 +312,8 @@ pub struct MemoryIdeasConfig {
     pub heartbeat_chat_id: Option<String>,
     /// After idle, expand open loops into dream nodes (graph).
     pub dream_on_heartbeat: bool,
+    /// Run daily consolidation from heartbeat (brief keys, timeline, zkr review).
+    pub consolidate_on_heartbeat: bool,
 }
 
 impl Default for MemoryIdeasConfig {
@@ -225,6 +324,7 @@ impl Default for MemoryIdeasConfig {
             graph_recall_limit: 5,
             heartbeat_chat_id: None,
             dream_on_heartbeat: false,
+            consolidate_on_heartbeat: true,
         }
     }
 }
@@ -626,8 +726,101 @@ impl Default for GroupChatConfig {
 }
 
 #[cfg(test)]
+mod is_secret_key_tests {
+    use super::*;
+
+    #[test]
+    fn exact_matches() {
+        assert!(is_secret_key("api_key"));
+        assert!(is_secret_key("token"));
+        assert!(is_secret_key("secret"));
+        assert!(is_secret_key("password"));
+    }
+
+    #[test]
+    fn suffix_matches() {
+        assert!(is_secret_key("openai_api_key"));
+        assert!(is_secret_key("bot_token"));
+        assert!(is_secret_key("client_secret"));
+        assert!(is_secret_key("admin_password"));
+    }
+
+    #[test]
+    fn case_insensitivity() {
+        assert!(is_secret_key("API_KEY"));
+        assert!(is_secret_key("Token"));
+        assert!(is_secret_key("SeCrEt"));
+        assert!(is_secret_key("PASSWORD"));
+        assert!(is_secret_key("Bot_Token"));
+    }
+
+    #[test]
+    fn negative_matches() {
+        // Missing underscore before the secret word
+        assert!(!is_secret_key("apitoken"));
+        assert!(!is_secret_key("mysecret"));
+
+        // Secret word is not at the end
+        assert!(!is_secret_key("token_id"));
+        assert!(!is_secret_key("secret_key")); // _key is not in the list, secret is at start
+        assert!(!is_secret_key("password_hash"));
+
+        // Similar but different words
+        assert!(!is_secret_key("key"));
+        assert!(!is_secret_key("pass"));
+        assert!(!is_secret_key("passwords"));
+
+        // Empty and unrelated
+        assert!(!is_secret_key(""));
+        assert!(!is_secret_key("user_name"));
+    }
+}
+
+#[cfg(test)]
 mod config_path_tests {
     use super::*;
+
+    #[test]
+    fn get_path_rejects_empty_keys() {
+        let cfg = Config::default_config();
+        let err = cfg.get_path("").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+
+        let err = cfg.get_path("   ").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+    }
+
+    #[test]
+    fn get_path_rejects_unknown_top_level_keys() {
+        let cfg = Config::default_config();
+        let err = cfg.get_path("unknown_key").unwrap_err().to_string();
+        assert!(err.contains("unknown config key `unknown_key`"), "{err}");
+        assert!(err.contains("<root>"), "{err}");
+    }
+
+    #[test]
+    fn get_path_rejects_unknown_nested_keys() {
+        let cfg = Config::default_config();
+        let err = cfg
+            .get_path("provider.unknown_key")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown config key `provider.unknown_key`"),
+            "{err}"
+        );
+        assert!(err.contains("Available under `provider`"), "{err}");
+    }
+
+    #[test]
+    fn get_path_rejects_indexing_into_non_objects() {
+        let cfg = Config::default_config();
+        let err = cfg
+            .get_path("provider.name.something")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not a section"), "{err}");
+    }
 
     #[test]
     fn get_reads_nested_and_top_level_keys() {
@@ -635,6 +828,25 @@ mod config_path_tests {
         assert_eq!(cfg.get_path("model").unwrap(), cfg.model.as_str());
         assert_eq!(cfg.get_path("provider.name").unwrap(), "chatgpt");
         assert_eq!(cfg.get_path("agent.max_rounds").unwrap(), 50);
+        assert_eq!(cfg.agent.reasoning_effort_level(), Some("medium"));
+    }
+
+    #[test]
+    fn reasoning_effort_defaults_and_rejects_unknown() {
+        let cfg: AgentConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.reasoning_effort_level(), Some("medium"));
+        let cfg: AgentConfig = serde_json::from_str(r#"{"reasoning_effort":"xhigh"}"#).unwrap();
+        assert_eq!(cfg.reasoning_effort_level(), Some("xhigh"));
+        let cfg: AgentConfig = serde_json::from_str(r#"{"reasoning_effort":""}"#).unwrap();
+        assert_eq!(cfg.reasoning_effort_level(), None);
+        assert_eq!(cfg.main_effort(), Some("medium"));
+        let cfg: AgentConfig = serde_json::from_str(
+            r#"{"reasoning_effort":"high","roles":{"main":{"effort":"low"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.main_effort(), Some("low"));
+        assert_eq!(cfg.roles.oracle.effort, "low");
+        assert!(cfg.roles.subagents.model.is_empty());
     }
 
     #[test]
@@ -671,6 +883,17 @@ mod config_path_tests {
     }
 
     #[test]
+    fn empty_keys_are_rejected() {
+        let cfg = Config::default_config();
+
+        let err = cfg.set_path("", "value").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+
+        let err = cfg.set_path("   ", "value").unwrap_err().to_string();
+        assert!(err.contains("empty config key"), "{err}");
+    }
+
+    #[test]
     fn wrong_typed_values_are_rejected_before_they_reach_disk() {
         let cfg = Config::default_config();
         let err = cfg
@@ -684,6 +907,46 @@ mod config_path_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("expected `true` or `false`"), "{err}");
+    }
+
+    #[test]
+    fn arrays_can_be_updated_from_json_strings() {
+        let cfg = Config::default_config();
+        let json_arr = r#"["web", "memory"]"#;
+
+        let (cfg, written) = cfg.set_path("toolsets.enabled", json_arr).unwrap();
+        assert_eq!(
+            cfg.toolsets.enabled,
+            vec!["web".to_string(), "memory".to_string()]
+        );
+        assert_eq!(written, serde_json::json!(["web", "memory"]));
+    }
+
+    #[test]
+    fn objects_can_be_updated_from_json_strings() {
+        let cfg = Config::default_config();
+        let json_obj = r#"{"hello": "world"}"#;
+
+        let (cfg, written) = cfg.set_path("channel.settings", json_obj).unwrap();
+        assert_eq!(
+            cfg.channel.settings.get("hello").map(|s| s.as_str()),
+            Some("world")
+        );
+        assert_eq!(written, serde_json::json!({"hello": "world"}));
+    }
+
+    #[test]
+    fn invalid_json_for_arrays_is_rejected() {
+        let cfg = Config::default_config();
+
+        let err = cfg
+            .set_path("toolsets.enabled", "[invalid")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("expected JSON matching the existing value"),
+            "{err}"
+        );
     }
 
     #[test]
