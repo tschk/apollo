@@ -24,3 +24,7 @@ NOW.md
 SOUL.md
 USER.md
 memory/
+
+# expo
+apps/mobile/.expo/
+apps/mobile/dist/
