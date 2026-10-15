@@ -208,6 +208,16 @@ fn inline_shell_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"!`([^`\n]+)`").unwrap())
 }
 
+/// Shell syntax `expand_inline_shell` refuses to run. Snippets execute as
+/// literal argv with no shell, so these characters would not do what the
+/// author wrote — `a | b` would run `a` with the arguments `|` and `b`.
+/// Rejecting them loudly also keeps a future reintroduction of `sh -c` from
+/// quietly bringing command injection back. Backtick and newline cannot reach
+/// the check through `inline_shell_re` today; they are listed anyway in case
+/// that regex ever loosens.
+const INLINE_SHELL_FORBIDDEN: &[char] =
+    &['|', '&', ';', '<', '>', '(', ')', '$', '`', '~', '\n', '\r'];
+
 /// Load skill content raw (no preprocessing).
 pub fn load_skill_content(skill: &Skill) -> Option<String> {
     std::fs::read_to_string(&skill.location).ok()
@@ -249,6 +259,10 @@ pub fn substitute_template_vars(
 /// Execute inline shell snippets (`!\`command\``) in skill content.
 /// Replaces each snippet with its stdout (trimmed).
 /// Failures produce a short `[inline-shell error: ...]` marker.
+///
+/// Snippets run as literal argv with no shell, so shell syntax — pipes,
+/// redirections, substitutions — would be passed to the program as plain
+/// arguments. It is rejected loudly instead (see `INLINE_SHELL_FORBIDDEN`).
 pub fn expand_inline_shell(content: &str, cwd: Option<&Path>, _timeout_secs: u64) -> String {
     inline_shell_re()
         .replace_all(content, |caps: &regex::Captures| {
@@ -257,10 +271,25 @@ pub fn expand_inline_shell(content: &str, cwd: Option<&Path>, _timeout_secs: u64
                 return String::new();
             }
 
-            let mut cmd_obj = std::process::Command::new("sh");
+            if let Some(c) = cmd.chars().find(|c| INLINE_SHELL_FORBIDDEN.contains(c)) {
+                return format!("[inline-shell error: shell syntax {c:?} is not allowed]");
+            }
+
+            let parts = match shlex::split(cmd) {
+                Some(p) => p,
+                None => return "[inline-shell error: invalid command quoting]".to_string(),
+            };
+
+            if parts.is_empty() {
+                return String::new();
+            }
+
+            let mut cmd_obj = std::process::Command::new(&parts[0]);
+            if parts.len() > 1 {
+                cmd_obj.args(&parts[1..]);
+            }
+
             cmd_obj
-                .arg("-c")
-                .arg(cmd)
                 .current_dir(cwd.unwrap_or(Path::new(".")))
                 .env_clear()
                 .envs(crate::tools::child_proc::child_env());
@@ -419,5 +448,47 @@ mod tests {
     fn test_inline_shell_expansion() {
         let result = expand_inline_shell("Date is !`echo hello`", None, 5);
         assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn test_inline_shell_rejects_shell_syntax() {
+        // Snippets run as literal argv; shell syntax must fail loudly instead
+        // of passing `|`, `;`, `$`, … to the program as plain arguments.
+        for cmd in [
+            "echo hi | wc -c",
+            "echo a; echo b",
+            "echo a && echo b",
+            "echo a || echo b",
+            "echo hi > marker.txt",
+            "cat < /etc/hostname",
+            "echo $(whoami)",
+            "echo ~",
+        ] {
+            let result = expand_inline_shell(&format!("X is !`{cmd}`"), None, 5);
+            assert!(
+                result.contains("[inline-shell error: shell syntax"),
+                "{cmd:?} should be rejected, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_inline_shell_injection_is_not_executed() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("pwned");
+        let result = expand_inline_shell(
+            &format!("!`echo safe; touch {}`", marker.display()),
+            None,
+            5,
+        );
+        assert!(result.starts_with("[inline-shell error:"), "{result:?}");
+        assert!(!result.contains("safe"), "nothing may run: {result:?}");
+        assert!(!marker.exists(), "injected command must not run");
+    }
+
+    #[test]
+    fn test_inline_shell_quoted_args_still_work() {
+        let result = expand_inline_shell("!`echo \"hello world\"`", None, 5);
+        assert_eq!(result, "hello world");
     }
 }

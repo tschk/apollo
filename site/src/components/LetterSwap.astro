@@ -1,0 +1,18 @@
+---
+interface Props {
+  label: string;
+  href: string;
+  solid?: boolean;
+}
+const { label, href, solid = false } = Astro.props;
+const chars = Array.from(label);
+const glyph = (ch: string) => (ch === " " ? "\u00a0" : ch);
+---
+<a class:list={["btn", "swap", { solid }]} href={href}>
+  {chars.map((ch) => (
+    <span class="swap-char">
+      <span class="swap-a">{glyph(ch)}</span>
+      <span class="swap-b">{glyph(ch)}</span>
+    </span>
+  ))}
+</a>

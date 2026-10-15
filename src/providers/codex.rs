@@ -16,6 +16,15 @@ impl CodexProvider {
             client: ChatGptCodexClient::new(access_token).with_originator("apollo"),
         }
     }
+
+    /// Account id from an existing Codex CLI login. The JWT claim is used
+    /// when this is absent; an explicit id wins when the file has one.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        if let Some(account_id) = account_id.filter(|id| !id.trim().is_empty()) {
+            self.client = self.client.with_account_id(account_id);
+        }
+        self
+    }
 }
 
 #[async_trait]

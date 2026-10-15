@@ -5,6 +5,8 @@
 apollo is a **local-first Rust AI agent runtime** for people who want the bot on
 their own machine, not hidden behind a hosted control plane.
 
+The public site is [`site/`](site/) (https://apollo.tsc.hk).
+
 Single ~16MB binary, ~41ms warm start, async-first (tokio), trait-driven. Ships
 with 10+ messaging channels, 20+ LLM providers, pluggable memory (SurrealDB +
 RocksDB), tool guardrails, context compaction, XML tool-call recovery,
