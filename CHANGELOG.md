@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Security
+
+- `expand_inline_shell` no longer runs skill snippets through `sh -c`;
+  commands are parsed with `shlex` and executed as literal argv with a
+  scrubbed environment. Shell syntax (pipes, `;`, `&&`/`||`, redirections,
+  `$(...)`, `~`) is rejected with an inline error instead of silently
+  executing something the author did not write.
+
 ### Added
 
 - Daily memory consolidation writes `time_contexts` / `open_loops`, a timeline digest, dream graph nodes, and a cited zkr daily review (`memory.consolidate_on_heartbeat`).

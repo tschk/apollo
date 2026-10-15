@@ -1,4 +1,5 @@
 //! Core Tool trait — defines agent capabilities.
+#![allow(clippy::double_must_use)]
 
 use std::sync::Arc;
 

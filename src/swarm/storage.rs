@@ -1,3 +1,4 @@
+#![allow(clippy::double_must_use)]
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
