@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use zkr::{
-    ClaimId, ClaimInput, ClaimKind, CorrectInput, DeleteInput, EmbeddingTarget, GetInput, MemoryDb,
-    PersonId, ProfilesInput, RememberInput, Remembered, RetrievalItem, RetrievalPack, SearchInput,
-    SourceId, SourceKind, TenantId,
+    ClaimId, ClaimInput, ClaimKind, CorrectInput, DeleteInput, EmbeddingTarget, EvidenceId,
+    GetInput, MemoryDb, PersonId, ProfilesInput, RememberInput, Remembered, RetrievalItem,
+    RetrievalPack, ReviewInput, SearchInput, SourceId, SourceKind, TenantId,
 };
 
 pub struct ZkrStore {
@@ -150,6 +150,36 @@ impl ZkrStore {
         .await??)
     }
 
+    pub async fn profile_pager(&self, limit: u32) -> anyhow::Result<Option<String>> {
+        let entries = self.profiles(limit).await?;
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(render_profile_pager(&entries)))
+    }
+
+    pub async fn store_review(
+        &self,
+        day: String,
+        summary: String,
+        evidence_ids: Vec<EvidenceId>,
+    ) -> anyhow::Result<zkr::StoredReview> {
+        let db = Arc::clone(&self.db);
+        let tenant_id = self.tenant_id.clone();
+        let person_id = self.person_id.clone();
+        Ok(tokio::task::spawn_blocking(move || {
+            db.lock().store_review(ReviewInput {
+                tenant_id,
+                person_id,
+                day,
+                summary,
+                evidence_ids,
+                recorded_at: chrono::Utc::now().timestamp(),
+            })
+        })
+        .await??)
+    }
+
     pub async fn capture_turn(
         &self,
         chat_id: &str,
@@ -256,6 +286,18 @@ impl ZkrStore {
     }
 }
 
+pub fn render_profile_pager(entries: &[zkr::ProfileEntry]) -> String {
+    let generated_at = chrono::Utc::now().to_rfc3339();
+    let mut markdown = format!("# Memory one-pager\n\nGenerated at {generated_at}.\n\n");
+    for entry in entries {
+        markdown.push_str(&format!(
+            "- **{}** (recorded {}): {}\n",
+            entry.key, entry.recorded_at, entry.value
+        ));
+    }
+    markdown
+}
+
 fn nanos() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -308,6 +350,14 @@ mod tests {
         let pack = store.search("concise plans".to_string(), 5).await.unwrap();
         assert_eq!(pack.items.len(), 1);
         assert_eq!(pack.items[0].evidence_ids, vec![remembered.evidence_id]);
+    }
+
+    #[test]
+    fn profile_pager_includes_generation_timestamp() {
+        // Constructed without a live db: render only.
+        let markdown = render_profile_pager(&[]);
+        assert!(markdown.contains("Generated at"));
+        assert!(markdown.contains("Memory one-pager"));
     }
 
     #[tokio::test]

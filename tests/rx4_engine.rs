@@ -465,6 +465,7 @@ fn rotary_bridge_for_tools(tools: Vec<Arc<dyn Tool>>) -> RotaryAgentBridge {
         auto_compact_after: 0,
         cost_tracker: None,
         hook_ctx: ToolHookContext::default(),
+        reasoning_effort: None,
     })
 }
 

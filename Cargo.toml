@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "apollo-agent"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 description = "Local-first Rust AI agent runtime — Telegram-first, trait-driven, SurrealDB + RocksDB state layer."
 license = "MPL-2.0"
@@ -14,7 +14,7 @@ repository = "https://github.com/tschk/apollo"
 homepage = "https://github.com/tschk/apollo"
 keywords = ["agent", "ai", "llm", "telegram", "automation"]
 categories = ["command-line-utilities", "web-programming::http-client"]
-exclude = ["/.cursor/", "/memory/", "/USER.md", "/SOUL.md", "/IDENTITY.md", "/MEMORY.md", "/NOW.md", "/HEARTBEAT.md", "/gemini.md", "/apollo.json"]
+exclude = ["/.cursor/", "/memory/", "/USER.md", "/SOUL.md", "/IDENTITY.md", "/MEMORY.md", "/NOW.md", "/HEARTBEAT.md", "/gemini.md", "/apollo.json", "/docs/screenshots/"]
 
 [[bin]]
 name = "apollo"
@@ -34,6 +34,7 @@ default = [
     "channel-cli",
     "channel-telegram",
     "provider-ollama",
+    "provider-copilot",
     "rs-ai",
     "zkr-memory",
     "plugin-web",
