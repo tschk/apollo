@@ -192,10 +192,8 @@ fn model_catalogue() -> Vec<(String, Vec<String>)> {
         .unwrap_or("anthropic")
         .to_string();
     if let Some(config) = &config {
-        for key in ["model"] {
-            if let Some(model) = config.get(key).and_then(|m| m.as_str()) {
-                push(&provider, model);
-            }
+        if let Some(model) = config.get("model").and_then(|m| m.as_str()) {
+            push(&provider, model);
         }
         for key in ["fast_model", "heavy_model"] {
             if let Some(model) = config
