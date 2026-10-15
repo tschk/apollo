@@ -7626,9 +7626,9 @@ dependencies = [
 
 [[package]]
 name = "rx4"
-version = "0.7.2"
+version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09f0fc1f87a619e05b4a5cfa2619c4a575ed301ea9cda0a11e56dae90e471668"
+checksum = "efda3efec8590c367091e4af01d2b2097cfa3b428de65099f2e4c9de49ed7ff4"
 dependencies = [
  "async-trait",
  "cancellation-token",
