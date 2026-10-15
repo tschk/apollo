@@ -1,9 +1,10 @@
-//! rs_ai-backed provider adapter for first-class ChatGPT, Gemini, xAI,
-//! Cloudflare and generic OpenAI-compatible endpoints.
+//! rs_ai-backed provider adapter for first-class ChatGPT, Claude, Gemini,
+//! xAI, Cloudflare and generic OpenAI-compatible endpoints.
 
 use async_trait::async_trait;
 use rs_ai_core::{
-    GenerateOptions, GenerateResult, Message, Prompt, ToolCallRequest, ToolDefinition,
+    GenerateOptions, GenerateResult, Message, Prompt, ReasoningEffort, ThinkingConfig,
+    ToolCallRequest, ToolDefinition,
 };
 use rs_ai_oauth::{fetch_models_async, ModelInfo as OAuthModelInfo, OAuthProvider};
 
@@ -43,6 +44,7 @@ impl RsAiProvider {
         }
         match self.provider_name.as_str() {
             "chatgpt" | "openai" => "gpt-4o",
+            "anthropic" | "claude" => "claude-sonnet-5",
             "gemini" => "gemini-2.5-flash",
             "xai" | "grok" => "grok-4.20-reasoning",
             "cloudflare" => "@cf/meta/llama-3.1-8b-instruct",
@@ -50,22 +52,31 @@ impl RsAiProvider {
         }
     }
 
-    fn build_model(&self) -> anyhow::Result<Box<dyn rs_ai_core::LanguageModel>> {
+    /// Build the language model for a request.
+    ///
+    /// The key is a parameter rather than `self.api_key` so an OAuth access
+    /// token refreshed mid-flight in `chat` can be used without rebuilding
+    /// the provider.
+    fn build_model(&self, api_key: &str) -> anyhow::Result<Box<dyn rs_ai_core::LanguageModel>> {
         use rs_ai_providers::{
-            ChatGptProvider, CloudflareProvider, GeminiProvider, OpenAiCompatibleConfig,
-            OpenAiCompatibleProvider, XaiProvider,
+            ChatGptProvider, ClaudeProvider, CloudflareProvider, GeminiProvider,
+            OpenAiCompatibleConfig, OpenAiCompatibleProvider, XaiProvider,
         };
 
         let model: Box<dyn rs_ai_core::LanguageModel> = match self.provider_name.as_str() {
             "chatgpt" | "openai" => {
-                Box::new(ChatGptProvider::new(&self.api_key).model(self.effective_model_id()))
+                Box::new(ChatGptProvider::new(api_key).model(self.effective_model_id()))
             }
-            "gemini" => {
-                Box::new(GeminiProvider::new(&self.api_key).model(self.effective_model_id()))
+            "anthropic" | "claude" => {
+                let provider = ClaudeProvider::new(api_key);
+                let provider = match &self.base_url {
+                    Some(url) => provider.with_base_url(url.clone()),
+                    None => provider,
+                };
+                Box::new(provider.model(self.effective_model_id()))
             }
-            "xai" | "grok" => {
-                Box::new(XaiProvider::new(&self.api_key).model(self.effective_model_id()))
-            }
+            "gemini" => Box::new(GeminiProvider::new(api_key).model(self.effective_model_id())),
+            "xai" | "grok" => Box::new(XaiProvider::new(api_key).model(self.effective_model_id())),
             "cloudflare" => {
                 let account_id = self
                     .account_id
@@ -74,8 +85,7 @@ impl RsAiProvider {
                     .unwrap_or("")
                     .to_string();
                 Box::new(
-                    CloudflareProvider::new(account_id, &self.api_key)
-                        .model(self.effective_model_id()),
+                    CloudflareProvider::new(account_id, api_key).model(self.effective_model_id()),
                 )
             }
             other => {
@@ -83,12 +93,51 @@ impl RsAiProvider {
                     .base_url
                     .as_deref()
                     .unwrap_or("https://api.openai.com/v1");
-                let config = OpenAiCompatibleConfig::new(base_url, &self.api_key);
+                let config = OpenAiCompatibleConfig::new(base_url, api_key);
                 let provider = OpenAiCompatibleProvider::new(config, other, other);
                 provider.language_model(self.effective_model_id())
             }
         };
         Ok(model)
+    }
+
+    /// Resolve the key for a Claude request, refreshing subscription OAuth
+    /// tokens when they have expired.
+    ///
+    /// Only applies when the configured key is itself a Claude OAuth token
+    /// (`sk-ant-oat…`) — an API key never expires and is used as-is. The
+    /// shared store holds the canonical token pair: when it is expired but
+    /// refreshable it is refreshed, saved back, and the fresh access token is
+    /// used for this request. Nothing here ever logs a token.
+    async fn claude_oauth_key(&self) -> String {
+        if !matches!(self.provider_name.as_str(), "anthropic" | "claude")
+            || !rs_ai_oauth::claude_code::is_anthropic_oauth_token(&self.api_key)
+        {
+            return self.api_key.clone();
+        }
+        let Some(tokens) = rs_ai_oauth::credentials::load(&OAuthProvider::Claude) else {
+            return self.api_key.clone();
+        };
+        if !rs_ai_oauth::credentials::is_expired(&tokens) {
+            return tokens.access_token;
+        }
+        if tokens.refresh_token.is_none() {
+            return self.api_key.clone();
+        }
+        match rs_ai_oauth::refresh_oauth_token(OAuthProvider::Claude, &tokens).await {
+            Ok(new) => {
+                if let Err(error) = rs_ai_oauth::credentials::save(&OAuthProvider::Claude, &new) {
+                    tracing::warn!("failed to persist refreshed claude token: {error}");
+                }
+                new.access_token
+            }
+            // Not worth failing the request over: fall through on the key we
+            // have and let the API be the judge.
+            Err(error) => {
+                tracing::warn!("claude token refresh failed: {error}");
+                self.api_key.clone()
+            }
+        }
     }
 }
 
@@ -104,7 +153,7 @@ impl Provider for RsAiProvider {
             streaming: true,
             vision: matches!(
                 self.provider_name.as_str(),
-                "chatgpt" | "openai" | "gemini" | "xai" | "grok"
+                "chatgpt" | "openai" | "anthropic" | "claude" | "gemini" | "xai" | "grok"
             ),
             max_context: 200_000,
             native_web_search: false,
@@ -122,7 +171,8 @@ impl Provider for RsAiProvider {
     }
 
     async fn chat(&self, request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
-        let model = self.build_model()?;
+        let api_key = self.claude_oauth_key().await;
+        let model = self.build_model(&api_key)?;
 
         let messages: Vec<Message> = request
             .messages
@@ -159,6 +209,16 @@ impl Provider for RsAiProvider {
             options = options
                 .with_tools(tools)
                 .with_tool_choice(rs_ai_core::ToolChoice::Auto);
+        }
+        if let Some(effort) = request.reasoning_effort.and_then(reasoning_effort) {
+            options = options.with_reasoning_effort(effort);
+            // Claude's request uses a thinking budget, not OpenAI's field.
+            if matches!(self.provider_name.as_str(), "anthropic" | "claude") {
+                let tokens = thinking_budget(request.reasoning_effort.unwrap_or("medium"));
+                if tokens > 0 {
+                    options = options.with_thinking(ThinkingConfig::Budget { tokens });
+                }
+            }
         }
 
         let result = model
@@ -217,4 +277,27 @@ fn map_generate_result(result: GenerateResult) -> anyhow::Result<ChatResponse> {
         tool_calls,
         usage: Some(usage),
     })
+}
+
+fn reasoning_effort(level: &str) -> Option<ReasoningEffort> {
+    // rs_ai has four levels. Finer catalog tokens fold into the nearest one;
+    // OpenAI-compatible requests still send the original string.
+    match level {
+        "none" => Some(ReasoningEffort::None),
+        "minimal" | "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" | "xhigh" | "max" => Some(ReasoningEffort::High),
+        _ => None,
+    }
+}
+
+fn thinking_budget(level: &str) -> u32 {
+    match level {
+        "none" => 0,
+        "minimal" => 1_024,
+        "low" => 2_048,
+        "high" => 16_384,
+        "xhigh" | "max" => 32_000,
+        _ => 8_192,
+    }
 }

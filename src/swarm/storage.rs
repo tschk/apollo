@@ -61,6 +61,7 @@ pub trait SwarmStorage: Send + Sync {
     // === Team Tasks ===
     async fn create_team_task(&self, task: &TeamTask) -> Result<()>;
     async fn get_team_task(&self, task_id: &str) -> Result<Option<TeamTask>>;
+    async fn get_team_tasks(&self, task_ids: &[String]) -> Result<Vec<TeamTask>>;
     async fn list_team_tasks(&self, team_id: &str, status: Option<&str>) -> Result<Vec<TeamTask>>;
     async fn claim_team_task(&self, task_id: &str, agent_id: &str) -> Result<bool>;
     async fn complete_team_task(&self, task_id: &str, result: &str) -> Result<()>;
@@ -552,6 +553,18 @@ impl SwarmStorage for SurrealBackend {
         Ok(tasks.into_iter().next())
     }
 
+    async fn get_team_tasks(&self, task_ids: &[String]) -> Result<Vec<TeamTask>> {
+        if task_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut result = self
+            .db
+            .query("SELECT * FROM team_tasks WHERE task_id IN $ids")
+            .bind(("ids", task_ids.to_vec()))
+            .await?;
+        Ok(result.take(0)?)
+    }
+
     async fn list_team_tasks(&self, team_id: &str, status: Option<&str>) -> Result<Vec<TeamTask>> {
         if let Some(s) = status {
             let mut result = self.db
@@ -757,5 +770,73 @@ impl RocksCache {
             .ok_or_else(|| anyhow::anyhow!("Column family {} not found", cf))?;
         self.db.delete_cf(cf_handle, key)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_rockscache_put_get_delete() {
+        let dir = tempdir().unwrap();
+        let cache = RocksCache::new(dir.path()).expect("Failed to create RocksCache");
+
+        let cf = "agent_cache";
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // Test get on non-existent key
+        let get_res = cache.get(cf, key).expect("Failed to get");
+        assert_eq!(get_res, None);
+
+        // Test put
+        cache.put(cf, key, value).expect("Failed to put");
+
+        // Test get
+        let get_res = cache.get(cf, key).expect("Failed to get");
+        assert_eq!(get_res, Some(value.to_vec()));
+
+        // Test delete
+        cache.delete(cf, key).expect("Failed to delete");
+
+        // Test get after delete
+        let get_res = cache.get(cf, key).expect("Failed to get");
+        assert_eq!(get_res, None);
+    }
+
+    #[test]
+    fn test_rockscache_invalid_cf() {
+        let dir = tempdir().unwrap();
+        let cache = RocksCache::new(dir.path()).expect("Failed to create RocksCache");
+
+        let cf = "invalid_cf";
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // Test put
+        let put_res = cache.put(cf, key, value);
+        assert!(put_res.is_err());
+        assert_eq!(
+            put_res.unwrap_err().to_string(),
+            "Column family invalid_cf not found"
+        );
+
+        // Test get
+        let get_res = cache.get(cf, key);
+        assert!(get_res.is_err());
+        assert_eq!(
+            get_res.unwrap_err().to_string(),
+            "Column family invalid_cf not found"
+        );
+
+        // Test delete
+        let delete_res = cache.delete(cf, key);
+        assert!(delete_res.is_err());
+        assert_eq!(
+            delete_res.unwrap_err().to_string(),
+            "Column family invalid_cf not found"
+        );
     }
 }
