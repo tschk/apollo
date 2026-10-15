@@ -16,22 +16,21 @@
 
 mod agent;
 mod catalog;
+mod hotkey;
 mod models;
 mod oauth;
 mod onboarding;
 mod setup;
 mod shell;
 mod theme;
+mod worker;
 
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
 use agent::AgentEvent;
 use crepuscularity_gpui::prelude::*;
-use gpui::{
-    actions, bounds, ease_out_quint, point, px, size, Animation, Application, ClickEvent,
-    KeyDownEvent, SharedString,
-};
+use gpui::{actions, bounds, point, px, size, Application, ClickEvent, KeyDownEvent, SharedString};
 
 actions!(
     apollo_ui,
@@ -96,7 +95,7 @@ fn now_millis() -> u128 {
 }
 
 impl Entry {
-    fn view(&self, cursor: &'static str, index: usize) -> impl IntoElement {
+    fn view(&self, cursor: &'static str, _index: usize) -> impl IntoElement {
         let row = match self {
             Entry::User(text) => div()
                 .flex()
@@ -178,11 +177,7 @@ impl Entry {
                 .child(div().text_xs().text_color(rgb(ERR)).child("error"))
                 .child(div().text_sm().text_color(rgb(ERR)).child(fault_line(text))),
         };
-        row.with_animation(
-            ("entry", index),
-            Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-            |el, delta| el.opacity(0.45 + 0.55 * delta),
-        )
+        row
     }
 }
 
@@ -227,20 +222,61 @@ struct ApolloView {
     chat_id: String,
     /// Which error row is showing its raw provider text.
     error_detail: Option<usize>,
+    /// Key being typed in settings (never logged). Cleared after save.
+    settings_key: setup::Secret,
+    /// Settings is collecting a key for this provider id.
+    settings_key_for: Option<&'static str>,
+    /// Browser sign-in started from settings.
+    settings_sign: Option<crate::oauth::OAuthKind>,
+    /// Parsed apollo.json. Frames read this; a worker fills it.
+    config_cache: serde_json::Value,
+    config_ready: bool,
+    /// Bumped when a config write is queued. Stale completions are dropped.
+    config_gen: u64,
+    state_gen: u64,
+    /// Dotenv variable names with a non-empty value. Never the values.
+    env_names: Vec<String>,
+    /// `*_API_KEY` / `*_TOKEN` names only.
+    keys_cache: Vec<String>,
+    /// ChatGPT, Copilot, Claude. Meaningful once `creds_ready`.
+    oauth_signed_in: [bool; 3],
+    creds_ready: bool,
 }
 
 impl ApolloView {
     fn new(state: setup::DesktopState, instance: setup::Instance, cx: &mut Context<Self>) -> Self {
-        let model = agent::config_model();
-        let online = agent::agent_online();
+        // The instance already names its model. Health and apollo.json are
+        // read on a worker; the first frame must not block on them.
+        let model = if instance.model.is_empty() {
+            "—".into()
+        } else {
+            instance.model.clone()
+        };
+        let online = false;
         let config_dir = instance.config_dir.clone();
 
-        // Repaint on a timer so the spinner animates and the cursor blinks.
+        // Blink and spinner only. 500ms is enough for the caret; a busy
+        // turn still ticks every 200ms so the spinner moves. Never 120ms
+        // forever — that rebuilt the whole tree eight times a second.
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(120))
-                .await;
-            if this.update(cx, |_, cx| cx.notify()).is_err() {
+            let busy = this.update(cx, |view, _| view.busy).unwrap_or(false);
+            let wait = if busy {
+                Duration::from_millis(200)
+            } else {
+                Duration::from_millis(500)
+            };
+            cx.background_executor().timer(wait).await;
+            if this
+                .update(cx, |view, cx| {
+                    if crate::hotkey::take_pending() {
+                        cx.activate(true);
+                        view.panel = shell::Panel::Chat;
+                        view.notice = "opened via hotkey".into();
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
                 break;
             }
         })
@@ -249,16 +285,8 @@ impl ApolloView {
         let mut view = Self {
             focus: cx.focus_handle(),
             draft: String::new(),
-            entries: vec![Entry::Status(if online {
-                "agent ready".into()
-            } else {
-                "starting the agent…".into()
-            })],
-            status: if online {
-                "ready".into()
-            } else {
-                "starting…".into()
-            },
+            entries: vec![Entry::Status("starting the agent…".into())],
+            status: "starting…".into(),
             busy: false,
             online,
             model,
@@ -272,13 +300,7 @@ impl ApolloView {
                 shell::LogKind::Info,
                 format!(
                     "opened {} · {} · {}",
-                    instance.name,
-                    instance.provider,
-                    if online {
-                        "agent ready"
-                    } else {
-                        "starting the agent"
-                    }
+                    instance.name, instance.provider, "starting the agent"
                 ),
             )],
             state,
@@ -293,8 +315,21 @@ impl ApolloView {
             dial: None,
             chat_id: format!("desktop-{}", now_millis()),
             error_detail: None,
+            settings_key: setup::Secret::default(),
+            settings_key_for: None,
+            settings_sign: None,
+            config_cache: serde_json::json!({}),
+            config_ready: false,
+            config_gen: 0,
+            state_gen: 0,
+            env_names: Vec::new(),
+            keys_cache: Vec::new(),
+            oauth_signed_in: [false; 3],
+            creds_ready: false,
         };
         view.supervise_agent(config_dir, cx);
+        view.load_snapshot(cx);
+        crate::hotkey::install(&view.state.hotkey);
         view
     }
 
@@ -302,21 +337,31 @@ impl ApolloView {
     /// it is ready. Messages wait on this process; they are not sent as a
     /// bare completion.
     fn supervise_agent(&mut self, config_dir: std::path::PathBuf, cx: &mut Context<Self>) {
-        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let (tx, rx) = std::sync::mpsc::channel::<(Result<(), String>, Option<String>)>();
         std::thread::spawn(move || {
-            let _ = tx.send(agent::ensure_daemon(&config_dir));
+            let result = agent::ensure_daemon(&config_dir);
+            let model = if result.is_ok() {
+                agent::fetch_state()
+                    .map(|state| state.model)
+                    .filter(|model| !model.is_empty() && model != "—")
+                    .or_else(|| {
+                        let from_file = agent::config_model();
+                        (from_file != "—").then_some(from_file)
+                    })
+            } else {
+                None
+            };
+            let _ = tx.send((result, model));
         });
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
             match rx.try_recv() {
-                Ok(Ok(())) => {
+                Ok((Ok(()), model)) => {
                     this.update(cx, |view, cx| {
                         view.online = true;
                         view.status = "ready".into();
-                        if let Some(state) = agent::fetch_state() {
-                            if !state.model.is_empty() && state.model != "—" {
-                                view.model = state.model.clone();
-                                view.instance.model = state.model;
-                            }
+                        if let Some(model) = model {
+                            view.model = model.clone();
+                            view.instance.model = model;
                         }
                         if let Some(Entry::Status(text)) = view.entries.first_mut() {
                             if text.starts_with("starting") || text.starts_with("agent ") {
@@ -329,7 +374,7 @@ impl ApolloView {
                     .ok();
                     break;
                 }
-                Ok(Err(error)) => {
+                Ok((Err(error), _)) => {
                     this.update(cx, |view, cx| {
                         view.online = false;
                         view.status = "agent failed".into();
@@ -388,6 +433,46 @@ impl ApolloView {
         // A profile field being edited takes over the keyboard.
         if self.edit.is_some() {
             self.edit_key_down(event, cx);
+            return;
+        }
+
+        // Settings key paste field.
+        if self.settings_key_for.is_some() {
+            let stroke = &event.keystroke;
+            let key = stroke.key.as_str();
+            if stroke.modifiers.platform || stroke.modifiers.control {
+                if key == "v" {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                        self.settings_key.push_str(text.trim());
+                        cx.notify();
+                    }
+                }
+                return;
+            }
+            match key {
+                "enter" => self.save_settings_key(cx),
+                "escape" => {
+                    self.settings_key.clear();
+                    self.settings_key_for = None;
+                    cx.notify();
+                }
+                "backspace" => {
+                    self.settings_key.pop();
+                    cx.notify();
+                }
+                "space" => {
+                    self.settings_key.push_str(" ");
+                    cx.notify();
+                }
+                _ => {
+                    if let Some(ch) = stroke.key_char.as_deref() {
+                        if !ch.is_empty() && !ch.chars().any(char::is_control) {
+                            self.settings_key.push_str(ch);
+                            cx.notify();
+                        }
+                    }
+                }
+            }
             return;
         }
 
@@ -547,12 +632,19 @@ impl ApolloView {
         if self.busy {
             return;
         }
+        self.panel = shell::Panel::Chat;
+        self.picker = None;
+        self.switcher_open = false;
+        self.roster_menu = None;
+        self.error_detail = None;
         self.chat_id = format!("desktop-{}", now_millis());
         self.entries.clear();
-        self.entries.push(Entry::Status("new chat".into()));
+        self.entries
+            .push(Entry::Status("new chat — transcript cleared".into()));
         self.turns = 0;
         self.status = "new chat".into();
-        self.log(shell::LogKind::Info, "new chat");
+        self.notice = "new chat".into();
+        self.log(shell::LogKind::Info, format!("new chat · {}", self.chat_id));
         cx.notify();
     }
 
@@ -760,8 +852,24 @@ pub(crate) fn open_chat(state: setup::DesktopState, window: &mut Window, cx: &mu
 pub(crate) fn open_onboarding(purpose: onboarding::Purpose, window: &mut Window, cx: &mut App) {
     let view = window.replace_root(cx, move |_, cx| {
         onboarding::OnboardingView::new(purpose, cx, |state, window, cx| {
-            let state = state.or_else(setup::DesktopState::load).unwrap_or_default();
-            open_chat(state, window, cx)
+            if let Some(state) = state {
+                open_chat(state, window, cx);
+                return;
+            }
+            // Cancelled new-instance flow: read desktop.json off the UI
+            // thread, then come back to the chat.
+            let handle = window.window_handle();
+            cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                let loaded = cx
+                    .background_executor()
+                    .spawn(async move { setup::DesktopState::load().unwrap_or_default() })
+                    .await;
+                cx.update_window(handle, |_root, window, app| {
+                    open_chat(loaded, window, app);
+                })
+                .ok();
+            })
+            .detach();
         })
     });
     window.focus(&view.read(cx).focus);
@@ -782,17 +890,6 @@ fn main() {
         );
         return;
     }
-    let mut state = setup::DesktopState::load().unwrap_or_default();
-    if simple || advanced {
-        state.mode = if advanced {
-            setup::Mode::Advanced
-        } else {
-            setup::Mode::Simple
-        };
-        let _ = state.save();
-    }
-    let ready = state.ready().cloned().filter(|_| !force_onboarding);
-
     Application::new().run(move |cx: &mut App| {
         theme::load_fonts(cx);
         cx.bind_keys([
@@ -811,35 +908,82 @@ fn main() {
         );
 
         let opened = cx.open_window(window_options, move |window, cx| {
-            let root = match ready {
-                Some(instance) => {
-                    let _ = std::env::set_current_dir(&instance.config_dir);
-                    let view = cx.new(|cx| ApolloView::new(state, instance, cx));
-                    window.focus(&view.read(cx).focus);
-                    gpui::AnyView::from(view)
-                }
-                None => {
-                    let view = cx.new(|cx| {
-                        onboarding::OnboardingView::new(
-                            onboarding::Purpose::FirstRun,
-                            cx,
-                            |state, window, cx| {
-                                let state =
-                                    state.or_else(setup::DesktopState::load).unwrap_or_default();
-                                open_chat(state, window, cx)
-                            },
-                        )
-                    });
-                    window.focus(&view.read(cx).focus);
-                    gpui::AnyView::from(view)
-                }
-            };
-            cx.new(|_| Root(root))
+            let handle = window.window_handle();
+            let boot = cx.new(|cx| {
+                start_boot(force_onboarding, simple, advanced, handle, cx);
+                Boot
+            });
+            cx.new(|_| Root(gpui::AnyView::from(boot)))
         });
         if let Err(e) = opened {
             eprintln!("failed to open apollo ui: {e:?}");
         }
     });
+}
+
+/// First frame. desktop.json is loaded on the IO thread, then the root is
+/// swapped for chat or onboarding.
+struct Boot;
+
+fn start_boot(
+    force_onboarding: bool,
+    simple: bool,
+    advanced: bool,
+    handle: gpui::AnyWindowHandle,
+    cx: &mut Context<Boot>,
+) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    worker::enqueue(move || {
+        let mut state = setup::DesktopState::load().unwrap_or_default();
+        if simple || advanced {
+            state.mode = if advanced {
+                setup::Mode::Advanced
+            } else {
+                setup::Mode::Simple
+            };
+            let _ = state.save();
+        }
+        let instance = state.ready().cloned().filter(|_| !force_onboarding);
+        let _ = tx.send((state, instance));
+    });
+    cx.spawn(async move |_boot, cx: &mut gpui::AsyncApp| loop {
+        match rx.try_recv() {
+            Ok((state, instance)) => {
+                cx.update_window(handle, |_root, window, app| match instance {
+                    Some(instance) => {
+                        let _ = std::env::set_current_dir(&instance.config_dir);
+                        let view =
+                            window.replace_root(app, |_, cx| ApolloView::new(state, instance, cx));
+                        window.focus(&view.read(app).focus);
+                    }
+                    None => open_onboarding(onboarding::Purpose::FirstRun, window, app),
+                })
+                .ok();
+                break;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                cx.background_executor()
+                    .timer(Duration::from_millis(30))
+                    .await;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    })
+    .detach();
+}
+
+impl Render for Boot {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(theme::BG))
+            .text_color(rgb(theme::MUTED))
+            .font_family(theme::FONT)
+            .child("starting…")
+    }
 }
 
 /// Window root holding whichever view launch picked; `replace_root` swaps
@@ -879,8 +1023,11 @@ pub(crate) fn classify_fault(err: &str) -> Fault {
         || lower.contains("403")
         || lower.contains("unauthorized")
         || lower.contains("forbidden")
+        || lower.contains("cloudflare")
+        || lower.contains("<html")
+        || lower.contains("<!doctype")
     {
-        return Fault::Sentence("The account refused that request. Check the sign-in in settings.");
+        return Fault::Sentence("The sign-in was blocked.");
     }
     if lower.contains("429") || lower.contains("rate limit") {
         return Fault::Sentence("The provider is limiting requests. Wait a moment and try again.");
@@ -898,6 +1045,27 @@ pub(crate) fn fault_line(err: &str) -> &'static str {
     match classify_fault(err) {
         Fault::MissingKey => "The API key isn't set. Add it in settings.",
         Fault::Sentence(line) => line,
+    }
+}
+
+/// What may sit behind the disclosure. Never the provider's HTML or JSON.
+pub(crate) fn fault_detail(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("<html") || lower.contains("<!doctype") || lower.contains("<body") {
+        return "The provider sent an HTML page instead of an answer.".into();
+    }
+    if err.contains('{') || err.contains('}') {
+        return "The provider sent a JSON error.".into();
+    }
+    let flat = err.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = flat.chars().take(160).collect();
+    if flat.chars().count() > 160 {
+        out.push('…');
+    }
+    if out.is_empty() {
+        "No further detail.".into()
+    } else {
+        out
     }
 }
 
@@ -922,5 +1090,16 @@ mod fault_tests {
             "Couldn't reach the provider. Check the connection and try again."
         );
         assert_eq!(fault_line("something odd"), "That didn't work. Try again.");
+    }
+
+    #[test]
+    fn cloudflare_403_is_one_sentence_and_the_page_is_not_shown() {
+        let raw = "provider error: api error: Authentication failed: ChatGPT Codex request failed (HTTP 403 Forbidden): <!DOCTYPE html><html><body>cloudflare</body></html>";
+        assert_eq!(fault_line(raw), "The sign-in was blocked.");
+        let detail = fault_detail(raw);
+        assert!(!detail.to_ascii_lowercase().contains("<html"));
+        assert!(!detail.contains('<'));
+        assert!(!detail.contains('{'));
+        assert!(!detail.contains("cloudflare"));
     }
 }

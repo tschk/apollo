@@ -31,6 +31,10 @@ pub struct ProviderConfig {
     pub name: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    /// Codex account id from an existing login. Memory only: never written
+    /// back into apollo.json, and never a token.
+    #[serde(skip)]
+    pub account_id: Option<String>,
     /// Let the provider run web search on its own infrastructure instead of
     /// apollo's `web_search` tool. Anthropic only; billed by the provider.
     pub native_web_search: bool,
@@ -603,6 +607,7 @@ impl Default for ProviderConfig {
             name: "chatgpt".to_string(),
             api_key: None,
             base_url: None,
+            account_id: None,
             native_web_search: false,
         }
     }
