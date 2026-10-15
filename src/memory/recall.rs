@@ -36,6 +36,7 @@ pub async fn build_supporting_recall(
     let mut bullets: Vec<String> = Vec::new();
 
     for hit in memory_search(workspace, user_text, limit)
+        .await
         .into_iter()
         .take(limit)
     {

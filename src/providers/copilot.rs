@@ -250,4 +250,109 @@ mod tests {
     fn test_derive_base_url_default() {
         assert_eq!(derive_base_url("no-proxy-ep"), DEFAULT_COPILOT_API_BASE);
     }
+
+    #[test]
+    fn test_from_openclaw_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_path = dir.path();
+
+        let token_dir = home_path.join(".openclaw/credentials");
+        std::fs::create_dir_all(&token_dir).unwrap();
+        let token_path = token_dir.join("github-copilot.token.json");
+
+        let json_content = r#"{
+            "token": "tid=fake;proxy-ep=proxy.fakecopilot.com;exp=123"
+        }"#;
+        std::fs::write(&token_path, json_content).unwrap();
+
+        temp_env::with_vars(
+            [
+                ("HOME", Some(home_path.to_str().unwrap())),
+                ("USERPROFILE", Some(home_path.to_str().unwrap())),
+            ],
+            || {
+                let provider = CopilotProvider::from_openclaw()
+                    .map_err(|e| e.to_string())
+                    .expect("Should succeed");
+                let api_token = provider.api_token.try_read().unwrap();
+                let base_url = provider.base_url.try_read().unwrap();
+                assert_eq!(
+                    api_token.as_deref(),
+                    Some("tid=fake;proxy-ep=proxy.fakecopilot.com;exp=123")
+                );
+                assert_eq!(*base_url, "https://api.fakecopilot.com");
+            },
+        );
+    }
+
+    #[test]
+    fn test_from_openclaw_no_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_path = dir.path();
+
+        temp_env::with_vars(
+            [
+                ("HOME", Some(home_path.to_str().unwrap())),
+                ("USERPROFILE", Some(home_path.to_str().unwrap())),
+            ],
+            || {
+                let err = CopilotProvider::from_openclaw()
+                    .err()
+                    .expect("Should fail without token file");
+                assert!(err.to_string().contains("No Copilot token at"));
+            },
+        );
+    }
+
+    #[test]
+    fn test_from_openclaw_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_path = dir.path();
+
+        let token_dir = home_path.join(".openclaw/credentials");
+        std::fs::create_dir_all(&token_dir).unwrap();
+        let token_path = token_dir.join("github-copilot.token.json");
+
+        std::fs::write(&token_path, "invalid json").unwrap();
+
+        temp_env::with_vars(
+            [
+                ("HOME", Some(home_path.to_str().unwrap())),
+                ("USERPROFILE", Some(home_path.to_str().unwrap())),
+            ],
+            || {
+                CopilotProvider::from_openclaw()
+                    .err()
+                    .expect("Should fail with invalid json");
+            },
+        );
+    }
+
+    #[test]
+    fn test_from_openclaw_missing_token_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_path = dir.path();
+
+        let token_dir = home_path.join(".openclaw/credentials");
+        std::fs::create_dir_all(&token_dir).unwrap();
+        let token_path = token_dir.join("github-copilot.token.json");
+
+        let json_content = r#"{
+            "not_token": "tid=fake"
+        }"#;
+        std::fs::write(&token_path, json_content).unwrap();
+
+        temp_env::with_vars(
+            [
+                ("HOME", Some(home_path.to_str().unwrap())),
+                ("USERPROFILE", Some(home_path.to_str().unwrap())),
+            ],
+            || {
+                let err = CopilotProvider::from_openclaw()
+                    .err()
+                    .expect("Should fail with missing token field");
+                assert!(err.to_string().contains("No token field"));
+            },
+        );
+    }
 }

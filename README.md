@@ -38,7 +38,7 @@ a mock server by `tests/channel_conformance.rs`. Verify one against its real
 service with `apollo channel-check --channel <name>`.
 
 ### LLM Providers
-Anthropic (default), OpenAI-compat, Ollama, Copilot, OpenRouter, Groq, Together,
+Anthropic (API key or Claude subscription login), ChatGPT login, OpenAI-compat, Ollama, Copilot, OpenRouter, Groq, Together,
 Mistral, DeepSeek, Fireworks, Perplexity, xAI, Moonshot, Venice, HuggingFace,
 SiliconFlow, Cerebras, MiniMax, Vercel, Cloudflare
 
@@ -114,7 +114,7 @@ apollo doctor        # diagnose config / deps
 apollo audit         # security/config audit
 
 cargo build --release -p apollo-tui   # build the terminal UI
-cargo run -p apollo-ui                # desktop UI (or `apollo ui` after install)
+cargo run -p apollo-ui                # desktop UI (or `apollo ui`); onboarding on first launch
 ```
 
 Other subcommands: `status`, `mcp`, `message` (`msg`), `cron`, `autonomous`,
@@ -126,6 +126,109 @@ Install from a release binary (after build):
 cargo build --release
 ./target/release/apollo-install install
 ```
+
+## Desktop app (apollo-ui)
+
+`apollo-ui` is the desktop app, built with
+[Crepuscularity](https://crepuscularity.tsc.hk) on GPUI and styled with the
+Telekinesis portal tokens (zinc-950, Chivo Mono — bundled, SIL OFL).
+
+```bash
+cargo build -p apollo-ui -p apollo-agent   # keep `apollo` next to `apollo-ui`
+./target/debug/apollo-ui                   # first launch: onboarding (or `apollo ui`)
+./target/debug/apollo-ui --onboarding      # run the onboarding again
+./target/debug/apollo-ui --advanced        # or --simple: switch mode (saved)
+```
+
+The first launch walks through setup: welcome → connect a model → where it
+works → permission profile → a test prompt → simple or advanced. There is no
+title bar, just a 2px progress line and `n / 6` in the footer.
+
+**Connect a model.** Three sign-in cards are pinned at the top. Clicking a
+card starts that login straight away: the browser opens on the provider's
+sign-in page and the login comes back to a localhost port. Everything else is
+in a dropdown you can type into to filter.
+
+| Option | How it signs in | Works end to end? |
+| --- | --- | --- |
+| ChatGPT | browser OAuth (PKCE, callback on `localhost:1455`) via `rs_ai_oauth` | yes: apollo reads the shared ChatGPT login when `provider.api_key` is unset |
+| Claude | browser OAuth (PKCE, callback on `localhost:53692`) via `rs_ai_oauth` | yes: `provider.name = "anthropic"` runs rs_ai's `ClaudeProvider` with the shared Claude login, sent the way Claude Code sends it, refreshed when it expires. Anthropic may bill subscription logins used outside Claude Code as "extra usage" |
+| GitHub Copilot | browser OAuth (callback on `localhost:9876`) | the sign-in is saved, but apollo only uses it when built with `--features provider-copilot`. The card says so |
+| Anthropic API key | `ANTHROPIC_API_KEY` | yes, same `ClaudeProvider` with `x-api-key` |
+| ~90 API-key providers | API key | yes. The list is `rs_ai_providers::catalog` (the catalog telekinesis uses): OpenRouter, OpenAI, Gemini, xAI, DeepSeek, Z.ai / Z.ai coding plan, Kimi for coding, Moonshot, Qwen (DashScope and the coding plan), MiniMax, Xiaomi MiMo, OpenCode Zen, Groq, Mistral, Together, Fireworks, Cerebras, DeepInfra, NVIDIA, Hugging Face and the rest |
+| Ollama | none (local) | yes |
+| Custom endpoint | name + base URL + API key, never OAuth | yes, any OpenAI-compatible `/chat/completions` API |
+
+Providers apollo constructs itself (OpenAI, Anthropic, Gemini, OpenRouter,
+xAI, DeepSeek, Groq, Together, Mistral, Fireworks, Perplexity, Moonshot,
+Venice, Hugging Face, SiliconFlow, Cerebras, MiniMax) get their key under
+their own variable. Every other catalog provider runs through apollo's
+OpenAI-compatible client: `provider.name` is the catalog id, `provider.base_url`
+the catalog URL, and the key goes in `.env` as `APOLLO_PROVIDER_API_KEY`.
+
+**The model list fills itself.** Picking a provider, pasting a key or finishing
+a sign-in looks the models up on a background thread, in this order:
+
+1. **live**: the provider's own `GET {base_url}/models` with the key just
+   entered (Anthropic uses `x-api-key`; sign-ins use the plan's listing). When
+   the provider answers, that answer is the list.
+2. **models.dev**: `https://models.dev/api.json`, cached for 24 hours.
+3. **built-in**: the model ids in the rs_ai catalog.
+
+The note under the field says which one the list came from, and why the live
+listing failed if it did. Network lists are cached in
+`~/.apollo/models/<provider>.json`. You can always type any model id instead.
+
+Sign-ins land in the shared credential store,
+`~/.config/rs_ai/credentials/<provider>.json` (0600). The app only ever sees
+whether a sign-in succeeded, never the token.
+
+A custom endpoint is saved as `provider.name = "custom-<your name>"` with its
+base URL; its key goes in `.env` as `APOLLO_PROVIDER_API_KEY`, which apollo
+reads for any provider whose `provider.api_key` is unset. It is read before
+the ChatGPT-login and `OPENAI_API_KEY` fallbacks, so a configured provider is
+never silently switched to another one.
+
+**Where it works.** Pick one folder, which holds `apollo.json`, `.env` and
+`.apollo/` like `apollo init` does. Or pick **works everywhere**: the workspace
+is `~` and the config lives in `~/.apollo/instances/<id>/`.
+
+**Instances.** Each instance is its own config dir with its own provider,
+model and permissions. Add one with "+ new instance" in the instance pill
+(simple mode) or in the roster sidebar (advanced mode). Two instances cannot
+share a folder. Switching instances re-roots the chat in that instance's
+config dir.
+
+**Modes.** Simple mode is the chat plus an instance pill and a settings link.
+Advanced mode adds:
+- a roster sidebar (initial, name, model; click to switch);
+- **tools**: switch the permission profile (writes apollo.json) and see policy flags and toolsets;
+- **model parameters**: steppers for `agent.max_rounds`, `agent.max_history_messages` and `agent.auto_compact_after`;
+- **logs**: the session's turns, tool calls, timings and errors.
+
+Settings has the simple/advanced toggle in both modes.
+
+Files written:
+
+- `<config dir>/apollo.json`: provider, base URL (Ollama, custom and
+  catalog providers apollo runs through its OpenAI-compatible client),
+  model, workspace, permission profile. `provider.api_key` stays `null`.
+- `<config dir>/.env`: the key, under the variable apollo reads for that
+  provider, mode `0600`. A key is never logged or shown back, not even its
+  length.
+- `~/.apollo/desktop.json`: mode, the active instance and the instance list
+  (name, scope, config dir, provider, model, profile). No secrets. The older
+  single-workspace format is migrated automatically.
+
+The test prompt uses the most real path available: a running agent server
+(`apollo chat`, full rx4 turn), else `apollo ask` in the instance's config
+dir, else a local reply labelled **offline mock**.
+
+On Linux the window opens through X11 or Wayland (Vulkan via Blade; Mesa's
+lavapipe works for headless/Xvfb). Layouts live in `ui/views/*.crepus` and
+`ui/src/shell.rs`.
+
+Screenshots: [`docs/screenshots/apollo-ui/v3/`](docs/screenshots/apollo-ui/v3/).
 
 ## Agent HTTP API
 
