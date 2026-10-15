@@ -80,7 +80,7 @@ pub const OAUTH_PROVIDERS: &[ProviderInfo] = &[
         id: "chatgpt",
         label: "ChatGPT",
         auth: Auth::OAuth(crate::oauth::OAuthKind::ChatGpt),
-        default_model: "gpt-5.6",
+        default_model: "gpt-6-luna",
         blurb: "sign in with your chatgpt plan",
         catalog: "openai",
         base_url: None,
@@ -98,7 +98,7 @@ pub const OAUTH_PROVIDERS: &[ProviderInfo] = &[
         id: "claude",
         label: "Claude",
         auth: Auth::OAuth(crate::oauth::OAuthKind::Claude),
-        default_model: "claude-sonnet-5",
+        default_model: "claude-sonnet-5-5",
         blurb: "sign in with your claude plan",
         catalog: "anthropic",
         base_url: None,
@@ -469,7 +469,12 @@ pub struct Dial {
 /// Oracle, main, subagents. Empty role models fall back to the chat model,
 /// except oracle, which prefers `agent.fast_model`.
 pub fn read_dials(path: &std::path::Path, fallback_model: &str) -> [Dial; 3] {
-    let config = read_config(path);
+    dials_of(&read_config(path), fallback_model)
+}
+
+/// Dials from an already-parsed config. Rendering uses this so a frame
+/// does not read apollo.json.
+pub fn dials_of(config: &serde_json::Value, fallback_model: &str) -> [Dial; 3] {
     let agent = &config["agent"];
     let roles = &agent["roles"];
     let fast = agent["fast_model"].as_str().unwrap_or("");
@@ -692,6 +697,16 @@ pub fn upsert_env_line(existing: &str, key: &str, value: &str) -> String {
     body
 }
 
+/// Write `KEY="value"` into the dotenv at `path` (0600). Never logs the value.
+pub fn write_env_var(path: &Path, key: &str, value: &str) -> Result<(), String> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let body = upsert_env_line(&existing, key, value);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    write_private(path, &body)
+}
+
 /// Drop `KEY=` lines from a dotenv body.
 pub fn remove_env_line(existing: &str, key: &str) -> String {
     let kept: Vec<&str> = existing
@@ -771,6 +786,7 @@ fn env_line(l: &str) -> Option<(&str, bool)> {
 
 /// Does the dotenv at `path` set `var` to a non-empty value? The value
 /// itself is never read out of this function.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn env_has(path: &Path, var: &str) -> bool {
     std::fs::read_to_string(path)
         .map(|text| {
@@ -783,6 +799,24 @@ pub fn env_has(path: &Path, var: &str) -> bool {
 /// Variable NAMES of every configured `*_API_KEY` / `*_TOKEN` entry in the
 /// dotenv at `path` — names only, so the UI can list credentials without
 /// ever holding a value.
+/// Names of dotenv variables that have a non-empty value. Values stay in
+/// the file.
+pub fn env_names(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some((name, true)) = env_line(line) else {
+            continue;
+        };
+        if !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 pub fn configured_keys(env_path: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(env_path) else {
         return Vec::new();
@@ -898,11 +932,17 @@ impl Instance {
 }
 
 /// `~/.apollo/desktop.json`: onboarding state, mode and instances.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DesktopState {
     pub onboarded: bool,
     #[serde(default)]
     pub mode: Mode,
+    /// Global open/focus hotkey, e.g. "Cmd+Alt+A". Empty disables it.
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
+    /// "cozy" (default) or "compact".
+    #[serde(default = "default_density")]
+    pub density: String,
     #[serde(default)]
     pub active: Option<String>,
     #[serde(default)]
@@ -916,6 +956,31 @@ pub struct DesktopState {
     model: Option<String>,
     #[serde(default, skip_serializing)]
     permission_profile: Option<String>,
+}
+
+pub fn default_hotkey() -> String {
+    "Cmd+Alt+A".into()
+}
+
+pub fn default_density() -> String {
+    "cozy".into()
+}
+
+impl Default for DesktopState {
+    fn default() -> Self {
+        Self {
+            onboarded: false,
+            mode: Mode::default(),
+            hotkey: default_hotkey(),
+            density: default_density(),
+            active: None,
+            instances: Vec::new(),
+            workspace: None,
+            provider: None,
+            model: None,
+            permission_profile: None,
+        }
+    }
 }
 
 pub fn desktop_state_path() -> Option<PathBuf> {
@@ -1139,7 +1204,7 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(written.config_path).unwrap()).unwrap();
         assert_eq!(v["provider"]["name"], "chatgpt");
-        assert_eq!(v["model"], "gpt-5.6");
+        assert_eq!(v["model"], "gpt-6-luna");
     }
 
     #[test]
