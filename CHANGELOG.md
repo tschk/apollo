@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-15
+
 ### Security
 
 - `expand_inline_shell` no longer runs skill snippets through `sh -c`;
