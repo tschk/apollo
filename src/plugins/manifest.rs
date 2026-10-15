@@ -205,4 +205,34 @@ mod tests {
         apply_workspace_manifest(&mut cfg, dir.path());
         assert_eq!(cfg.system_prompt, "base\nsuffix");
     }
+
+    #[test]
+    fn test_apply_workspace_manifest_not_found() {
+        let dir = tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.plugin_layer.enabled = true;
+        cfg.plugin_layer.manifest_path = std::path::PathBuf::from("plugins/manifest.json");
+        cfg.system_prompt = "base".to_string();
+
+        apply_workspace_manifest(&mut cfg, dir.path());
+        assert_eq!(cfg.system_prompt, "base");
+    }
+
+    #[test]
+    fn test_apply_workspace_manifest_invalid_json() {
+        let dir = tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.plugin_layer.enabled = true;
+        cfg.plugin_layer.manifest_path = std::path::PathBuf::from("plugins/manifest.json");
+        cfg.system_prompt = "base".to_string();
+
+        let manifest_dir = dir.path().join(".apollo/plugins");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+
+        let manifest_path = manifest_dir.join("manifest.json");
+        std::fs::write(&manifest_path, r#"{ invalid json }"#).unwrap();
+
+        apply_workspace_manifest(&mut cfg, dir.path());
+        assert_eq!(cfg.system_prompt, "base");
+    }
 }

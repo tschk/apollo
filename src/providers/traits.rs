@@ -1,5 +1,6 @@
 //! Core Provider trait — defines the interface for LLM backends.
 //! Inspired by ZeroClaw's trait system with simplifications.
+#![allow(clippy::double_must_use)]
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

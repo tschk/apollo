@@ -31,6 +31,10 @@ pub struct ProviderConfig {
     pub name: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    /// Codex account id from an existing login. Memory only: never written
+    /// back into apollo.json, and never a token.
+    #[serde(skip)]
+    pub account_id: Option<String>,
     /// Let the provider run web search on its own infrastructure instead of
     /// apollo's `web_search` tool. Anthropic only; billed by the provider.
     pub native_web_search: bool,
@@ -603,6 +607,7 @@ impl Default for ProviderConfig {
             name: "chatgpt".to_string(),
             api_key: None,
             base_url: None,
+            account_id: None,
             native_web_search: false,
         }
     }
@@ -868,6 +873,26 @@ mod config_path_tests {
         assert_eq!(
             cfg.provider.base_url.as_deref(),
             Some("http://localhost:11434")
+        );
+    }
+
+    #[test]
+    fn set_path_does_not_mutate_original_config() {
+        let original_cfg = Config::default_config();
+        let original_json = serde_json::to_value(&original_cfg).unwrap();
+
+        let (updated_cfg, _) = original_cfg.set_path("agent.max_rounds", "999").unwrap();
+
+        let original_json_after = serde_json::to_value(&original_cfg).unwrap();
+        assert_eq!(
+            original_json, original_json_after,
+            "original config was mutated"
+        );
+
+        assert_eq!(updated_cfg.agent.max_rounds, 999);
+        assert_eq!(
+            original_cfg.agent.max_rounds, 50,
+            "original config field mutated"
         );
     }
 

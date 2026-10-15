@@ -12,10 +12,10 @@
 
 /// Provider name (and common aliases) to the model it defaults to.
 const DEFAULTS: &[(&str, &str)] = &[
-    ("chatgpt", "gpt-5.6"),
-    ("anthropic", "claude-sonnet-5"),
-    ("claude", "claude-sonnet-5"),
-    ("openai", "gpt-5.6"),
+    ("chatgpt", "gpt-6-luna"),
+    ("anthropic", "claude-sonnet-5-5"),
+    ("claude", "claude-sonnet-5-5"),
+    ("openai", "gpt-6-luna"),
     ("copilot", "gpt-5.6"),
     ("github-copilot", "gpt-5.6"),
     ("xai", "grok-build-0.1"),
@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn oauth_providers_get_their_own_defaults() {
-        assert_eq!(default_model_for_provider("chatgpt"), Some("gpt-5.6"));
+        assert_eq!(default_model_for_provider("chatgpt"), Some("gpt-6-luna"));
         assert_eq!(default_model_for_provider("xai"), Some("grok-build-0.1"));
     }
 
@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn lookup_ignores_case_and_padding() {
-        assert_eq!(default_model_for_provider("  ChatGpt "), Some("gpt-5.6"));
+        assert_eq!(default_model_for_provider("  ChatGpt "), Some("gpt-6-luna"));
     }
 
     #[test]

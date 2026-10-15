@@ -1,0 +1,6 @@
+dist
+.astro
+.wrangler
+node_modules
+public/fonts
+public/styles
