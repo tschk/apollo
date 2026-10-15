@@ -113,6 +113,7 @@ impl Tool for BriefTool {
             model: &self.model,
             temperature: 0.3,
             max_tokens: Some(600),
+            reasoning_effort: None,
         };
 
         match self.provider.chat(&request).await {

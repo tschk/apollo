@@ -134,6 +134,8 @@ async fn builtin_channels_are_reachable_by_name() {
     // pass conformance, and still be unselectable.
     let registry = PluginRegistry::new();
     let names = registry.channels().names();
+    // Default features do not enable every channel this asserts.
+    let _ = &names;
 
     #[cfg(feature = "channel-slack")]
     assert!(names.contains(&"slack".to_string()), "{names:?}");

@@ -17,6 +17,7 @@
 
 #![allow(clippy::type_complexity)]
 
+#[allow(unused_imports)] // used by cfg-gated channel tests
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,6 +33,7 @@ use tokio::sync::mpsc::Receiver;
 struct Hit {
     method: String,
     path: String,
+    #[allow(dead_code)] // read by cfg-gated channel tests
     query: String,
     auth: Option<String>,
     body: String,
@@ -231,6 +233,7 @@ async fn assert_receives(name: &str, rx: &mut Receiver<IncomingMessage>) -> Inco
     }
 }
 
+#[allow(dead_code)] // used by cfg-gated channel tests
 fn free_port() -> u16 {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     l.local_addr().unwrap().port()
@@ -238,6 +241,7 @@ fn free_port() -> u16 {
 
 /// POST a webhook payload to a channel's own HTTP receiver, retrying until it
 /// has finished binding.
+#[allow(dead_code)] // used by cfg-gated channel tests
 async fn post_webhook(port: u16, path: &str, body: serde_json::Value) {
     let url = format!("http://127.0.0.1:{port}{path}");
     let client = reqwest::Client::new();

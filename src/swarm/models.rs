@@ -279,3 +279,118 @@ impl HandoffRoute {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_link_builder() {
+        let link = AgentLink::new(
+            "agent1".to_string(),
+            "agent2".to_string(),
+            LinkDirection::Outbound,
+        )
+        .with_max_concurrent(5);
+
+        assert_eq!(link.source_agent_id, "agent1");
+        assert_eq!(link.target_agent_id, "agent2");
+        assert_eq!(link.direction, LinkDirection::Outbound);
+        assert_eq!(link.max_concurrent, 5);
+        assert!(!link.link_id.is_empty());
+    }
+
+    #[test]
+    fn test_delegation_record_builder() {
+        let record = DelegationRecord::new(
+            "agent1".to_string(),
+            "agent2".to_string(),
+            "do task".to_string(),
+            DelegationMode::Async,
+        )
+        .with_context("ctx info".to_string());
+
+        assert_eq!(record.source_agent_id, "agent1");
+        assert_eq!(record.target_agent_id, "agent2");
+        assert_eq!(record.task, "do task");
+        assert_eq!(record.mode, DelegationMode::Async);
+        assert_eq!(record.status, "pending");
+        assert_eq!(record.context, Some("ctx info".to_string()));
+        assert!(!record.delegation_id.is_empty());
+    }
+
+    #[test]
+    fn test_team_builder() {
+        let team = Team::new("A-Team".to_string(), "lead1".to_string());
+
+        assert_eq!(team.name, "A-Team");
+        assert_eq!(team.lead_agent_id, "lead1");
+        assert_eq!(team.status, "active");
+        assert!(!team.team_id.is_empty());
+    }
+
+    #[test]
+    fn test_team_member_builder() {
+        let member = TeamMember::new(
+            "team1".to_string(),
+            "agent1".to_string(),
+            "member".to_string(),
+        );
+
+        assert_eq!(member.team_id, "team1");
+        assert_eq!(member.agent_id, "agent1");
+        assert_eq!(member.role, "member");
+    }
+
+    #[test]
+    fn test_team_task_builder() {
+        let task = TeamTask::new("team1".to_string(), "subj".to_string())
+            .with_description("desc".to_string())
+            .with_priority(10)
+            .with_blocked_by(vec!["task2".to_string()]);
+
+        assert_eq!(task.team_id, "team1");
+        assert_eq!(task.subject, "subj");
+        assert_eq!(task.description, Some("desc".to_string()));
+        assert_eq!(task.priority, 10);
+        assert_eq!(task.blocked_by, vec!["task2".to_string()]);
+        assert_eq!(task.status, "blocked");
+        assert!(!task.task_id.is_empty());
+    }
+
+    #[test]
+    fn test_team_message_builder() {
+        let msg = TeamMessage::new(
+            "team1".to_string(),
+            "agent1".to_string(),
+            "hello".to_string(),
+        )
+        .directed("agent2".to_string())
+        .with_type("alert".to_string());
+
+        assert_eq!(msg.team_id, "team1");
+        assert_eq!(msg.from_agent_id, "agent1");
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.to_agent_id, Some("agent2".to_string()));
+        assert_eq!(msg.message_type, "alert");
+        assert!(!msg.message_id.is_empty());
+    }
+
+    #[test]
+    fn test_handoff_route_builder() {
+        let route = HandoffRoute::new(
+            "telegram".to_string(),
+            "chat1".to_string(),
+            "agent1".to_string(),
+            "agent2".to_string(),
+        )
+        .with_context("ctx".to_string());
+
+        assert_eq!(route.channel, "telegram");
+        assert_eq!(route.chat_id, "chat1");
+        assert_eq!(route.from_agent_key, "agent1");
+        assert_eq!(route.to_agent_key, "agent2");
+        assert_eq!(route.context, Some("ctx".to_string()));
+        assert!(!route.route_id.is_empty());
+    }
+}

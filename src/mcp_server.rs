@@ -20,8 +20,8 @@ use crate::tools::traits::{Tool, ToolSpec};
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
-    #[allow(dead_code)]
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     id: Option<Value>,
     method: String,
     #[serde(default)]

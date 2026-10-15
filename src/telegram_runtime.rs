@@ -137,42 +137,16 @@ pub async fn run_telegram_chat(run: TelegramChatRun<'_>) -> anyhow::Result<()> {
             Some(msg) = cli_rx.recv() => msg,
             else => break,
         };
-        if msg.chat_id != chat_id.to_string() {
-            tracing::warn!("Ignoring Telegram message for unbound chat {}", msg.chat_id);
-            continue;
-        }
-        let text = msg.text.trim();
-
-        if processing.load(std::sync::atomic::Ordering::SeqCst) && !text.starts_with('/') {
-            runner.steer(text.to_string());
-            let _ = tg.send_message("📌 Noted — steering current task.").await;
-            continue;
-        }
-
-        if text.starts_with('/')
-            && handle_command(&runner, &memory, &tg, &msg, text, skills_count).await?
-        {
-            continue;
-        }
-
-        processing.store(true, std::sync::atomic::Ordering::SeqCst);
-
-        // Signal progress — AgentRunner will now use channel.send_typing() during rounds
-        let _ = tg.send_typing(&msg.chat_id).await;
-
-        match runner.handle_message(&msg, &tg).await {
-            Ok(response) => {
-                if response.trim().is_empty() {
-                    continue;
-                }
-                let _ = tg.send_message(&response).await;
-            }
-            Err(error) => {
-                let _ = tg.send_message(&format!("❌ {}", error)).await;
-            }
-        }
-
-        processing.store(false, std::sync::atomic::Ordering::SeqCst);
+        process_incoming_message(
+            msg,
+            chat_id,
+            &processing,
+            &runner,
+            &tg,
+            &memory,
+            skills_count,
+        )
+        .await?;
     }
 
     if let Some(shutdown) = cron_shutdown {
@@ -185,6 +159,52 @@ pub async fn run_telegram_chat(run: TelegramChatRun<'_>) -> anyhow::Result<()> {
 struct BridgeState {
     tx: tokio::sync::mpsc::Sender<IncomingMessage>,
     chat_id: String,
+}
+
+async fn process_incoming_message(
+    msg: IncomingMessage,
+    chat_id: i64,
+    processing: &Arc<std::sync::atomic::AtomicBool>,
+    runner: &Arc<AgentRunner>,
+    tg: &TelegramChannel,
+    memory: &Arc<dyn MemoryBackend>,
+    skills_count: usize,
+) -> anyhow::Result<()> {
+    if msg.chat_id != chat_id.to_string() {
+        tracing::warn!("Ignoring Telegram message for unbound chat {}", msg.chat_id);
+        return Ok(());
+    }
+    let text = msg.text.trim();
+
+    if processing.load(std::sync::atomic::Ordering::SeqCst) && !text.starts_with('/') {
+        runner.steer(text.to_string());
+        let _ = tg.send_message("📌 Noted — steering current task.").await;
+        return Ok(());
+    }
+
+    if text.starts_with('/') && handle_command(runner, memory, tg, &msg, text, skills_count).await?
+    {
+        return Ok(());
+    }
+
+    processing.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Signal progress — AgentRunner will now use channel.send_typing() during rounds
+    let _ = tg.send_typing(&msg.chat_id).await;
+
+    match runner.handle_message(&msg, tg).await {
+        Ok(response) => {
+            if !response.trim().is_empty() {
+                let _ = tg.send_message(&response).await;
+            }
+        }
+        Err(error) => {
+            let _ = tg.send_message(&format!("❌ {}", error)).await;
+        }
+    }
+
+    processing.store(false, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 async fn handle_bridge_message(
