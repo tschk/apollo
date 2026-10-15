@@ -1,5 +1,40 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Daily memory consolidation writes `time_contexts` / `open_loops`, a timeline digest, dream graph nodes, and a cited zkr daily review (`memory.consolidate_on_heartbeat`).
+- Session-start zkr profile one-pager with a generation timestamp.
+- `DefaultCompactor` now calls the LLM summarizer and keeps identifier/open-loop recap text on fallback.
+
+## [0.7.1]
+
+### Security
+
+- Telegram faster-whisper no longer interpolates the audio path into `python3 -c`;
+  the path is `sys.argv[1]` on a static script. Dynamic tools and vibemania put
+  `--` before untrusted paths/goals so a leading `-` cannot be a flag. Child
+  processes get secret-scrubbed environments and `kill_on_drop`.
+
+### Fixed
+
+- Local Telegram message bridge logs bind/serve failures instead of unwrapping.
+
+### Dependencies
+
+- `rx4` is the crates.io crate again (`0.7.2`), not a git pin, so `apollo-agent`
+  can be published.
+- `web_search` uses darash `0.5.2` for SearXNG and the keyless local backend
+  (DuckDuckGo scrape remains a fallback).
+
+### Tooling
+
+- Amp orb `.agents/setup` / `.agents/resume` for Rust + bindgen deps.
+- CI and release workflows pin GitHub Actions to full-length SHAs and disable
+  checkout credential persistence.
+
+
 ## [0.6.0]
 
 ### Breaking

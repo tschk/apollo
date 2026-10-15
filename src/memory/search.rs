@@ -19,7 +19,7 @@ fn truncate_text(input: &str, max_chars: usize) -> String {
 }
 
 /// Search MEMORY.md + memory/*.md for a query string
-pub fn memory_search(workspace: &Path, query: &str, max_results: usize) -> Vec<SearchResult> {
+pub async fn memory_search(workspace: &Path, query: &str, max_results: usize) -> Vec<SearchResult> {
     let query_lower = query.to_lowercase();
     let query_words: Vec<&str> = query_lower.split_whitespace().collect();
     let mut results = Vec::new();
@@ -29,15 +29,19 @@ pub fn memory_search(workspace: &Path, query: &str, max_results: usize) -> Vec<S
 
     // MEMORY.md
     let memory_md = workspace.join("MEMORY.md");
-    if memory_md.exists() {
+    if tokio::fs::metadata(&memory_md).await.is_ok() {
         files.push(memory_md);
     }
 
     // memory/*.md
     let memory_dir = workspace.join("memory");
-    if memory_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&memory_dir) {
-            for entry in entries.flatten() {
+    if tokio::fs::metadata(&memory_dir)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
+        if let Ok(mut entries) = tokio::fs::read_dir(&memory_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "md") {
                     files.push(path);
@@ -47,7 +51,7 @@ pub fn memory_search(workspace: &Path, query: &str, max_results: usize) -> Vec<S
     }
 
     for file in &files {
-        if let Ok(content) = std::fs::read_to_string(file) {
+        if let Ok(content) = tokio::fs::read_to_string(file).await {
             let rel_path = file
                 .strip_prefix(workspace)
                 .unwrap_or(file)
@@ -99,7 +103,7 @@ pub fn memory_search(workspace: &Path, query: &str, max_results: usize) -> Vec<S
 }
 
 /// Get specific lines from a memory file
-pub fn memory_get(
+pub async fn memory_get(
     workspace: &Path,
     file_path: &str,
     from_line: usize,
@@ -108,13 +112,13 @@ pub fn memory_get(
     let full_path = workspace.join(file_path);
 
     // Security: ensure path stays within workspace
-    let canonical = full_path.canonicalize().ok()?;
-    let workspace_canonical = workspace.canonicalize().ok()?;
+    let canonical = tokio::fs::canonicalize(&full_path).await.ok()?;
+    let workspace_canonical = tokio::fs::canonicalize(workspace).await.ok()?;
     if !canonical.starts_with(&workspace_canonical) {
         return None;
     }
 
-    let content = std::fs::read_to_string(&full_path).ok()?;
+    let content = tokio::fs::read_to_string(&full_path).await.ok()?;
     let lines: Vec<&str> = content.lines().collect();
 
     let start = from_line.saturating_sub(1); // 1-indexed to 0-indexed
@@ -176,7 +180,7 @@ impl Tool for MemorySearchTool {
             return Ok(ToolResult::error("Query is required"));
         }
 
-        let results = memory_search(&self.workspace, query, limit);
+        let results = memory_search(&self.workspace, query, limit).await;
         if results.is_empty() {
             return Ok(ToolResult::success("No results found."));
         }
@@ -308,7 +312,7 @@ impl Tool for MemoryGetTool {
             return Ok(ToolResult::error("Path is required"));
         }
 
-        match memory_get(&self.workspace, path, from_line, num_lines) {
+        match memory_get(&self.workspace, path, from_line, num_lines).await {
             Some(content) => Ok(ToolResult::success(content)),
             None => Ok(ToolResult::error("File not found or path not allowed")),
         }
@@ -320,9 +324,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    #[test]
-    fn test_memory_search_nonexistent() {
-        let results = memory_search(&PathBuf::from("/nonexistent"), "test", 5);
+    #[tokio::test]
+    async fn test_memory_search_nonexistent() {
+        let results = memory_search(&PathBuf::from("/nonexistent"), "test", 5).await;
         assert!(results.is_empty());
     }
 }

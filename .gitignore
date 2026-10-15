@@ -1,5 +1,8 @@
 /target
 .apollo/
+
+# Amp orb portals (keep other .amp files if added later)
+.amp/portals/
 *.db
 *.db-shm
 *.db-wal

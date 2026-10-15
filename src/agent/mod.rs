@@ -7,6 +7,7 @@
 
 pub mod build_runner;
 pub mod compaction;
+pub use compaction::{default_compactor, llm_compactor, Compactor, DefaultCompactor};
 pub mod hooks;
 pub mod loop_runner;
 pub mod mode;
