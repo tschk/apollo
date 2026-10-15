@@ -71,7 +71,7 @@ pub fn load_config_workspace(path: &str, workspace: Option<&Path>) -> Config {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
-            .or_else(|| crate::providers::chatgpt_login::load_claude_access());
+            .or_else(crate::providers::chatgpt_login::load_claude_access);
         if let Some(key) = key {
             cfg.provider.api_key = Some(key);
         }
