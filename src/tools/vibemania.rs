@@ -123,3 +123,26 @@ impl Tool for VibemaniaTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_vibemania_not_found() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let tool = VibemaniaTool::new(temp_dir.path().to_path_buf());
+
+        let args = serde_json::json!({
+            "goal": "test goal"
+        });
+
+        let result = tool.execute(&args.to_string()).await.unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(
+            result.output,
+            "Vibemania not found. Clone/build from atechnology-company/vibemania first."
+        );
+    }
+}
