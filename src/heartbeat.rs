@@ -130,7 +130,7 @@ use chrono::Timelike;
 mod tests {
     use super::*;
     use tempfile::tempdir;
-    use tokio::time::{pause, advance, Duration};
+    use tokio::time::{advance, pause, Duration};
 
     #[test]
     fn test_default_config() {
@@ -215,7 +215,11 @@ mod tests {
         let current_hour = chrono::Local::now().hour();
         // Set quiet hours so it encompasses current hour
         let quiet_start = current_hour;
-        let quiet_end = if current_hour == 23 { 0 } else { current_hour + 1 };
+        let quiet_end = if current_hour == 23 {
+            0
+        } else {
+            current_hour + 1
+        };
 
         let config = HeartbeatConfig {
             interval_secs: 10,
