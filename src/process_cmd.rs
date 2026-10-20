@@ -114,10 +114,14 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("timed out"), "got: {err}");
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-        assert!(
-            !marker.exists(),
-            "the killed command must not have kept running to completion"
-        );
+
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(3500) {
+            assert!(
+                !marker.exists(),
+                "the killed command must not have kept running to completion"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 }
