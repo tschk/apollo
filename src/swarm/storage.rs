@@ -422,7 +422,8 @@ impl SwarmStorage for SurrealBackend {
     }
 
     async fn list_all_active_delegations(&self) -> Result<Vec<DelegationRecord>> {
-        let mut result = self.db
+        let mut result = self
+            .db
             .query("SELECT * FROM delegation_history WHERE status IN ['pending', 'running']")
             .await?;
         Ok(result.take(0)?)
