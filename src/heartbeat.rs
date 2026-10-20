@@ -129,8 +129,8 @@ use chrono::Timelike;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{advance, Duration};
     use tempfile::tempdir;
+    use tokio::time::{advance, Duration};
 
     #[tokio::test(start_paused = true)]
     async fn test_heartbeat_no_file() {
@@ -147,7 +147,9 @@ mod tests {
         advance(Duration::from_secs(1800)).await;
 
         // Check that no message arrives within a small timeframe
-        assert!(tokio::time::timeout(Duration::from_millis(10), rx.recv()).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(10), rx.recv())
+            .await
+            .is_err());
 
         handle.abort();
     }
@@ -170,7 +172,9 @@ mod tests {
         advance(Duration::from_secs(1800)).await;
 
         // Check that no message arrives within a small timeframe
-        assert!(tokio::time::timeout(Duration::from_millis(10), rx.recv()).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(10), rx.recv())
+            .await
+            .is_err());
 
         handle.abort();
     }
@@ -223,7 +227,9 @@ mod tests {
         advance(Duration::from_secs(1800)).await;
 
         // Check that no message arrives within a small timeframe
-        assert!(tokio::time::timeout(Duration::from_millis(10), rx.recv()).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(10), rx.recv())
+            .await
+            .is_err());
 
         handle.abort();
     }
