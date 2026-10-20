@@ -283,9 +283,24 @@ impl AutonomousLoop {
 /// Run a test command, return true if it passes.
 async fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
     tracing::info!("[autonomous] running tests: {}", cmd);
-    let output = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
+
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        tracing::warn!("[autonomous] empty test command");
+        return Ok(false);
+    }
+
+    let parts = shlex::split(trimmed).ok_or_else(|| anyhow::anyhow!("invalid command quoting"))?;
+    if parts.is_empty() {
+        tracing::warn!("[autonomous] empty test command");
+        return Ok(false);
+    }
+
+    let program = &parts[0];
+    let args = &parts[1..];
+
+    let output = tokio::process::Command::new(program)
+        .args(args)
         .current_dir(cwd)
         .output()
         .await?;
@@ -398,5 +413,21 @@ mod tests {
         // Second creation should load saved state
         let aloop2 = AutonomousLoop::new(config, dir.path().to_path_buf());
         assert_eq!(aloop2.status.state, aloop.status.state);
+    }
+
+    #[tokio::test]
+    async fn test_run_test_command_no_shell_injection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("pwned");
+
+        // The command below tries to touch a file using a shell metacharacter.
+        // If 'sh -c' was used, the echo would fail/succeed and the touch would execute.
+        // With 'shlex', the whole string is passed as arguments to 'echo'.
+        let cmd = format!("echo hello ; touch {}", file_path.display());
+        let _ = run_test_command(&cmd, tmp.path()).await;
+
+        // The file should NOT exist because the command injection should be blocked
+        // (i.e. 'echo' just printed the semicolon and the touch command string).
+        assert!(!file_path.exists());
     }
 }
