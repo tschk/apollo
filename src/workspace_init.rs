@@ -35,3 +35,57 @@ fn write_if_missing(path: &Path, content: &str) -> std::io::Result<()> {
     }
     std::fs::write(path, content)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_ensure_workspace_kit_creates_files() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+
+        ensure_workspace_kit(workspace).expect("failed to ensure workspace kit");
+
+        let files_to_check = vec![
+            ("SOUL.md", SOUL),
+            ("USER.md", USER),
+            ("IDENTITY.md", IDENTITY),
+            ("MEMORY.md", MEMORY),
+            ("HEARTBEAT.md", HEARTBEAT),
+            ("NOW.md", NOW),
+            ("memory/open-loops.md", BRIEF_LOOPS),
+            ("memory/time-contexts.md", BRIEF_TIME),
+        ];
+
+        for (file, expected_content) in files_to_check {
+            let path = workspace.join(file);
+            assert!(path.exists(), "File {} should have been created", file);
+            let content = fs::read_to_string(&path).expect("failed to read file");
+            assert_eq!(content, expected_content);
+        }
+    }
+
+    #[test]
+    fn test_ensure_workspace_kit_does_not_overwrite() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+
+        // Create a custom SOUL.md before calling ensure_workspace_kit
+        let custom_soul_content = "This is a custom soul.";
+        fs::write(workspace.join("SOUL.md"), custom_soul_content).unwrap();
+
+        ensure_workspace_kit(workspace).expect("failed to ensure workspace kit");
+
+        // Verify that SOUL.md still has the custom content
+        let soul_path = workspace.join("SOUL.md");
+        let current_soul_content = fs::read_to_string(&soul_path).expect("failed to read SOUL.md");
+        assert_eq!(current_soul_content, custom_soul_content);
+
+        // Verify that other files were created
+        assert!(workspace.join("USER.md").exists());
+        assert!(workspace.join("memory/open-loops.md").exists());
+    }
+}
