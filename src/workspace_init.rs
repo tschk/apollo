@@ -50,18 +50,42 @@ mod tests {
         ensure_workspace_kit(workspace).unwrap();
 
         // Check root files
-        assert_eq!(std::fs::read_to_string(workspace.join("SOUL.md")).unwrap(), SOUL);
-        assert_eq!(std::fs::read_to_string(workspace.join("USER.md")).unwrap(), USER);
-        assert_eq!(std::fs::read_to_string(workspace.join("IDENTITY.md")).unwrap(), IDENTITY);
-        assert_eq!(std::fs::read_to_string(workspace.join("MEMORY.md")).unwrap(), MEMORY);
-        assert_eq!(std::fs::read_to_string(workspace.join("HEARTBEAT.md")).unwrap(), HEARTBEAT);
-        assert_eq!(std::fs::read_to_string(workspace.join("NOW.md")).unwrap(), NOW);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("SOUL.md")).unwrap(),
+            SOUL
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("USER.md")).unwrap(),
+            USER
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("IDENTITY.md")).unwrap(),
+            IDENTITY
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("MEMORY.md")).unwrap(),
+            MEMORY
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("HEARTBEAT.md")).unwrap(),
+            HEARTBEAT
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("NOW.md")).unwrap(),
+            NOW
+        );
 
         // Check memory files
         let mem = workspace.join("memory");
         assert!(mem.exists() && mem.is_dir());
-        assert_eq!(std::fs::read_to_string(mem.join("open-loops.md")).unwrap(), BRIEF_LOOPS);
-        assert_eq!(std::fs::read_to_string(mem.join("time-contexts.md")).unwrap(), BRIEF_TIME);
+        assert_eq!(
+            std::fs::read_to_string(mem.join("open-loops.md")).unwrap(),
+            BRIEF_LOOPS
+        );
+        assert_eq!(
+            std::fs::read_to_string(mem.join("time-contexts.md")).unwrap(),
+            BRIEF_TIME
+        );
     }
 
     #[test]
@@ -81,11 +105,23 @@ mod tests {
         ensure_workspace_kit(workspace).unwrap();
 
         // Assert custom files were not overwritten
-        assert_eq!(std::fs::read_to_string(workspace.join("SOUL.md")).unwrap(), custom_soul);
-        assert_eq!(std::fs::read_to_string(mem.join("time-contexts.md")).unwrap(), custom_time);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("SOUL.md")).unwrap(),
+            custom_soul
+        );
+        assert_eq!(
+            std::fs::read_to_string(mem.join("time-contexts.md")).unwrap(),
+            custom_time
+        );
 
         // Assert other files were still created
-        assert_eq!(std::fs::read_to_string(workspace.join("USER.md")).unwrap(), USER);
-        assert_eq!(std::fs::read_to_string(mem.join("open-loops.md")).unwrap(), BRIEF_LOOPS);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("USER.md")).unwrap(),
+            USER
+        );
+        assert_eq!(
+            std::fs::read_to_string(mem.join("open-loops.md")).unwrap(),
+            BRIEF_LOOPS
+        );
     }
 }
