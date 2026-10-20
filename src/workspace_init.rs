@@ -35,3 +35,61 @@ fn write_if_missing(path: &Path, content: &str) -> std::io::Result<()> {
     }
     std::fs::write(path, content)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_ensure_workspace_kit_empty() -> std::io::Result<()> {
+        let temp = tempdir()?;
+        let workspace = temp.path();
+
+        ensure_workspace_kit(workspace)?;
+
+        assert!(workspace.join("SOUL.md").exists());
+        assert_eq!(std::fs::read_to_string(workspace.join("SOUL.md"))?, SOUL);
+
+        assert!(workspace.join("USER.md").exists());
+        assert!(workspace.join("IDENTITY.md").exists());
+        assert!(workspace.join("MEMORY.md").exists());
+        assert!(workspace.join("HEARTBEAT.md").exists());
+        assert!(workspace.join("NOW.md").exists());
+
+        let mem = workspace.join("memory");
+        assert!(mem.is_dir());
+        assert!(mem.join("open-loops.md").exists());
+        assert!(mem.join("time-contexts.md").exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ensure_workspace_kit_existing() -> std::io::Result<()> {
+        let temp = tempdir()?;
+        let workspace = temp.path();
+
+        // Pre-create some files with custom content
+        let soul_path = workspace.join("SOUL.md");
+        let custom_soul = "Custom SOUL";
+        std::fs::write(&soul_path, custom_soul)?;
+
+        let loops_path = workspace.join("memory/open-loops.md");
+        std::fs::create_dir_all(loops_path.parent().unwrap())?;
+        let custom_loops = "Custom Loops";
+        std::fs::write(&loops_path, custom_loops)?;
+
+        ensure_workspace_kit(workspace)?;
+
+        // Existing files should not be overwritten
+        assert_eq!(std::fs::read_to_string(&soul_path)?, custom_soul);
+        assert_eq!(std::fs::read_to_string(&loops_path)?, custom_loops);
+
+        // Missing files should be created
+        assert!(workspace.join("USER.md").exists());
+        assert!(workspace.join("NOW.md").exists());
+
+        Ok(())
+    }
+}
