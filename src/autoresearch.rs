@@ -1316,6 +1316,9 @@ fn first_line(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    const DESCENDANT_WAIT_DURATION: Duration = Duration::from_secs(2);
 
     #[test]
     fn parses_numeric_metric_from_command_output() {
@@ -1388,7 +1391,7 @@ mod tests {
         run_shell(&command, directory.path(), 1, Instant::now(), 0)
             .await
             .expect_err("command should time out");
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(DESCENDANT_WAIT_DURATION).await;
         assert!(!marker.exists(), "timed-out descendant survived");
     }
 
@@ -1405,7 +1408,7 @@ mod tests {
             .await
             .expect_err("wall-clock budget should time out the command");
         assert!(is_budget_error(&error));
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(DESCENDANT_WAIT_DURATION).await;
         assert!(!marker.exists(), "wall-clock descendant survived");
     }
 
