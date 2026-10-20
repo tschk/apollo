@@ -35,3 +35,71 @@ fn write_if_missing(path: &Path, content: &str) -> std::io::Result<()> {
     }
     std::fs::write(path, content)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_ensure_workspace_kit_creates_files() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        ensure_workspace_kit(workspace).unwrap();
+
+        assert!(workspace.join("SOUL.md").exists());
+        assert!(workspace.join("USER.md").exists());
+        assert!(workspace.join("IDENTITY.md").exists());
+        assert!(workspace.join("MEMORY.md").exists());
+        assert!(workspace.join("HEARTBEAT.md").exists());
+        assert!(workspace.join("NOW.md").exists());
+        assert!(workspace.join("memory").join("open-loops.md").exists());
+        assert!(workspace.join("memory").join("time-contexts.md").exists());
+
+        assert_eq!(fs::read_to_string(workspace.join("SOUL.md")).unwrap(), SOUL);
+        assert_eq!(fs::read_to_string(workspace.join("USER.md")).unwrap(), USER);
+        assert_eq!(
+            fs::read_to_string(workspace.join("IDENTITY.md")).unwrap(),
+            IDENTITY
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("MEMORY.md")).unwrap(),
+            MEMORY
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("HEARTBEAT.md")).unwrap(),
+            HEARTBEAT
+        );
+        assert_eq!(fs::read_to_string(workspace.join("NOW.md")).unwrap(), NOW);
+        assert_eq!(
+            fs::read_to_string(workspace.join("memory").join("open-loops.md")).unwrap(),
+            BRIEF_LOOPS
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("memory").join("time-contexts.md")).unwrap(),
+            BRIEF_TIME
+        );
+    }
+
+    #[test]
+    fn test_ensure_workspace_kit_idempotency() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+
+        // First run
+        ensure_workspace_kit(workspace).unwrap();
+
+        // Modify a file
+        fs::write(workspace.join("SOUL.md"), "MODIFIED SOUL").unwrap();
+
+        // Second run
+        ensure_workspace_kit(workspace).unwrap();
+
+        // Ensure it wasn't overwritten
+        assert_eq!(
+            fs::read_to_string(workspace.join("SOUL.md")).unwrap(),
+            "MODIFIED SOUL"
+        );
+    }
+}
