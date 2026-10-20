@@ -1400,8 +1400,13 @@ mod tests {
             "sleep 2\ntouch {}\n",
             shlex::try_quote(&marker.to_string_lossy()).unwrap()
         );
-        tokio::fs::write(&script_path, script_content).await.unwrap();
-        let command = format!("sh {}", shlex::try_quote(&script_path.to_string_lossy()).unwrap());
+        tokio::fs::write(&script_path, script_content)
+            .await
+            .unwrap();
+        let command = format!(
+            "sh {}",
+            shlex::try_quote(&script_path.to_string_lossy()).unwrap()
+        );
         run_command(&command, directory.path(), 1, Instant::now(), 0)
             .await
             .expect_err("command should time out");
@@ -1419,8 +1424,13 @@ mod tests {
             "sleep 2\ntouch {}\n",
             shlex::try_quote(&marker.to_string_lossy()).unwrap()
         );
-        tokio::fs::write(&script_path, script_content).await.unwrap();
-        let command = format!("sh {}", shlex::try_quote(&script_path.to_string_lossy()).unwrap());
+        tokio::fs::write(&script_path, script_content)
+            .await
+            .unwrap();
+        let command = format!(
+            "sh {}",
+            shlex::try_quote(&script_path.to_string_lossy()).unwrap()
+        );
         let error = run_command(&command, directory.path(), 60, Instant::now(), 1)
             .await
             .expect_err("wall-clock budget should time out the command");
