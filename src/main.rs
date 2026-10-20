@@ -1932,7 +1932,14 @@ async fn start_background_server(
     // Keep the server's own diagnostics: a bad config is the usual failure and
     // discarding stderr leaves nothing to report.
     let log_path = std::env::temp_dir().join("apollo-serve.log");
-    let log = std::fs::File::create(&log_path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let log = options.open(&log_path)?;
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(log));
