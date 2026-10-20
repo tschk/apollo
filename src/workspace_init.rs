@@ -35,3 +35,29 @@ fn write_if_missing(path: &Path, content: &str) -> std::io::Result<()> {
     }
     std::fs::write(path, content)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_if_missing_creates_parent_dirs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nested_file_path = temp_dir
+            .path()
+            .join("nested")
+            .join("dir")
+            .join("test_file.txt");
+
+        // Ensure parent doesn't exist initially
+        assert!(!nested_file_path.parent().unwrap().exists());
+
+        // write_if_missing should create the nested directories
+        write_if_missing(&nested_file_path, "test content").unwrap();
+
+        // Verify the file was created and content is correct
+        assert!(nested_file_path.exists());
+        let content = std::fs::read_to_string(&nested_file_path).unwrap();
+        assert_eq!(content, "test content");
+    }
+}
