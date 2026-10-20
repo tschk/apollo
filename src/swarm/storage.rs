@@ -43,6 +43,7 @@ pub trait SwarmStorage: Send + Sync {
         result: Option<String>,
     ) -> Result<()>;
     async fn list_active_delegations(&self, agent_id: &str) -> Result<Vec<DelegationRecord>>;
+    async fn list_all_active_delegations(&self) -> Result<Vec<DelegationRecord>>;
     async fn count_active_delegations_for_link(&self, source: &str, target: &str) -> Result<usize>;
     async fn count_active_delegations_for_agent(&self, agent_id: &str) -> Result<usize>;
 
@@ -416,6 +417,13 @@ impl SwarmStorage for SurrealBackend {
         let mut result = self.db
             .query("SELECT * FROM delegation_history WHERE (source_agent_id = $id OR target_agent_id = $id) AND status IN ['pending', 'running']")
             .bind(("id", agent_id.to_string()))
+            .await?;
+        Ok(result.take(0)?)
+    }
+
+    async fn list_all_active_delegations(&self) -> Result<Vec<DelegationRecord>> {
+        let mut result = self.db
+            .query("SELECT * FROM delegation_history WHERE status IN ['pending', 'running']")
             .await?;
         Ok(result.take(0)?)
     }
