@@ -1132,7 +1132,7 @@ async fn run_validation(
         return Ok(true);
     }
     for attempt in 1..=config.validation_retries {
-        let output = match run_shell(
+        let output = match run_command(
             &config.validation_command,
             workspace,
             config.command_timeout_secs,
@@ -1168,7 +1168,7 @@ async fn measure_metric(
 ) -> anyhow::Result<f64> {
     let mut values = Vec::with_capacity(config.samples);
     for _ in 0..config.samples {
-        let output = run_shell(
+        let output = run_command(
             &config.metric_command,
             workspace,
             config.command_timeout_secs,
@@ -1188,21 +1188,35 @@ async fn measure_metric(
     Ok(values[values.len() / 2])
 }
 
-async fn run_shell(
+async fn run_command(
     command: &str,
     workspace: &Path,
     timeout_secs: u64,
     started: Instant,
     max_duration_secs: u64,
 ) -> anyhow::Result<std::process::Output> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty command");
+    }
+
+    let parts = shlex::split(trimmed).ok_or_else(|| anyhow::anyhow!("invalid command quoting"))?;
+    if parts.is_empty() {
+        anyhow::bail!("empty command");
+    }
+
     let command_timeout = Duration::from_secs(timeout_secs);
     let remaining = remaining_budget(started, max_duration_secs)?;
     let budget_is_tighter = remaining.is_some_and(|remaining| remaining <= command_timeout);
     let timeout = remaining
         .map(|remaining| remaining.min(command_timeout))
         .unwrap_or(command_timeout);
-    let mut process = tokio::process::Command::new("sh");
-    process.arg("-c").arg(command).current_dir(workspace);
+
+    let program = &parts[0];
+    let args = &parts[1..];
+
+    let mut process = tokio::process::Command::new(program);
+    process.args(args).current_dir(workspace);
     crate::tools::child_proc::scrub(&mut process);
     let label = if budget_is_tighter {
         WALL_CLOCK_BUDGET_EXHAUSTED
@@ -1370,7 +1384,7 @@ mod tests {
 
     #[tokio::test]
     async fn command_timeout_is_enforced() {
-        let error = run_shell("sleep 5", Path::new("."), 1, Instant::now(), 0)
+        let error = run_command("sleep 5", Path::new("."), 1, Instant::now(), 0)
             .await
             .expect_err("long-running metric should time out");
         assert!(error.to_string().contains("timed out"));
@@ -1381,11 +1395,14 @@ mod tests {
     async fn command_timeout_terminates_shell_descendants() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("descendant-finished");
-        let command = format!(
-            "sleep 2; touch {}",
+        let script_path = directory.path().join("script.sh");
+        let script_content = format!(
+            "sleep 2\ntouch {}\n",
             shlex::try_quote(&marker.to_string_lossy()).unwrap()
         );
-        run_shell(&command, directory.path(), 1, Instant::now(), 0)
+        tokio::fs::write(&script_path, script_content).await.unwrap();
+        let command = format!("sh {}", shlex::try_quote(&script_path.to_string_lossy()).unwrap());
+        run_command(&command, directory.path(), 1, Instant::now(), 0)
             .await
             .expect_err("command should time out");
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1397,11 +1414,14 @@ mod tests {
     async fn wall_clock_timeout_terminates_shell_descendants() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("wall-clock-descendant-finished");
-        let command = format!(
-            "sleep 2; touch {}",
+        let script_path = directory.path().join("script2.sh");
+        let script_content = format!(
+            "sleep 2\ntouch {}\n",
             shlex::try_quote(&marker.to_string_lossy()).unwrap()
         );
-        let error = run_shell(&command, directory.path(), 60, Instant::now(), 1)
+        tokio::fs::write(&script_path, script_content).await.unwrap();
+        let command = format!("sh {}", shlex::try_quote(&script_path.to_string_lossy()).unwrap());
+        let error = run_command(&command, directory.path(), 60, Instant::now(), 1)
             .await
             .expect_err("wall-clock budget should time out the command");
         assert!(is_budget_error(&error));
