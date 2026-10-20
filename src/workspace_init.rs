@@ -39,8 +39,8 @@ fn write_if_missing(path: &Path, content: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn test_ensure_workspace_kit_creates_files() {
@@ -59,12 +59,27 @@ mod tests {
 
         assert_eq!(fs::read_to_string(workspace.join("SOUL.md")).unwrap(), SOUL);
         assert_eq!(fs::read_to_string(workspace.join("USER.md")).unwrap(), USER);
-        assert_eq!(fs::read_to_string(workspace.join("IDENTITY.md")).unwrap(), IDENTITY);
-        assert_eq!(fs::read_to_string(workspace.join("MEMORY.md")).unwrap(), MEMORY);
-        assert_eq!(fs::read_to_string(workspace.join("HEARTBEAT.md")).unwrap(), HEARTBEAT);
+        assert_eq!(
+            fs::read_to_string(workspace.join("IDENTITY.md")).unwrap(),
+            IDENTITY
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("MEMORY.md")).unwrap(),
+            MEMORY
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("HEARTBEAT.md")).unwrap(),
+            HEARTBEAT
+        );
         assert_eq!(fs::read_to_string(workspace.join("NOW.md")).unwrap(), NOW);
-        assert_eq!(fs::read_to_string(workspace.join("memory").join("open-loops.md")).unwrap(), BRIEF_LOOPS);
-        assert_eq!(fs::read_to_string(workspace.join("memory").join("time-contexts.md")).unwrap(), BRIEF_TIME);
+        assert_eq!(
+            fs::read_to_string(workspace.join("memory").join("open-loops.md")).unwrap(),
+            BRIEF_LOOPS
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("memory").join("time-contexts.md")).unwrap(),
+            BRIEF_TIME
+        );
     }
 
     #[test]
@@ -82,6 +97,9 @@ mod tests {
         ensure_workspace_kit(workspace).unwrap();
 
         // Ensure it wasn't overwritten
-        assert_eq!(fs::read_to_string(workspace.join("SOUL.md")).unwrap(), "MODIFIED SOUL");
+        assert_eq!(
+            fs::read_to_string(workspace.join("SOUL.md")).unwrap(),
+            "MODIFIED SOUL"
+        );
     }
 }
