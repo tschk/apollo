@@ -1,0 +1,23 @@
+   Compiling librocksdb-sys v0.17.3+10.4.2
+   Compiling rocksdb v0.23.0
+   Compiling surrealdb-core v2.3.10
+   Compiling surrealdb v2.3.10
+   Compiling apollo-agent v0.8.0 (/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10m 00s
+     Running unittests src/lib.rs (target/debug/deps/apollo-33c8c454ef6153f8)
+
+running 12 tests
+test autoresearch::tests::direction_and_tolerance_are_respected ... ok
+test autoresearch::tests::experiment_definition_fingerprint_changes_when_metric_changes ... ok
+test autoresearch::tests::ignored_state_restores_existing_files_and_removes_new_files ... ok
+test autoresearch::tests::median_sampling_is_sorted ... ok
+test autoresearch::tests::missing_path_is_normalized_before_workspace_containment_check ... ok
+test autoresearch::tests::new_ledger_is_bound_to_branch_and_has_a_unique_run_id ... ok
+test autoresearch::tests::parses_numeric_metric_from_command_output ... ok
+test autoresearch::tests::baseline_rejects_tracked_workspace_changes ... ok
+test autoresearch::tests::command_timeout_is_enforced ... ok
+test autoresearch::tests::validation_timeout_is_a_rejected_attempt ... ok
+test autoresearch::tests::command_timeout_terminates_shell_descendants ... ok
+test autoresearch::tests::wall_clock_timeout_terminates_shell_descendants ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 405 filtered out; finished in 3.12s

@@ -1195,14 +1195,22 @@ async fn run_shell(
     started: Instant,
     max_duration_secs: u64,
 ) -> anyhow::Result<std::process::Output> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        bail!("empty command");
+    }
+    let parts = shlex::split(trimmed).ok_or_else(|| anyhow::anyhow!("invalid command quoting"))?;
+    if parts.is_empty() {
+        bail!("empty command");
+    }
     let command_timeout = Duration::from_secs(timeout_secs);
     let remaining = remaining_budget(started, max_duration_secs)?;
     let budget_is_tighter = remaining.is_some_and(|remaining| remaining <= command_timeout);
     let timeout = remaining
         .map(|remaining| remaining.min(command_timeout))
         .unwrap_or(command_timeout);
-    let mut process = tokio::process::Command::new("sh");
-    process.arg("-c").arg(command).current_dir(workspace);
+    let mut process = tokio::process::Command::new(&parts[0]);
+    process.args(&parts[1..]).current_dir(workspace);
     crate::tools::child_proc::scrub(&mut process);
     let label = if budget_is_tighter {
         WALL_CLOCK_BUDGET_EXHAUSTED
@@ -1381,10 +1389,7 @@ mod tests {
     async fn command_timeout_terminates_shell_descendants() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("descendant-finished");
-        let command = format!(
-            "sleep 2; touch {}",
-            shlex::try_quote(&marker.to_string_lossy()).unwrap()
-        );
+        let command = format!("sh -c 'sleep 2; touch {}'", marker.to_string_lossy());
         run_shell(&command, directory.path(), 1, Instant::now(), 0)
             .await
             .expect_err("command should time out");
@@ -1397,10 +1402,7 @@ mod tests {
     async fn wall_clock_timeout_terminates_shell_descendants() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("wall-clock-descendant-finished");
-        let command = format!(
-            "sleep 2; touch {}",
-            shlex::try_quote(&marker.to_string_lossy()).unwrap()
-        );
+        let command = format!("sh -c 'sleep 2; touch {}'", marker.to_string_lossy());
         let error = run_shell(&command, directory.path(), 60, Instant::now(), 1)
             .await
             .expect_err("wall-clock budget should time out the command");
