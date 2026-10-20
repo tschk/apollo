@@ -45,7 +45,7 @@ struct TodoArgs {
     /// Items or content to write (one per line, or full markdown)
     #[serde(default)]
     content: String,
-    /// Optional filename without extension (defaults to "TODO")
+    /// Optional filename without extension (defaults to the default task file name)
     #[serde(default)]
     file: String,
 }
@@ -80,7 +80,7 @@ impl Tool for TodoWriteTool {
                     },
                     "file": {
                         "type": "string",
-                        "description": "Filename without .md extension (default: TODO)"
+                        "description": "Filename without .md extension (default: default task file)"
                     }
                 },
                 "required": ["action"]
