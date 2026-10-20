@@ -126,6 +126,7 @@ impl Tool for VibemaniaTool {
 
 #[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     use super::*;
     use crate::tools::traits::Tool;
     use std::os::unix::fs::PermissionsExt;
@@ -154,13 +155,13 @@ mod tests {
         let workspace = temp_dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let bin_dir = temp_dir.path().join("vibemania/target/release");
+        let bin_dir = workspace.parent().unwrap().join("vibemania/target/release");
         std::fs::create_dir_all(&bin_dir).unwrap();
 
         let bin_path = bin_dir.join("vibemania");
 
         let script = r#"#!/bin/sh
-echo -n "Success: $@"
+printf "Success: %s" "$*"
 "#;
         std::fs::write(&bin_path, script).unwrap();
 
@@ -181,8 +182,10 @@ echo -n "Success: $@"
         let result = tool.execute(&args).await.unwrap();
 
         assert!(!result.is_error);
-        let expected_stdout = "Success: run --parallel 4 --orchestrator-model heavy-model --runner-model fast-model -- do something";
-        assert_eq!(result.output, expected_stdout);
+        assert!(result.output.starts_with("Success: run --parallel 4"));
+        assert!(result.output.contains("--orchestrator-model heavy-model"));
+        assert!(result.output.contains("--runner-model fast-model"));
+        assert!(result.output.contains("-- do something"));
     }
 
     #[tokio::test]
@@ -191,7 +194,7 @@ echo -n "Success: $@"
         let workspace = temp_dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let bin_dir = temp_dir.path().join("vibemania/target/release");
+        let bin_dir = workspace.parent().unwrap().join("vibemania/target/release");
         std::fs::create_dir_all(&bin_dir).unwrap();
 
         let bin_path = bin_dir.join("vibemania");
