@@ -394,7 +394,7 @@ Discord defaults to the **gateway websocket** (`channels::discord_gateway`).
 `transport = "polling"` in `[channel].settings` selects REST polling instead,
 which is the fallback for a bot whose privileged `MESSAGE_CONTENT` intent has
 not been granted — without that intent the gateway delivers empty message
-bodies, which looks exactly like the dropped-sender bug it replaced.
+bodies, which is indistinguishable from a broken receiver.
 
 The gateway implements HELLO/heartbeat, IDENTIFY and MESSAGE_CREATE only.
 There is **no RESUME**: a dropped connection re-identifies and loses whatever
