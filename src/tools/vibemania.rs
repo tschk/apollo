@@ -123,3 +123,37 @@ impl Tool for VibemaniaTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_vibemania_not_found() {
+        // Create a temporary directory that simulates our workspace.
+        // There won't be a vibemania/target/release/vibemania adjacent to it,
+        // so it should confidently fail with the expected error message.
+        let dir = tempdir().unwrap();
+        let tool = VibemaniaTool::new(dir.path().to_path_buf());
+
+        let args = serde_json::json!({
+            "goal": "do something"
+        });
+
+        let result = tool
+            .execute(&serde_json::to_string(&args).unwrap())
+            .await
+            .expect("Execute should not return an anyhow error");
+
+        assert!(
+            result.is_error,
+            "Result should be an error because vibemania binary is missing"
+        );
+        assert!(
+            result.output.contains("Vibemania not found"),
+            "Error message should contain 'Vibemania not found', got: {}",
+            result.output
+        );
+    }
+}
