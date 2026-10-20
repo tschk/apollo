@@ -149,9 +149,11 @@ mod tests {
 
     #[test]
     fn test_quiet_hours_overnight() {
-        let mut config = HeartbeatConfig::default();
-        config.quiet_start_hour = 23;
-        config.quiet_end_hour = 8;
+        let config = HeartbeatConfig {
+            quiet_start_hour: 23,
+            quiet_end_hour: 8,
+            ..Default::default()
+        };
 
         assert!(config.is_quiet_hour(23));
         assert!(config.is_quiet_hour(0));
@@ -164,9 +166,11 @@ mod tests {
 
     #[test]
     fn test_quiet_hours_daytime() {
-        let mut config = HeartbeatConfig::default();
-        config.quiet_start_hour = 10;
-        config.quiet_end_hour = 14;
+        let config = HeartbeatConfig {
+            quiet_start_hour: 10,
+            quiet_end_hour: 14,
+            ..Default::default()
+        };
 
         assert!(config.is_quiet_hour(10));
         assert!(config.is_quiet_hour(12));
@@ -179,9 +183,11 @@ mod tests {
 
     #[test]
     fn test_quiet_hours_none() {
-        let mut config = HeartbeatConfig::default();
-        config.quiet_start_hour = 0;
-        config.quiet_end_hour = 0;
+        let config = HeartbeatConfig {
+            quiet_start_hour: 0,
+            quiet_end_hour: 0,
+            ..Default::default()
+        };
 
         for hour in 0..24 {
             assert!(!config.is_quiet_hour(hour));
