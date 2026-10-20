@@ -479,9 +479,17 @@ mod tests {
             "got: {}",
             result.output
         );
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+
+        let mut passed = true;
+        for _ in 0..40 {
+            if marker.exists() {
+                passed = false;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         assert!(
-            !marker.exists(),
+            passed,
             "the killed command must not have kept running to completion"
         );
     }
