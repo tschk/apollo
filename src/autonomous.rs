@@ -22,7 +22,7 @@ use crate::channels::IncomingMessage;
 pub struct AutonomousConfig {
     /// How often to run a check cycle (seconds)
     pub interval_secs: u64,
-    /// Path to task ledger (default: TODO.md)
+    /// Path to task ledger file (default: todo.md)
     pub todo_path: String,
     /// Path to write status file
     pub status_path: String,
