@@ -124,9 +124,9 @@ impl Tool for VibemaniaTool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    #![cfg(unix)]
+
     use super::*;
     use crate::tools::traits::Tool;
     use std::os::unix::fs::PermissionsExt;
