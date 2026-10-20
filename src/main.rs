@@ -262,7 +262,7 @@ enum Commands {
         workspace: Option<PathBuf>,
     },
 
-    /// Run autonomous TODO.md-driven coding loop
+    /// Run autonomous task-driven coding loop
     Autonomous {
         /// Configuration file path
         #[arg(short, long, default_value = "apollo.json")]
