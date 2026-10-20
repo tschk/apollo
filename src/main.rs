@@ -1911,6 +1911,10 @@ async fn launch_apollo_ui() -> anyhow::Result<()> {
     Ok(())
 }
 
+const SERVER_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const SERVER_HEALTH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const SERVER_HEALTH_REQ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Spawn `apollo serve` detached and wait until it answers `/health`.
 ///
 /// `kill_on_drop` is deliberately NOT set: the point is a server that keeps
@@ -1939,18 +1943,19 @@ async fn start_background_server(
     let mut child = cmd.spawn()?;
 
     let health = async {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + SERVER_HEALTH_TIMEOUT;
         loop {
             if server_healthy().await {
                 return Ok(());
             }
             if std::time::Instant::now() > deadline {
                 return Err(anyhow::anyhow!(
-                    "background apollo serve did not become healthy in 30s (see {})",
+                    "background apollo serve did not become healthy in {}s (see {})",
+                    SERVER_HEALTH_TIMEOUT.as_secs(),
                     log_path.display()
                 ));
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(SERVER_HEALTH_POLL_INTERVAL).await;
         }
     };
 
@@ -2168,7 +2173,7 @@ async fn server_healthy() -> bool {
     let url = format!("http://{}/health", apollo::agent_http::http_listen_addr());
     reqwest::Client::new()
         .get(url)
-        .timeout(std::time::Duration::from_millis(500))
+        .timeout(SERVER_HEALTH_REQ_TIMEOUT)
         .send()
         .await
         .map(|r| r.status().is_success())
