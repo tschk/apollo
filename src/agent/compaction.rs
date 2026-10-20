@@ -5,8 +5,8 @@
 //!
 //! Inspired by hermes-agent context_engine.py ABC pattern.
 //!
-//! pontytail: single compactor, no plugin discovery. Trait-based so plugins
-//! can register via the PluginRegistry when multi-engine support is needed.
+//! ponytail: single compactor, no plugin discovery. Trait-based so plugins
+//! register via the PluginRegistry for multi-engine support.
 
 use std::sync::Arc;
 
