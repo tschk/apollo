@@ -35,3 +35,34 @@ fn write_if_missing(path: &Path, content: &str) -> std::io::Result<()> {
     }
     std::fs::write(path, content)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_if_missing_creates_parent_dirs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nested_path = temp_dir
+            .path()
+            .join("some")
+            .join("nested")
+            .join("dir")
+            .join("file.md");
+
+        write_if_missing(&nested_path, "test content").unwrap();
+
+        assert!(nested_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&nested_path).unwrap(),
+            "test content"
+        );
+
+        // Ensure it returns early if existing without modifying the content
+        write_if_missing(&nested_path, "new content").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&nested_path).unwrap(),
+            "test content"
+        );
+    }
+}
