@@ -274,7 +274,7 @@ pub(crate) fn check_config_file(path: &str) -> Check {
 
 fn is_workspace_writable(path: &Path) -> bool {
     let probe = path.join(format!(".apollo-write-test-{}", std::process::id()));
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+    match std::fs::File::create(&probe) {
         Ok(_) => {
             let _ = std::fs::remove_file(probe);
             true
