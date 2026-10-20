@@ -125,3 +125,19 @@ fn update_heartbeat_state(workspace: &Path) {
 }
 
 use chrono::Timelike;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_heartbeat_config_default() {
+        let config = HeartbeatConfig::default();
+        assert_eq!(config.interval_secs, 1800);
+        assert_eq!(config.quiet_start_hour, 23);
+        assert_eq!(config.quiet_end_hour, 8);
+        assert_eq!(config.workspace, PathBuf::from("."));
+        assert_eq!(config.deliver_chat_id, None);
+    }
+}
