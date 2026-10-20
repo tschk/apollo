@@ -27,8 +27,8 @@ use super::traits::IncomingMessage;
 ///
 /// MESSAGE_CONTENT is privileged: it must be enabled on the bot's application
 /// page or Discord closes the connection at IDENTIFY. Without it every
-/// message arrives with empty content, which would look exactly like the
-/// dropped-sender bug this replaced.
+/// message arrives with empty content, which is indistinguishable from a
+/// broken receiver.
 pub const DEFAULT_INTENTS: u64 = (1 << 9) | (1 << 12) | (1 << 15);
 
 /// The public gateway, at the API version apollo speaks.
