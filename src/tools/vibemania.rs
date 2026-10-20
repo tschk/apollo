@@ -123,3 +123,27 @@ impl Tool for VibemaniaTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_vibemania_not_found() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // create a workspace directory inside temp_dir to simulate self.workspace
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+
+        let tool = VibemaniaTool::new(workspace);
+
+        let args = r#"{"goal": "test"}"#;
+        let result = tool.execute(args).await.unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(
+            result.output,
+            "Vibemania not found. Clone/build from atechnology-company/vibemania first."
+        );
+    }
+}
