@@ -135,8 +135,15 @@ mod tests {
         assert_eq!(tool.name(), "vibemania");
         let spec = tool.spec();
         assert_eq!(spec.name, "vibemania");
-        assert!(spec.description.contains("Vibemania for autonomous code exploration"));
-        assert!(spec.parameters.get("properties").unwrap().get("goal").is_some());
+        assert!(spec
+            .description
+            .contains("Vibemania for autonomous code exploration"));
+        assert!(spec
+            .parameters
+            .get("properties")
+            .unwrap()
+            .get("goal")
+            .is_some());
     }
 
     #[tokio::test]
