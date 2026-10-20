@@ -1,7 +1,7 @@
 //! Metric-driven autonomous experimentation.
 //!
 //! Autoresearch is deliberately separate from [`crate::autonomous`]. The
-//! autonomous TODO loop completes one task and validates it; this loop keeps a
+//! autonomous task loop completes one task and validates it; this loop keeps a
 //! measurable objective, accepts only improvements, and resumes from a small
 //! durable ledger.
 
