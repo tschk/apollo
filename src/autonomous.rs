@@ -1,6 +1,6 @@
 //! Autonomous coding mode.
 //!
-//! 24/7 workspace-driven loop: reads TODO.md (or any task ledger),
+//! 24/7 workspace-driven loop: reads the task ledger file,
 //! runs the agent on pending items, validates changes with tests,
 //! and optionally commits/pushes only on success.
 //!
