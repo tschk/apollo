@@ -123,3 +123,76 @@ impl Tool for VibemaniaTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_vibemania_missing_binary() {
+        let dir = tempdir().unwrap();
+        // workspace is dir/workspace
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let tool = VibemaniaTool::new(workspace);
+        let args = r#"{"goal": "test goal"}"#;
+
+        let result = tool.execute(args).await.unwrap();
+        assert!(result.is_error);
+        assert!(result.output.contains("Vibemania not found"));
+    }
+
+    #[tokio::test]
+    async fn test_vibemania_execution_success() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+
+        // Create mock binary at dir/vibemania/target/release/vibemania
+        let bin_dir = dir.path().join("vibemania/target/release");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let bin_path = bin_dir.join("vibemania");
+
+        let script = "#!/bin/bash\necho \"vibemania success\"\n";
+        fs::write(&bin_path, script).unwrap();
+        let mut perms = fs::metadata(&bin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin_path, perms).unwrap();
+
+        let tool = VibemaniaTool::new(workspace);
+        let args = r#"{"goal": "test goal"}"#;
+
+        let result = tool.execute(args).await.unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("vibemania success"));
+    }
+
+    #[tokio::test]
+    async fn test_vibemania_execution_failure() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+
+        // Create mock binary at dir/vibemania/target/release/vibemania
+        let bin_dir = dir.path().join("vibemania/target/release");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let bin_path = bin_dir.join("vibemania");
+
+        let script = "#!/bin/bash\necho \"vibemania error\" >&2\nexit 1\n";
+        fs::write(&bin_path, script).unwrap();
+        let mut perms = fs::metadata(&bin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin_path, perms).unwrap();
+
+        let tool = VibemaniaTool::new(workspace);
+        let args = r#"{"goal": "test goal"}"#;
+
+        let result = tool.execute(args).await.unwrap();
+        assert!(result.is_error);
+        assert!(result.output.contains("vibemania error"));
+    }
+}
