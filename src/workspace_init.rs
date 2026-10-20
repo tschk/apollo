@@ -43,7 +43,11 @@ mod tests {
     #[test]
     fn test_write_if_missing_creates_parent_dirs() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let nested_file_path = temp_dir.path().join("nested").join("dir").join("test_file.txt");
+        let nested_file_path = temp_dir
+            .path()
+            .join("nested")
+            .join("dir")
+            .join("test_file.txt");
 
         // Ensure parent doesn't exist initially
         assert!(!nested_file_path.parent().unwrap().exists());
