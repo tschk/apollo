@@ -27,6 +27,23 @@ impl Default for HeartbeatConfig {
     }
 }
 
+impl HeartbeatConfig {
+    /// Determines whether a given hour falls within the configured quiet hours.
+    /// Handles both overnight (start > end) and daytime (start < end) ranges.
+    pub fn is_quiet_hour(&self, hour: u32) -> bool {
+        if self.quiet_start_hour == self.quiet_end_hour {
+            // No quiet hours if start and end are the same
+            false
+        } else if self.quiet_start_hour > self.quiet_end_hour {
+            // Overnight quiet hours (e.g., 23 to 8)
+            hour >= self.quiet_start_hour || hour < self.quiet_end_hour
+        } else {
+            // Daytime quiet hours (e.g., 10 to 14)
+            hour >= self.quiet_start_hour && hour < self.quiet_end_hour
+        }
+    }
+}
+
 /// Start the heartbeat background task.
 /// Sends synthetic IncomingMessages to the agent loop when HEARTBEAT.md has tasks.
 pub fn start_heartbeat(
@@ -46,7 +63,7 @@ pub fn start_heartbeat(
             // Check quiet hours
             let now = chrono::Local::now();
             let hour = now.hour();
-            if hour >= config.quiet_start_hour || hour < config.quiet_end_hour {
+            if config.is_quiet_hour(hour) {
                 tracing::debug!("Heartbeat: quiet hours ({:02}:00), skipping", hour);
                 continue;
             }
@@ -125,3 +142,55 @@ fn update_heartbeat_state(workspace: &Path) {
 }
 
 use chrono::Timelike;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quiet_hours_overnight() {
+        let config = HeartbeatConfig {
+            quiet_start_hour: 23,
+            quiet_end_hour: 8,
+            ..Default::default()
+        };
+
+        assert!(config.is_quiet_hour(23));
+        assert!(config.is_quiet_hour(0));
+        assert!(config.is_quiet_hour(7));
+
+        assert!(!config.is_quiet_hour(8));
+        assert!(!config.is_quiet_hour(12));
+        assert!(!config.is_quiet_hour(22));
+    }
+
+    #[test]
+    fn test_quiet_hours_daytime() {
+        let config = HeartbeatConfig {
+            quiet_start_hour: 10,
+            quiet_end_hour: 14,
+            ..Default::default()
+        };
+
+        assert!(config.is_quiet_hour(10));
+        assert!(config.is_quiet_hour(12));
+        assert!(config.is_quiet_hour(13));
+
+        assert!(!config.is_quiet_hour(9));
+        assert!(!config.is_quiet_hour(14));
+        assert!(!config.is_quiet_hour(23));
+    }
+
+    #[test]
+    fn test_quiet_hours_none() {
+        let config = HeartbeatConfig {
+            quiet_start_hour: 0,
+            quiet_end_hour: 0,
+            ..Default::default()
+        };
+
+        for hour in 0..24 {
+            assert!(!config.is_quiet_hour(hour));
+        }
+    }
+}
