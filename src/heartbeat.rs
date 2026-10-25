@@ -53,7 +53,7 @@ pub fn start_heartbeat(
 
             // Read HEARTBEAT.md
             let heartbeat_path = config.workspace.join("HEARTBEAT.md");
-            let content = match std::fs::read_to_string(&heartbeat_path) {
+            let content = match tokio::fs::read_to_string(&heartbeat_path).await {
                 Ok(c) => c,
                 Err(_) => continue, // No file = skip
             };
@@ -99,15 +99,15 @@ pub fn start_heartbeat(
                 break;
             }
 
-            update_heartbeat_state(&config.workspace);
+            update_heartbeat_state(&config.workspace).await;
         }
     })
 }
 
-fn update_heartbeat_state(workspace: &Path) {
+async fn update_heartbeat_state(workspace: &Path) {
     let state_path = workspace.join("memory/heartbeat-state.json");
     if let Some(parent) = state_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = tokio::fs::create_dir_all(parent).await;
     }
 
     let now = chrono::Utc::now().timestamp();
@@ -118,10 +118,11 @@ fn update_heartbeat_state(workspace: &Path) {
         }
     });
 
-    let _ = std::fs::write(
+    let _ = tokio::fs::write(
         &state_path,
         serde_json::to_string_pretty(&state).unwrap_or_default(),
-    );
+    )
+    .await;
 }
 
 use chrono::Timelike;
