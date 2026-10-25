@@ -680,4 +680,21 @@ mod tests {
         );
         assert_eq!(mode_name(&AgentMode::Swarm { parallelism: 2 }), "swarm");
     }
+
+    #[test]
+    fn http_listen_addr_uses_custom_port_if_set() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some("8080"), || {
+            assert_eq!(http_listen_addr().port(), 8080);
+        });
+    }
+
+    #[test]
+    fn http_listen_addr_falls_back_to_default_on_missing_or_invalid_port() {
+        temp_env::with_var("APOLLO_HTTP_PORT", None::<&str>, || {
+            assert_eq!(http_listen_addr().port(), 31338);
+        });
+        temp_env::with_var("APOLLO_HTTP_PORT", Some("invalid"), || {
+            assert_eq!(http_listen_addr().port(), 31338);
+        });
+    }
 }
