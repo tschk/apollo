@@ -129,6 +129,13 @@ mod tests {
     }
 
     #[test]
+    fn test_group_memory_key() {
+        assert_eq!(group_memory_key("12345"), "group:12345");
+        assert_eq!(group_memory_key("abc_def"), "group:abc_def");
+        assert_eq!(group_memory_key(""), "group:");
+    }
+
+    #[test]
     fn test_routing_guidance_is_group() {
         let result = routing_guidance(true, "telegram");
         assert!(result.is_some());
@@ -177,9 +184,10 @@ mod tests {
     }
 
     #[test]
-    fn test_group_memory_key() {
-        assert_eq!(group_memory_key("12345"), "group:12345");
-        assert_eq!(group_memory_key("abc_def"), "group:abc_def");
-        assert_eq!(group_memory_key(""), "group:");
+    fn test_transport_policy_prompt() {
+        let prompt = transport_policy_prompt("telegram");
+        assert!(prompt.contains("## Transport policy"));
+        assert!(prompt.contains("Default transport: telegram"));
+        assert!(prompt.contains("Treat the configured transport as a thin adapter"));
     }
 }
