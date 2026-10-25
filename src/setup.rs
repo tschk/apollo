@@ -1,11 +1,8 @@
 //! First-run setup wizard: authentication, model, channel, workspace.
-
-use std::io::Write;
-use std::path::{Path, PathBuf};
-
 use apollo::config::{apply_permission_profile, Config};
 use apollo::providers::defaults::default_model_for_provider;
-
+use std::io::Write;
+use std::path::{Path, PathBuf};
 #[derive(Debug, Default)]
 pub struct InitOptions {
     pub provider: Option<String>,
@@ -21,13 +18,11 @@ pub struct InitOptions {
     pub permission_profile: Option<String>,
     pub force: bool,
 }
-
 struct Auth {
     provider: String,
     api_key: String,
     base_url: Option<String>,
 }
-
 fn read_line(prompt: &str) -> anyhow::Result<String> {
     eprint!("{prompt}");
     std::io::stderr().flush().ok();
@@ -38,7 +33,6 @@ fn read_line(prompt: &str) -> anyhow::Result<String> {
     }
     Ok(buf.trim().to_string())
 }
-
 fn read_with_default(prompt: &str, default: &str) -> anyhow::Result<String> {
     let answer = read_line(&format!("{prompt} [{default}]: "))?;
     if answer.is_empty() {
@@ -47,7 +41,6 @@ fn read_with_default(prompt: &str, default: &str) -> anyhow::Result<String> {
         Ok(answer)
     }
 }
-
 /// Read a credential without echoing it to the terminal.
 ///
 /// The value is never printed back, logged, or included in the summary — only
@@ -65,7 +58,6 @@ fn read_secret(prompt: &str) -> anyhow::Result<String> {
     }
     Ok(buf.trim().to_string())
 }
-
 #[cfg(unix)]
 fn disable_echo() -> Box<dyn FnOnce()> {
     use std::os::unix::io::AsRawFd;
@@ -84,23 +76,19 @@ fn disable_echo() -> Box<dyn FnOnce()> {
         unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original) };
     })
 }
-
 #[cfg(not(unix))]
 fn disable_echo() -> Box<dyn FnOnce()> {
     Box::new(|| {})
 }
-
 #[cfg(unix)]
 fn stdin_is_terminal() -> bool {
     use std::os::unix::io::AsRawFd;
     unsafe { libc::isatty(std::io::stdin().as_raw_fd()) == 1 }
 }
-
 #[cfg(not(unix))]
 fn stdin_is_terminal() -> bool {
     true
 }
-
 fn compiled_in_providers() -> Vec<&'static str> {
     let mut names = vec![
         "cerebras",
@@ -129,7 +117,6 @@ fn compiled_in_providers() -> Vec<&'static str> {
     names.dedup();
     names
 }
-
 fn get_provider_matches<'a>(all: &[&'a str], filter: &str) -> Vec<&'a str> {
     let needle = filter.trim().to_lowercase();
     if needle.is_empty() {
@@ -141,7 +128,6 @@ fn get_provider_matches<'a>(all: &[&'a str], filter: &str) -> Vec<&'a str> {
             .collect()
     }
 }
-
 fn print_provider_matches(matches: &[&str]) {
     if matches.is_empty() {
         println!("  (no matches — try another filter)");
@@ -152,7 +138,6 @@ fn print_provider_matches(matches: &[&str]) {
         }
     }
 }
-
 fn parse_provider_selection(input: &str, matches: &[&str], all: &[&str]) -> Option<String> {
     if input.is_empty() {
         if matches.len() == 1 {
@@ -173,7 +158,6 @@ fn parse_provider_selection(input: &str, matches: &[&str], all: &[&str]) -> Opti
     }
     None
 }
-
 fn prompt_provider_interactive() -> anyhow::Result<String> {
     let all = compiled_in_providers();
     println!("  Choose a provider (type to filter the list, then pick a number or exact name):");
@@ -181,20 +165,16 @@ fn prompt_provider_interactive() -> anyhow::Result<String> {
     loop {
         let matches = get_provider_matches(&all, &filter);
         print_provider_matches(&matches);
-
         let line = read_line("  Filter, #, or exact name (empty = pick if exactly one match): ")?;
         let t = line.trim();
-
         if let Some(selection) = parse_provider_selection(t, &matches, &all) {
             return Ok(selection);
         }
-
         if !t.is_empty() {
             filter = t.to_string();
         }
     }
 }
-
 fn prompt_permission_profile_interactive() -> anyhow::Result<String> {
     println!("\n  Permission profile:");
     println!("    full        — autonomous mode (no plan approval; shell and dynamic tools on)");
@@ -208,7 +188,6 @@ fn prompt_permission_profile_interactive() -> anyhow::Result<String> {
     }
     Ok(s.to_string())
 }
-
 /// The authentication methods this build can actually use, in the order the
 /// wizard offers them.
 fn auth_methods() -> Vec<(&'static str, &'static str)> {
@@ -226,7 +205,6 @@ fn auth_methods() -> Vec<(&'static str, &'static str)> {
         ),
     ]
 }
-
 fn prompt_auth_interactive(default_provider: &str) -> anyhow::Result<Auth> {
     let methods = auth_methods();
     println!("  How should apollo authenticate?\n");
@@ -238,7 +216,6 @@ fn prompt_auth_interactive(default_provider: &str) -> anyhow::Result<Auth> {
         .position(|(id, _)| id.starts_with(default_provider))
         .map(|i| i + 1)
         .unwrap_or(1);
-
     let choice = loop {
         let answer = read_with_default("\n  Choose", &default_index.to_string())?;
         match answer.parse::<usize>() {
@@ -246,7 +223,6 @@ fn prompt_auth_interactive(default_provider: &str) -> anyhow::Result<Auth> {
             _ => println!("  Pick a number between 1 and {}.", methods.len()),
         }
     };
-
     match choice {
         "copilot-oauth" => {
             println!("\n  apollo reuses the GitHub token from your existing Copilot login.");
@@ -282,7 +258,6 @@ fn prompt_auth_interactive(default_provider: &str) -> anyhow::Result<Auth> {
         }
     }
 }
-
 fn prompt_channel_interactive(default_channel: &str) -> anyhow::Result<String> {
     println!("\n  Where should apollo listen?\n");
     println!("    [1] cli       — terminal only (TUI / line chat)");
@@ -303,25 +278,16 @@ fn prompt_channel_interactive(default_channel: &str) -> anyhow::Result<String> {
         }
     }
 }
-
-/// Run the setup wizard and write `apollo.json`, `.env`, `run.sh`, and a user
-/// systemd unit. Returns the path of the config that was written.
-pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
-    println!("🐾 apollo setup\n");
-
-    let existing = Config::load("apollo.json").ok();
-    let interactive = opts.provider.is_none();
-
-    // === Resolve values (flags or interactive prompts) ===
-    let auth = match opts.provider {
+fn resolve_auth(opts: &InitOptions, existing: Option<&Config>) -> anyhow::Result<Auth> {
+    match &opts.provider {
         Some(p) if !p.trim().is_empty() => {
             let provider = p.trim().to_string();
-            let api_key = match opts.api_key {
-                Some(k) => k,
+            let api_key = match &opts.api_key {
+                Some(k) => k.clone(),
                 None if provider == "ollama" => String::new(),
                 None => read_secret(&format!("  API key ({provider}, input hidden): "))?,
             };
-            Auth {
+            Ok(Auth {
                 base_url: if provider == "ollama" {
                     Some("http://localhost:11434".to_string())
                 } else {
@@ -329,45 +295,58 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
                 },
                 provider,
                 api_key,
-            }
+            })
         }
         _ => {
             let default_provider = existing
-                .as_ref()
                 .map(|c| c.provider.name.clone())
                 .unwrap_or_else(|| "chatgpt".to_string());
-            prompt_auth_interactive(&default_provider)?
+            prompt_auth_interactive(&default_provider)
         }
-    };
-    let provider = auth.provider.clone();
-    let api_key = auth.api_key.clone();
-
-    let default_model = default_model_for_provider(&provider)
+    }
+}
+fn resolve_model(
+    opts: &InitOptions,
+    provider: &str,
+    existing: Option<&Config>,
+    interactive: bool,
+) -> anyhow::Result<String> {
+    let default_model = default_model_for_provider(provider)
         .map(|m| m.to_string())
-        .or_else(|| existing.as_ref().map(|c| c.model.clone()))
+        .or_else(|| existing.map(|c| c.model.clone()))
         .unwrap_or_else(|| "gpt-5.5".to_string());
-    let model = match opts.model {
-        Some(m) if !m.trim().is_empty() => m.trim().to_string(),
-        _ if interactive => read_with_default("\n  Model", &default_model)?,
-        _ => default_model,
-    };
-
-    let channel = match opts.channel {
-        Some(c) if !c.trim().is_empty() => c.trim().to_string(),
+    match &opts.model {
+        Some(m) if !m.trim().is_empty() => Ok(m.trim().to_string()),
+        _ if interactive => read_with_default("\n  Model", &default_model),
+        _ => Ok(default_model),
+    }
+}
+fn resolve_channel(
+    opts: &InitOptions,
+    existing: Option<&Config>,
+    interactive: bool,
+) -> anyhow::Result<String> {
+    match &opts.channel {
+        Some(c) if !c.trim().is_empty() => Ok(c.trim().to_string()),
         _ if interactive => {
             let default_channel = existing
-                .as_ref()
                 .map(|c| c.channel.kind.clone())
                 .unwrap_or_else(|| "cli".to_string());
-            prompt_channel_interactive(&default_channel)?
+            prompt_channel_interactive(&default_channel)
         }
-        _ => "cli".to_string(),
-    };
-
-    // Channel-specific tokens
+        _ => Ok("cli".to_string()),
+    }
+}
+struct ChannelTokens {
+    tg_token: Option<String>,
+    tg_chat_id: Option<String>,
+    dc_token: Option<String>,
+    dc_channel: Option<String>,
+}
+fn resolve_channel_tokens(opts: &InitOptions, channel: &str) -> anyhow::Result<ChannelTokens> {
     let tg_token = if channel == "telegram" {
-        match opts.telegram_token {
-            Some(t) => Some(t),
+        match &opts.telegram_token {
+            Some(t) => Some(t.clone()),
             None => {
                 let t = read_secret("  Telegram bot token (input hidden): ")?;
                 if t.is_empty() {
@@ -378,12 +357,11 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
             }
         }
     } else {
-        opts.telegram_token
+        opts.telegram_token.clone()
     };
-
     let tg_chat_id = if channel == "telegram" {
-        match opts.telegram_chat_id {
-            Some(c) => Some(c),
+        match &opts.telegram_chat_id {
+            Some(c) => Some(c.clone()),
             None => {
                 let c = read_line("  Telegram chat ID: ")?;
                 if c.is_empty() {
@@ -394,12 +372,11 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
             }
         }
     } else {
-        opts.telegram_chat_id
+        opts.telegram_chat_id.clone()
     };
-
     let dc_token = if channel == "discord" {
-        match opts.discord_token {
-            Some(t) => Some(t),
+        match &opts.discord_token {
+            Some(t) => Some(t.clone()),
             None => {
                 let t = read_secret("  Discord bot token (input hidden): ")?;
                 if t.is_empty() {
@@ -413,8 +390,8 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
         None
     };
     let dc_channel = if channel == "discord" {
-        match opts.discord_channel_id {
-            Some(c) => Some(c),
+        match &opts.discord_channel_id {
+            Some(c) => Some(c.clone()),
             None => {
                 let c = read_line("  Discord channel ID: ")?;
                 if c.is_empty() {
@@ -427,7 +404,6 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
     } else {
         None
     };
-
     if channel == "telegram" && tg_token.is_none() {
         anyhow::bail!("Telegram channel requires a bot token (use --telegram-token or enter it when prompted)");
     }
@@ -436,41 +412,33 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
             "Discord channel requires a bot token (use --discord-token or enter it when prompted)"
         );
     }
-
+    Ok(ChannelTokens {
+        tg_token,
+        tg_chat_id,
+        dc_token,
+        dc_channel,
+    })
+}
+fn resolve_workspace(
+    opts: &InitOptions,
+    existing: Option<&Config>,
+    interactive: bool,
+) -> anyhow::Result<PathBuf> {
     let default_workspace = existing
-        .as_ref()
         .map(|c| c.workspace.clone())
         .unwrap_or_else(|| PathBuf::from("."));
-    let workspace = match opts.workspace {
-        Some(w) => w,
-        None if interactive => PathBuf::from(read_with_default(
+    match &opts.workspace {
+        Some(w) => Ok(w.clone()),
+        None if interactive => Ok(PathBuf::from(read_with_default(
             "\n  Workspace directory",
             &default_workspace.display().to_string(),
-        )?),
-        None => default_workspace,
-    };
-    std::fs::create_dir_all(&workspace)?;
-
-    let permission_profile = match opts.permission_profile {
-        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
-        Some(_) | None => prompt_permission_profile_interactive()?,
-    };
-
-    let config_path = workspace.join("apollo.json");
-    if config_path.exists() && !opts.force {
-        let answer = read_with_default(
-            &format!("\n  {} already exists. Overwrite?", config_path.display()),
-            "n",
-        )?;
-        if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
-            println!("  Left the existing config in place.");
-            return Ok(config_path);
-        }
+        )?)),
+        None => Ok(default_workspace),
     }
-
-    // === Validate ===
+}
+async fn validate_credentials(provider: &str, auth: &Auth, api_key: &str, tg_token: Option<&str>) {
     let client = reqwest::Client::new();
-    match provider.as_str() {
+    match provider {
         "ollama" => {
             print!("\n  Validating Ollama... ");
             let base_url = auth.base_url.as_deref().unwrap_or("http://localhost:11434");
@@ -485,7 +453,7 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
             print!("\n  Validating API key... ");
             let auth_resp = client
                 .get("https://api.openai.com/v1/models")
-                .bearer_auth(&api_key)
+                .bearer_auth(api_key)
                 .send()
                 .await;
             match auth_resp {
@@ -502,8 +470,7 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
         }
         _ => {}
     }
-
-    if let Some(ref token) = tg_token {
+    if let Some(token) = tg_token {
         print!("  Validating Telegram token... ");
         let tg_resp = client
             .get(format!("https://api.telegram.org/bot{}/getMe", token))
@@ -522,8 +489,18 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
             Err(e) => println!("❌ {}", e),
         }
     }
-
-    // === Write .env ===
+}
+#[allow(clippy::too_many_arguments)]
+fn write_env_file(
+    workspace: &Path,
+    provider: &str,
+    auth: &Auth,
+    api_key: &str,
+    tg_token: Option<&str>,
+    tg_chat_id: Option<&str>,
+    dc_token: Option<&str>,
+    dc_channel: Option<&str>,
+) -> anyhow::Result<PathBuf> {
     let env_path = workspace.join(".env");
     let mut env_content = String::new();
     if provider == "ollama" {
@@ -538,71 +515,85 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
     } else {
         env_content.push_str(&format!("OPENAI_API_KEY=\"{}\"\n", api_key));
     }
-    if let Some(ref t) = tg_token {
+    if let Some(t) = tg_token {
         env_content.push_str(&format!("APOLLO_TELEGRAM_TOKEN=\"{}\"\n", t));
     }
-    if let Some(ref c) = tg_chat_id {
+    if let Some(c) = tg_chat_id {
         env_content.push_str(&format!("APOLLO_CHAT_ID=\"{}\"\n", c));
     }
-    if let Some(ref t) = dc_token {
+    if let Some(t) = dc_token {
         env_content.push_str(&format!("APOLLO_DISCORD_TOKEN=\"{}\"\n", t));
     }
-    if let Some(ref c) = dc_channel {
+    if let Some(c) = dc_channel {
         env_content.push_str(&format!("APOLLO_DISCORD_CHANNEL=\"{}\"\n", c));
     }
     write_private(&env_path, &env_content)?;
-
-    // === Write config ===
+    Ok(env_path)
+}
+#[allow(clippy::too_many_arguments)]
+fn write_config_file(
+    config_path: &Path,
+    workspace: &Path,
+    existing: Option<Config>,
+    provider: &str,
+    auth: &Auth,
+    channel: &str,
+    tg_chat_id: Option<&str>,
+    model: &str,
+    permission_profile: &str,
+) -> anyhow::Result<Config> {
     let mut cfg = existing.unwrap_or_else(Config::default_config);
-    cfg.provider.name = provider.clone();
+    cfg.provider.name = provider.to_string();
     cfg.provider.api_key = None; // Secrets stay in .env
     cfg.provider.base_url = auth.base_url.clone();
-    cfg.channel.kind = channel.clone();
+    cfg.channel.kind = channel.to_string();
     cfg.channel.token = None;
-    if let Some(ref c) = tg_chat_id {
-        if !cfg.channel.allowed_chat_ids.contains(c) {
-            cfg.channel.allowed_chat_ids.push(c.clone());
+    if let Some(c) = tg_chat_id {
+        if !cfg.channel.allowed_chat_ids.contains(&c.to_string()) {
+            cfg.channel.allowed_chat_ids.push(c.to_string());
         }
     }
-    cfg.workspace = workspace.clone();
+    cfg.workspace = workspace.to_path_buf();
     if provider == "ollama" && cfg.embeddings.provider == "noop" {
         cfg.embeddings.enabled = true;
         cfg.embeddings.provider = "ollama".to_string();
         cfg.embeddings.model = Some("nomic-embed-text".to_string());
         cfg.embeddings.base_url = auth.base_url.clone();
     }
-    cfg.model = model.clone();
-    apply_permission_profile(&mut cfg, &permission_profile);
+    cfg.model = model.to_string();
+    apply_permission_profile(&mut cfg, permission_profile);
     let json = serde_json::to_string_pretty(&cfg)?;
     // The sandbox classifies apollo.json as a credential file, so it must not
     // be written world-readable.
-    write_private(&config_path, &json)?;
-
-    // === Write systemd service ===
+    write_private(config_path, &json)?;
+    Ok(cfg)
+}
+fn write_systemd_service(
+    workspace: &Path,
+    env_path: &Path,
+    channel: &str,
+    tg_token: Option<&str>,
+    tg_chat_id: Option<&str>,
+    model: &str,
+) -> anyhow::Result<()> {
     let bin_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("apollo"));
     let service_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".config/systemd/user");
     std::fs::create_dir_all(&service_dir)?;
-
-    // Every value here reaches a shell, and a workspace path with a space in
-    // it is legitimate — so quote rather than filter.
     use apollo::escape::shell_argument as sh;
     let mut exec_args = format!(
         "{} chat --channel {}",
         sh(&bin_path.display().to_string()),
-        sh(&channel)
+        sh(channel)
     );
     if tg_token.is_some() {
-        // The token stays in APOLLO_TELEGRAM_TOKEN, sourced from .env above:
-        // an argv value is visible in `ps` to every local user.
         exec_args.push_str(&format!(
             " --telegram-chat-id {}",
-            sh(tg_chat_id.as_deref().unwrap_or("0"))
+            sh(tg_chat_id.unwrap_or("0"))
         ));
     }
-    exec_args.push_str(&format!(" --model {}", sh(&model)));
-
+    exec_args.push_str(&format!(" --model {}", sh(model)));
     let run_script = format!(
         "#!/bin/bash\nset -a\nsource {}\nset +a\nexport RUST_LOG=info\ncd {}\nexec {}\n",
         sh(&env_path.display().to_string()),
@@ -616,18 +607,73 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&run_path, std::fs::Permissions::from_mode(0o755))?;
     }
-
     let service = format!(
-        "[Unit]\nDescription=apollo AI agent\nAfter=network-online.target\n\n\
-                [Service]\nType=simple\nExecStart={}\nRestart=always\nRestartSec=5\n\
-                WorkingDirectory={}\nStandardOutput=append:/tmp/apollo.log\n\
-                StandardError=append:/tmp/apollo.log\n\n\
-                [Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=apollo AI agent\nAfter=network-online.target\n\n                [Service]\nType=simple\nExecStart={}\nRestart=always\nRestartSec=5\n                WorkingDirectory={}\nStandardOutput=append:/tmp/apollo.log\n                StandardError=append:/tmp/apollo.log\n\n                [Install]\nWantedBy=default.target\n",
         apollo::escape::systemd_argument(&run_path.display().to_string())?,
         apollo::escape::systemd_argument(&workspace.display().to_string())?
     );
     std::fs::write(service_dir.join("apollo.service"), &service)?;
-
+    Ok(())
+}
+/// Run the setup wizard and write `apollo.json`, `.env`, `run.sh`, and a user
+/// systemd unit. Returns the path of the config that was written.
+pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
+    println!("🐾 apollo setup\n");
+    let existing = Config::load("apollo.json").ok();
+    let interactive = opts.provider.is_none();
+    let auth = resolve_auth(&opts, existing.as_ref())?;
+    let provider = auth.provider.clone();
+    let api_key = auth.api_key.clone();
+    let model = resolve_model(&opts, &provider, existing.as_ref(), interactive)?;
+    let channel = resolve_channel(&opts, existing.as_ref(), interactive)?;
+    let tokens = resolve_channel_tokens(&opts, &channel)?;
+    let workspace = resolve_workspace(&opts, existing.as_ref(), interactive)?;
+    std::fs::create_dir_all(&workspace)?;
+    let permission_profile = match &opts.permission_profile {
+        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+        Some(_) | None => prompt_permission_profile_interactive()?,
+    };
+    let config_path = workspace.join("apollo.json");
+    if config_path.exists() && !opts.force {
+        let answer = read_with_default(
+            &format!("\n  {} already exists. Overwrite?", config_path.display()),
+            "n",
+        )?;
+        if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("  Left the existing config in place.");
+            return Ok(config_path);
+        }
+    }
+    validate_credentials(&provider, &auth, &api_key, tokens.tg_token.as_deref()).await;
+    let env_path = write_env_file(
+        &workspace,
+        &provider,
+        &auth,
+        &api_key,
+        tokens.tg_token.as_deref(),
+        tokens.tg_chat_id.as_deref(),
+        tokens.dc_token.as_deref(),
+        tokens.dc_channel.as_deref(),
+    )?;
+    let cfg = write_config_file(
+        &config_path,
+        &workspace,
+        existing,
+        &provider,
+        &auth,
+        &channel,
+        tokens.tg_chat_id.as_deref(),
+        &model,
+        &permission_profile,
+    )?;
+    write_systemd_service(
+        &workspace,
+        &env_path,
+        &channel,
+        tokens.tg_token.as_deref(),
+        tokens.tg_chat_id.as_deref(),
+        &model,
+    )?;
     // === Summary ===
     println!("\n✅ Setup complete!\n");
     println!("  Provider:  {}", cfg.provider.name);
@@ -645,7 +691,6 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
     println!("    systemctl --user daemon-reload");
     println!("    systemctl --user enable --now apollo");
     println!("    journalctl --user -u apollo -f");
-
     // === Auto-start ===
     if opts.start {
         println!("\n  Starting...");
@@ -657,15 +702,12 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
             .status();
         println!("  🐾 apollo is running!");
     }
-
     Ok(config_path)
 }
-
 /// Write a secrets file readable only by its owner.
 fn write_private(path: &Path, content: &str) -> anyhow::Result<()> {
     apollo::fs_secure::write_secret_file(path, content)
 }
-
 /// Run the wizard when there is no config yet, so a bare `apollo` sets itself
 /// up instead of failing on a missing file.
 pub async fn ensure_config(path: &str) -> anyhow::Result<()> {
@@ -682,11 +724,9 @@ pub async fn ensure_config(path: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn provider_selection_accepts_index_and_name() {
         let all = ["ollama", "openai"];
@@ -710,7 +750,6 @@ mod tests {
             None
         );
     }
-
     #[test]
     fn every_offered_auth_method_is_recognized() {
         for (id, label) in auth_methods() {
