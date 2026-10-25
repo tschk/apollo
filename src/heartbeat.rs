@@ -202,15 +202,28 @@ mod tests {
 
         let state_path = dir.path().join("memory/heartbeat-state.json");
 
-        // Wait a brief moment for the async I/O to complete since it occurs after the send
+        // Since tokio::time::pause is active, real time sleep does not yield properly to the executor.
+        // We use tokio::task::yield_now() to allow the spawned task to complete its I/O.
+        // We do this in a loop to ensure it has time to create the dir and write the file, and that it's not empty.
         let mut retries = 0;
-        while !state_path.exists() && retries < 10 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let mut state_str = String::new();
+        while retries < 50 {
+            tokio::task::yield_now().await;
+            tokio::time::advance(std::time::Duration::from_millis(10)).await;
+            if state_path.exists() {
+                if let Ok(s) = std::fs::read_to_string(&state_path) {
+                    if !s.is_empty() {
+                        state_str = s;
+                        break;
+                    }
+                }
+            }
             retries += 1;
         }
-        assert!(state_path.exists());
-
-        let state_str = std::fs::read_to_string(&state_path).unwrap();
+        assert!(
+            !state_str.is_empty(),
+            "state file should be written and not empty"
+        );
         let state: serde_json::Value = serde_json::from_str(&state_str).unwrap();
         assert!(state.get("lastHeartbeat").is_some());
 
