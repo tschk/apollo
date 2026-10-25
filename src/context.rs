@@ -139,6 +139,14 @@ mod tests {
     }
 
     #[test]
+    fn test_plugin_layer_policy_prompt() {
+        let result = plugin_layer_policy_prompt();
+        assert!(result.contains("## Plugin layer policy"));
+        assert!(result.contains("Treat live functionality as a plugin layer on top of core."));
+        assert!(result.contains("Keep plugin-specific configuration isolated from core defaults"));
+    }
+
+    #[test]
     fn test_is_assistant_topic_empty() {
         assert!(!is_assistant_topic(""));
         assert!(!is_assistant_topic("   "));
