@@ -99,9 +99,10 @@ mod tests {
     #[test]
     fn systemd_quoting_keeps_a_hostile_path_in_one_argument() {
         let hostile = "/tmp/ws\nExecStartPost=/bin/sh -c evil";
-        assert!(
-            systemd_argument(hostile).is_err(),
-            "newline must be refused"
+        let err = systemd_argument(hostile).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "refusing to write a systemd unit: the path contains a line break, which no unit file can represent. Move apollo to a path without one."
         );
 
         let quoted = systemd_argument("/tmp/ws \" --evil").unwrap();
