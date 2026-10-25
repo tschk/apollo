@@ -175,4 +175,11 @@ mod tests {
         assert!(!is_assistant_topic("let's grab some coffee"));
         assert!(!is_assistant_topic("random chat message"));
     }
+
+    #[test]
+    fn test_group_memory_key() {
+        assert_eq!(super::group_memory_key("12345"), "group:12345");
+        assert_eq!(super::group_memory_key("chat_abc"), "group:chat_abc");
+        assert_eq!(super::group_memory_key(""), "group:");
+    }
 }
