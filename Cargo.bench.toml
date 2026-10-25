@@ -1,0 +1,9 @@
+[package]
+name = "bench_heartbeat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+chrono = "0.4"
+serde_json = "1.0"
