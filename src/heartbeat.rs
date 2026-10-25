@@ -166,7 +166,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_heartbeat_sends_task() {
-        pause();
+        tokio::time::pause();
         let dir = tempdir().unwrap();
         let config = HeartbeatConfig {
             interval_secs: 10,
@@ -202,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_heartbeat_ignores_comments_and_empty_lines() {
-        pause();
+        tokio::time::pause();
         let dir = tempdir().unwrap();
         let config = HeartbeatConfig {
             interval_secs: 10,
@@ -231,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_heartbeat_respects_quiet_hours() {
-        pause();
+        tokio::time::pause();
         let dir = tempdir().unwrap();
 
         let current_hour = chrono::Local::now().hour();
