@@ -129,6 +129,14 @@ mod tests {
     }
 
     #[test]
+    fn test_transport_policy_prompt() {
+        let result = transport_policy_prompt("telegram");
+        assert!(result.contains("## Transport policy"));
+        assert!(result.contains("Default transport: telegram"));
+        assert!(result.contains("Treat the configured transport as a thin adapter"));
+    }
+
+    #[test]
     fn test_routing_guidance_is_group() {
         let result = routing_guidance(true, "telegram");
         assert!(result.is_some());
