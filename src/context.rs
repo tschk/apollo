@@ -175,4 +175,12 @@ mod tests {
         assert!(!is_assistant_topic("let's grab some coffee"));
         assert!(!is_assistant_topic("random chat message"));
     }
+
+    #[test]
+    fn test_plugin_layer_policy_prompt() {
+        let result = plugin_layer_policy_prompt();
+        assert!(result.contains("## Plugin layer policy"));
+        assert!(result.contains("Treat live functionality as a plugin layer on top of core."));
+        assert!(result.contains("Keep plugin-specific configuration isolated from core defaults"));
+    }
 }
