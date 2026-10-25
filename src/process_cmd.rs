@@ -98,10 +98,15 @@ mod tests {
     async fn a_timed_out_command_is_killed_not_left_running() {
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("still-alive");
+        let sync = tmp.path().join("sync");
         let script = tmp.path().join("hold.sh");
         std::fs::write(
             &script,
-            format!("#!/bin/sh\nsleep 3\ntouch '{}'\n", marker.display()),
+            format!(
+                "#!/bin/sh\nwhile [ ! -f '{}' ]; do sleep 0.1; done\ntouch '{}'\n",
+                sync.display(),
+                marker.display()
+            ),
         )
         .unwrap();
         #[cfg(unix)]
@@ -114,7 +119,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("timed out"), "got: {err}");
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        std::fs::write(&sync, "").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(
             !marker.exists(),
             "the killed command must not have kept running to completion"
