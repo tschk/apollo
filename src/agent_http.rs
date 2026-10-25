@@ -230,11 +230,14 @@ pub fn load_or_create_token() -> anyhow::Result<String> {
 /// Compare in constant time, so a caller cannot learn the token byte by byte
 /// from how long a rejection takes.
 fn secret_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    use sha2::{Digest, Sha256};
+    let hash_a = Sha256::digest(a.as_bytes());
+    let hash_b = Sha256::digest(b.as_bytes());
+    hash_a
+        .iter()
+        .zip(hash_b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 fn check_auth(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
