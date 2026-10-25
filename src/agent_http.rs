@@ -555,6 +555,31 @@ mod tests {
     use super::*;
     use axum::http::{header, HeaderMap, HeaderValue};
 
+    #[test]
+    fn token_path_uses_home_when_set() {
+        temp_env::with_var("HOME", Some("/mock/home"), || {
+            let path = token_path().unwrap();
+            assert_eq!(
+                path,
+                std::path::PathBuf::from("/mock/home/.apollo/http-token")
+            );
+        });
+    }
+
+    #[test]
+    fn token_path_returns_none_when_home_is_empty() {
+        temp_env::with_var("HOME", Some(""), || {
+            assert!(token_path().is_none());
+        });
+    }
+
+    #[test]
+    fn token_path_returns_none_when_home_is_unset() {
+        temp_env::with_var("HOME", None::<String>, || {
+            assert!(token_path().is_none());
+        });
+    }
+
     fn headers(pairs: &[(header::HeaderName, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
         for (name, value) in pairs {
