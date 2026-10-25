@@ -86,6 +86,40 @@ mod tests {
     }
 
     #[test]
+    fn test_write_if_missing_creates_parent_dirs() {
+        let dir = tempdir().unwrap();
+        let nested_path = dir.path().join("nested").join("dir").join("test.txt");
+        let content = "test content";
+
+        assert!(!nested_path.exists());
+
+        write_if_missing(&nested_path, content).unwrap();
+
+        assert!(nested_path.exists());
+        assert_eq!(std::fs::read_to_string(&nested_path).unwrap(), content);
+    }
+
+    #[test]
+    fn test_write_if_missing_does_not_overwrite() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let initial_content = "initial content";
+        let new_content = "new content";
+
+        // Create the file first
+        std::fs::write(&file_path, initial_content).unwrap();
+
+        // Attempt to write using write_if_missing
+        write_if_missing(&file_path, new_content).unwrap();
+
+        // Verify the file content remains unchanged
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            initial_content
+        );
+    }
+
+    #[test]
     fn test_ensure_workspace_kit_does_not_overwrite() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
