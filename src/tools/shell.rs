@@ -463,13 +463,14 @@ mod tests {
     async fn a_timed_out_command_is_killed_not_left_running() {
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("still-alive");
+        let sync = tmp.path().join("sync");
         let tool = super::ShellTool::new(
             tmp.path().to_path_buf(),
             std::sync::Arc::new(crate::policy::ExecutionPolicy::default()),
         )
         .with_confine(crate::tools::confine::ConfinePolicy::host());
         let args = serde_json::json!({
-            "command": format!("sleep 3; touch {}", marker.display()),
+            "command": format!("while [ ! -f '{}' ]; do sleep 0.1; done; touch {}", sync.display(), marker.display()),
             "timeout": 1,
         })
         .to_string();
@@ -479,7 +480,8 @@ mod tests {
             "got: {}",
             result.output
         );
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        std::fs::write(&sync, "").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(
             !marker.exists(),
             "the killed command must not have kept running to completion"

@@ -77,7 +77,9 @@ impl Tool for McpTool {
             *client_guard = Some(new_client);
         }
 
-        let client = client_guard.as_mut().unwrap();
+        let client = client_guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Codex client not initialized"))?;
 
         match args.action.as_str() {
             "run" => {

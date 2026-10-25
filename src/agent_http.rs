@@ -555,6 +555,31 @@ mod tests {
     use super::*;
     use axum::http::{header, HeaderMap, HeaderValue};
 
+    #[test]
+    fn token_path_uses_home_when_set() {
+        temp_env::with_var("HOME", Some("/mock/home"), || {
+            let path = token_path().unwrap();
+            assert_eq!(
+                path,
+                std::path::PathBuf::from("/mock/home/.apollo/http-token")
+            );
+        });
+    }
+
+    #[test]
+    fn token_path_returns_none_when_home_is_empty() {
+        temp_env::with_var("HOME", Some(""), || {
+            assert!(token_path().is_none());
+        });
+    }
+
+    #[test]
+    fn token_path_returns_none_when_home_is_unset() {
+        temp_env::with_var("HOME", None::<String>, || {
+            assert!(token_path().is_none());
+        });
+    }
+
     fn headers(pairs: &[(header::HeaderName, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
         for (name, value) in pairs {
@@ -602,6 +627,36 @@ mod tests {
     #[test]
     fn requests_without_an_origin_pass_the_browser_check() {
         assert!(reject_browser_origin(&headers(&[])).is_ok());
+    }
+
+    #[test]
+    fn authorize_checks_both_gates() {
+        // Set the token if it hasn't been set by another test
+        let _ = HTTP_TOKEN.set("s3cret".to_string());
+
+        // Missing auth and no origin: fails auth check
+        assert_eq!(authorize(&headers(&[])), Err(StatusCode::UNAUTHORIZED));
+
+        // Missing auth and has origin: fails browser origin check first
+        assert_eq!(
+            authorize(&headers(&[(header::ORIGIN, "https://evil.example")])),
+            Err(StatusCode::FORBIDDEN)
+        );
+
+        // Valid auth but has origin: fails browser origin check
+        assert_eq!(
+            authorize(&headers(&[
+                (header::AUTHORIZATION, "Bearer s3cret"),
+                (header::ORIGIN, "https://evil.example")
+            ])),
+            Err(StatusCode::FORBIDDEN)
+        );
+
+        // Valid auth and no origin: passes both gates
+        assert_eq!(
+            authorize(&headers(&[(header::AUTHORIZATION, "Bearer s3cret")])),
+            Ok(())
+        );
     }
 
     #[test]
@@ -679,5 +734,29 @@ mod tests {
             "coding"
         );
         assert_eq!(mode_name(&AgentMode::Swarm { parallelism: 2 }), "swarm");
+    }
+
+    #[test]
+    fn http_listen_addr_uses_default_port_when_env_var_is_absent() {
+        temp_env::with_var("APOLLO_HTTP_PORT", None::<&str>, || {
+            let addr = http_listen_addr();
+            assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 31338)));
+        });
+    }
+
+    #[test]
+    fn http_listen_addr_uses_custom_port_from_env_var() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some("8080"), || {
+            let addr = http_listen_addr();
+            assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 8080)));
+        });
+    }
+
+    #[test]
+    fn http_listen_addr_falls_back_to_default_on_invalid_env_var() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some("invalid_port"), || {
+            let addr = http_listen_addr();
+            assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 31338)));
+        });
     }
 }

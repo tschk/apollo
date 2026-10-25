@@ -139,6 +139,14 @@ mod tests {
     }
 
     #[test]
+    fn test_plugin_layer_policy_prompt() {
+        let result = plugin_layer_policy_prompt();
+        assert!(result.contains("## Plugin layer policy"));
+        assert!(result.contains("Treat live functionality as a plugin layer on top of core."));
+        assert!(result.contains("Keep plugin-specific configuration isolated from core defaults"));
+    }
+
+    #[test]
     fn test_is_assistant_topic_empty() {
         assert!(!is_assistant_topic(""));
         assert!(!is_assistant_topic("   "));
@@ -177,10 +185,10 @@ mod tests {
     }
 
     #[test]
-    fn test_plugin_layer_policy_prompt() {
-        let result = plugin_layer_policy_prompt();
-        assert!(result.contains("## Plugin layer policy"));
-        assert!(result.contains("Treat live functionality as a plugin layer on top of core."));
-        assert!(result.contains("Keep plugin-specific configuration isolated from core defaults"));
+    fn test_transport_policy_prompt() {
+        let prompt = transport_policy_prompt("telegram");
+        assert!(prompt.contains("## Transport policy"));
+        assert!(prompt.contains("Default transport: telegram"));
+        assert!(prompt.contains("Treat the configured transport as a thin adapter"));
     }
 }
