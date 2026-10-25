@@ -110,10 +110,10 @@ impl AutonomousLoop {
             .unwrap_or_else(AutonomousStatus::new)
     }
 
-    fn save_status_to_file(status: &AutonomousStatus, path: &Path) {
+    async fn save_status_to_file(status: &AutonomousStatus, path: &Path) {
         match toml::to_string_pretty(status) {
             Ok(content) => {
-                if let Err(e) = std::fs::write(path, &content) {
+                if let Err(e) = tokio::fs::write(path, &content).await {
                     tracing::warn!("[autonomous] failed to save status: {}", e);
                 }
             }
@@ -121,17 +121,17 @@ impl AutonomousLoop {
         }
     }
 
-    pub fn start_fresh(&mut self) {
+    pub async fn start_fresh(&mut self) {
         self.status = AutonomousStatus::new();
-        Self::save_status_to_file(&self.status, &self.status_path);
+        Self::save_status_to_file(&self.status, &self.status_path).await;
     }
 
-    pub fn resume(&mut self) {
+    pub async fn resume(&mut self) {
         self.status.paused = false;
         if self.status.state == AutonomousState::Paused {
             self.status.state = AutonomousState::Idle;
         }
-        Self::save_status_to_file(&self.status, &self.status_path);
+        Self::save_status_to_file(&self.status, &self.status_path).await;
     }
 
     /// Start the autonomous loop. Runs indefinitely.
@@ -162,14 +162,14 @@ impl AutonomousLoop {
             Err(e) => {
                 tracing::debug!("[autonomous] no TODO.md ({}), skipping", e);
                 self.status.state = AutonomousState::Idle;
-                Self::save_status_to_file(&self.status, &self.status_path);
+                Self::save_status_to_file(&self.status, &self.status_path).await;
                 return;
             }
         };
 
         if todo_content.is_empty() || todo_content == "## Implemented\n\n## Pending\n" {
             self.status.state = AutonomousState::Idle;
-            Self::save_status_to_file(&self.status, &self.status_path);
+            Self::save_status_to_file(&self.status, &self.status_path).await;
             return;
         }
 
@@ -187,7 +187,7 @@ impl AutonomousLoop {
 
         self.status.state = AutonomousState::Running;
         self.status.current_task = Some("processing TODO.md".into());
-        Self::save_status_to_file(&self.status, &self.status_path);
+        Self::save_status_to_file(&self.status, &self.status_path).await;
 
         tracing::info!("[autonomous] running agent on TODO.md");
         let instruction = format!(
@@ -276,7 +276,7 @@ impl AutonomousLoop {
             }
         }
 
-        Self::save_status_to_file(&self.status, &self.status_path);
+        Self::save_status_to_file(&self.status, &self.status_path).await;
     }
 }
 
@@ -363,8 +363,8 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_status_persistence() {
+    #[tokio::test]
+    async fn test_status_persistence() {
         let dir = tempdir().unwrap();
         let config = AutonomousConfig {
             status_path: "test-status.toml".into(),
@@ -374,17 +374,19 @@ mod tests {
         assert_eq!(aloop.status.state, AutonomousState::Idle);
 
         // Save should create file
-        AutonomousLoop::save_status_to_file(&aloop.status, &dir.path().join("test-status.toml"));
+        AutonomousLoop::save_status_to_file(&aloop.status, &dir.path().join("test-status.toml"))
+            .await;
         let path = dir.path().join("test-status.toml");
         assert!(path.exists());
 
         // Test again
-        AutonomousLoop::save_status_to_file(&aloop.status, &dir.path().join("test-status.toml"));
+        AutonomousLoop::save_status_to_file(&aloop.status, &dir.path().join("test-status.toml"))
+            .await;
         assert!(path.exists());
     }
 
-    #[test]
-    fn test_status_roundtrip() {
+    #[tokio::test]
+    async fn test_status_roundtrip() {
         let dir = tempdir().unwrap();
         let config = AutonomousConfig {
             status_path: "test-status.toml".into(),
@@ -393,7 +395,8 @@ mod tests {
 
         // First creation
         let aloop = AutonomousLoop::new(config.clone(), dir.path().to_path_buf());
-        AutonomousLoop::save_status_to_file(&aloop.status, &dir.path().join("test-status.toml"));
+        AutonomousLoop::save_status_to_file(&aloop.status, &dir.path().join("test-status.toml"))
+            .await;
 
         // Second creation should load saved state
         let aloop2 = AutonomousLoop::new(config, dir.path().to_path_buf());

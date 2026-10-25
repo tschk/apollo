@@ -1564,9 +1564,9 @@ async fn main() -> anyhow::Result<()> {
 
             let mut autonomous_loop = AutonomousLoop::new(autonomous_config, workspace.clone());
             if start {
-                autonomous_loop.start_fresh();
+                autonomous_loop.start_fresh().await;
             } else if resume {
-                autonomous_loop.resume();
+                autonomous_loop.resume().await;
             }
 
             println!(
