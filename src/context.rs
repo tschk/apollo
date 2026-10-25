@@ -175,4 +175,22 @@ mod tests {
         assert!(!is_assistant_topic("let's grab some coffee"));
         assert!(!is_assistant_topic("random chat message"));
     }
+
+    #[test]
+    fn test_group_memory_prompt() {
+        // Normal summary
+        let prompt = group_memory_prompt("chat123", "Here is a summary.");
+        assert!(prompt.contains("Chat: chat123"));
+        assert!(prompt.ends_with("Here is a summary."));
+
+        // Summary with leading and trailing whitespaces
+        let prompt2 = group_memory_prompt("chat456", "   Spaced out summary.   \n");
+        assert!(prompt2.contains("Chat: chat456"));
+        assert!(prompt2.ends_with("Spaced out summary."));
+
+        // Empty summary
+        let prompt3 = group_memory_prompt("chat789", "   ");
+        assert!(prompt3.contains("Chat: chat789"));
+        assert!(prompt3.ends_with("\n\n")); // ends with the newlines
+    }
 }
