@@ -106,7 +106,7 @@ boxlite = []
 rx4 = { version = "0.7.2", default-features = false, features = ["providers", "skills", "graph-memory"] }
 
 # Async runtime (optimized features only)
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process", "io-std", "rt"] }
 async-trait = "0.1"
 futures-util = "0.3"
 

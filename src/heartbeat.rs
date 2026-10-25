@@ -53,7 +53,7 @@ pub fn start_heartbeat(
 
             // Read HEARTBEAT.md
             let heartbeat_path = config.workspace.join("HEARTBEAT.md");
-            let content = match std::fs::read_to_string(&heartbeat_path) {
+            let content = match tokio::fs::read_to_string(&heartbeat_path).await {
                 Ok(c) => c,
                 Err(_) => continue, // No file = skip
             };
