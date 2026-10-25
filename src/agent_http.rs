@@ -605,6 +605,27 @@ mod tests {
     }
 
     #[test]
+    fn authorize_requires_both_a_valid_token_and_no_origin() {
+        let token = HTTP_TOKEN.get_or_init(|| "s3cret".to_string());
+        let auth = format!("Bearer {token}");
+
+        let h_valid = headers(&[(header::AUTHORIZATION, auth.as_str())]);
+        assert_eq!(authorize(&h_valid), Ok(()));
+
+        let h_origin = headers(&[
+            (header::AUTHORIZATION, auth.as_str()),
+            (header::ORIGIN, "https://evil.example"),
+        ]);
+        assert_eq!(authorize(&h_origin), Err(StatusCode::FORBIDDEN));
+
+        let h_no_token = headers(&[]);
+        assert_eq!(authorize(&h_no_token), Err(StatusCode::UNAUTHORIZED));
+
+        let h_invalid_token = headers(&[(header::AUTHORIZATION, "Bearer wrong")]);
+        assert_eq!(authorize(&h_invalid_token), Err(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
     fn a_model_request_needs_only_the_model_field() {
         let body: ModelRequestBody = serde_json::from_str(r#"{"model":"claude-opus-4"}"#).unwrap();
         assert_eq!(body.model, "claude-opus-4");
