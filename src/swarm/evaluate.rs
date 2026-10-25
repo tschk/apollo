@@ -177,7 +177,7 @@ pub async fn evaluate_loop(
                 .partial_cmp(&b.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .unwrap();
+        .ok_or_else(|| anyhow::anyhow!("No evaluation rounds completed"))?;
 
     Ok(EvalResult {
         final_output: best.output.clone(),
