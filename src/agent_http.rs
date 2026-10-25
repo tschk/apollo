@@ -680,4 +680,31 @@ mod tests {
         );
         assert_eq!(mode_name(&AgentMode::Swarm { parallelism: 2 }), "swarm");
     }
+
+    #[test]
+    fn http_listen_addr_defaults_to_31338() {
+        temp_env::with_var("APOLLO_HTTP_PORT", None::<String>, || {
+            let addr = http_listen_addr();
+            assert_eq!(addr.port(), 31338);
+            assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        });
+    }
+
+    #[test]
+    fn http_listen_addr_uses_configured_valid_port() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some("8080"), || {
+            let addr = http_listen_addr();
+            assert_eq!(addr.port(), 8080);
+            assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        });
+    }
+
+    #[test]
+    fn http_listen_addr_falls_back_to_default_on_invalid_port() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some("not_a_port"), || {
+            let addr = http_listen_addr();
+            assert_eq!(addr.port(), 31338);
+            assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        });
+    }
 }
