@@ -62,7 +62,6 @@ pub enum AutonomousState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutonomousStatus {
     pub state: AutonomousState,
-    pub current_task: Option<String>,
     pub last_run: Option<String>,
     pub last_result: Option<String>,
     pub consecutive_failures: usize,
@@ -73,7 +72,6 @@ impl AutonomousStatus {
     fn new() -> Self {
         Self {
             state: AutonomousState::Idle,
-            current_task: None,
             last_run: None,
             last_result: None,
             consecutive_failures: 0,
@@ -186,7 +184,6 @@ impl AutonomousLoop {
         }
 
         self.status.state = AutonomousState::Running;
-        self.status.current_task = Some("processing TODO.md".into());
         Self::save_status_to_file(&self.status, &self.status_path);
 
         tracing::info!("[autonomous] running agent on TODO.md");
