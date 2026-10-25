@@ -1935,7 +1935,20 @@ async fn start_background_server(
     // Keep the server's own diagnostics: a bad config is the usual failure and
     // discarding stderr leaves nothing to report.
     let log_path = std::env::temp_dir().join("apollo-serve.log");
-    let log = std::fs::File::create(&log_path)?;
+    let _ = std::fs::remove_file(&log_path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // `create_new` refuses an existing file or symlink, so a path we could not
+    // remove (for example another user's file in a shared /tmp) is an error.
+    use anyhow::Context as _;
+    let log = options
+        .open(&log_path)
+        .with_context(|| format!("could not create server log {}", log_path.display()))?;
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(log));
