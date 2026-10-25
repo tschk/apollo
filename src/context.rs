@@ -123,6 +123,58 @@ pub fn group_memory_prompt(chat_id: &str, summary: &str) -> String {
 mod tests {
     use super::*;
 
+    fn create_msg(is_group: bool, text: &str) -> IncomingMessage {
+        IncomingMessage {
+            id: "1".into(),
+            sender_id: "2".into(),
+            sender_name: None,
+            chat_id: "3".into(),
+            text: text.into(),
+            is_group,
+            reply_to: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_should_respond_not_group() {
+        let msg = create_msg(false, "random text");
+        assert!(should_respond(&msg));
+    }
+
+    #[test]
+    fn test_should_respond_empty_text() {
+        let msg = create_msg(true, "   ");
+        assert!(!should_respond(&msg));
+    }
+
+    #[test]
+    fn test_should_respond_command() {
+        let msg1 = create_msg(true, "/help");
+        assert!(should_respond(&msg1));
+
+        let msg2 = create_msg(true, "!status");
+        assert!(should_respond(&msg2));
+    }
+
+    #[test]
+    fn test_should_respond_direct_mention() {
+        let msg = create_msg(true, "hey @apollo can you help?");
+        assert!(should_respond(&msg));
+    }
+
+    #[test]
+    fn test_should_respond_assistant_topic() {
+        let msg = create_msg(true, "what can you do?");
+        assert!(should_respond(&msg));
+    }
+
+    #[test]
+    fn test_should_respond_no_match() {
+        let msg = create_msg(true, "I went to the store today");
+        assert!(!should_respond(&msg));
+    }
+
     #[test]
     fn test_routing_guidance_not_group() {
         assert_eq!(routing_guidance(false, "telegram"), None);
