@@ -175,4 +175,19 @@ mod tests {
         assert!(!is_assistant_topic("let's grab some coffee"));
         assert!(!is_assistant_topic("random chat message"));
     }
+
+    #[test]
+    fn test_group_memory_prompt() {
+        let chat_id = "12345";
+        let summary = "  Summary of the chat.  \n";
+        let prompt = group_memory_prompt(chat_id, summary);
+        assert!(prompt.contains("## Rolling group memory"));
+        assert!(prompt.contains("Chat: 12345"));
+        assert!(prompt.contains("Summary of the chat."));
+        assert!(!prompt.ends_with('\n'));
+        assert_eq!(
+            prompt,
+            "## Rolling group memory\nChat: 12345\n\nSummary of the chat."
+        );
+    }
 }
