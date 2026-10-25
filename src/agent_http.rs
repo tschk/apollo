@@ -680,4 +680,29 @@ mod tests {
         );
         assert_eq!(mode_name(&AgentMode::Swarm { parallelism: 2 }), "swarm");
     }
+
+    #[test]
+    fn token_path_returns_expected_path_when_home_is_set() {
+        temp_env::with_var("HOME", Some("/fake/home"), || {
+            let path = token_path().unwrap();
+            assert_eq!(
+                path,
+                std::path::PathBuf::from("/fake/home/.apollo/http-token")
+            );
+        });
+    }
+
+    #[test]
+    fn token_path_returns_none_when_home_is_empty() {
+        temp_env::with_var("HOME", Some(""), || {
+            assert!(token_path().is_none());
+        });
+    }
+
+    #[test]
+    fn token_path_returns_none_when_home_is_unset() {
+        temp_env::with_var("HOME", None::<String>, || {
+            assert!(token_path().is_none());
+        });
+    }
 }
