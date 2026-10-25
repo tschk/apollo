@@ -323,6 +323,128 @@ mod tests {
         handle.abort();
     }
 
+    #[test]
+    fn test_update_heartbeat_state() {
+        let dir = tempdir().unwrap();
+        update_heartbeat_state(dir.path());
+
+        let state_path = dir.path().join("memory/heartbeat-state.json");
+        assert!(state_path.exists());
+
+        let content = std::fs::read_to_string(&state_path).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(state.get("lastHeartbeat").is_some());
+        assert!(state
+            .get("lastChecks")
+            .and_then(|c| c.get("heartbeat"))
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_start_heartbeat_no_file() {
+        let dir = tempdir().unwrap();
+        let config = HeartbeatConfig {
+            interval_secs: 1,
+            quiet_start_hour: 24, // Never quiet
+            quiet_end_hour: 0,
+            workspace: dir.path().to_path_buf(),
+            deliver_chat_id: None,
+        };
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = start_heartbeat(config, tx);
+
+        // Wait for first interval to tick
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // Should not receive anything
+        assert!(rx.try_recv().is_err());
+
+        // Clean shutdown
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_start_heartbeat_empty_or_comments() {
+        let dir = tempdir().unwrap();
+        let heartbeat_path = dir.path().join("HEARTBEAT.md");
+        std::fs::write(
+            &heartbeat_path,
+            "# Just a comment\n// Another comment\n\n   \n",
+        )
+        .unwrap();
+
+        let config = HeartbeatConfig {
+            interval_secs: 1,
+            quiet_start_hour: 24,
+            quiet_end_hour: 0,
+            workspace: dir.path().to_path_buf(),
+            deliver_chat_id: None,
+        };
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = start_heartbeat(config, tx);
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(rx.try_recv().is_err());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_start_heartbeat_with_tasks() {
+        let dir = tempdir().unwrap();
+        let heartbeat_path = dir.path().join("HEARTBEAT.md");
+        std::fs::write(&heartbeat_path, "Do some work").unwrap();
+
+        let config = HeartbeatConfig {
+            interval_secs: 1,
+            quiet_start_hour: 24,
+            quiet_end_hour: 0,
+            workspace: dir.path().to_path_buf(),
+            deliver_chat_id: Some("custom_chat".to_string()),
+        };
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = start_heartbeat(config, tx);
+
+        let msg = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timeout waiting for message")
+            .expect("channel closed");
+
+        assert_eq!(msg.chat_id, "custom_chat");
+        assert!(msg.text.contains("Do some work"));
+        assert!(msg.text.contains("Read HEARTBEAT.md"));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_start_heartbeat_quiet_hours() {
+        let dir = tempdir().unwrap();
+        let heartbeat_path = dir.path().join("HEARTBEAT.md");
+        std::fs::write(&heartbeat_path, "Do some work").unwrap();
+
+        let config = HeartbeatConfig {
+            interval_secs: 1,
+            quiet_start_hour: 0, // Always quiet
+            quiet_end_hour: 24,
+            workspace: dir.path().to_path_buf(),
+            deliver_chat_id: None,
+        };
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = start_heartbeat(config, tx);
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // Quiet hours should skip sending
+        assert!(rx.try_recv().is_err());
+
+        handle.abort();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_heartbeat_quiet_hours() {
         let dir = tempdir().unwrap();
