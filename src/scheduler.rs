@@ -193,4 +193,29 @@ mod tests {
         let schedules = scheduler.list().await;
         assert!(schedules[0].enabled);
     }
+
+    #[tokio::test]
+    async fn test_schedule_priority_edge_cases() {
+        let scheduler = Scheduler::new();
+
+        // Min priority
+        let id1 = scheduler
+            .schedule("0 0 9 * * * *", "min_prio", 0)
+            .await
+            .unwrap();
+
+        // Max priority
+        let id2 = scheduler
+            .schedule("0 0 10 * * * *", "max_prio", 255)
+            .await
+            .unwrap();
+
+        let schedules = scheduler.list().await;
+
+        let sched1 = schedules.iter().find(|s| s.id == id1).unwrap();
+        assert_eq!(sched1.priority, 0);
+
+        let sched2 = schedules.iter().find(|s| s.id == id2).unwrap();
+        assert_eq!(sched2.priority, 255);
+    }
 }
