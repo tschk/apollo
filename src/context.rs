@@ -175,4 +175,12 @@ mod tests {
         assert!(!is_assistant_topic("let's grab some coffee"));
         assert!(!is_assistant_topic("random chat message"));
     }
+
+    #[test]
+    fn test_transport_policy_prompt() {
+        let prompt = transport_policy_prompt("telegram");
+        assert!(prompt.contains("## Transport policy"));
+        assert!(prompt.contains("Default transport: telegram"));
+        assert!(prompt.contains("Treat the configured transport as a thin adapter"));
+    }
 }
