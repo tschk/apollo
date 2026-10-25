@@ -146,6 +146,30 @@ mod tests {
     }
 
     #[test]
+    fn test_group_memory_prompt_normal() {
+        let result = group_memory_prompt("chat123", "User said hello.");
+        assert_eq!(
+            result,
+            "## Rolling group memory\nChat: chat123\n\nUser said hello."
+        );
+    }
+
+    #[test]
+    fn test_group_memory_prompt_trimming() {
+        let result = group_memory_prompt("chat456", "  \n  Lots of spaces  \n ");
+        assert_eq!(
+            result,
+            "## Rolling group memory\nChat: chat456\n\nLots of spaces"
+        );
+    }
+
+    #[test]
+    fn test_group_memory_prompt_empty_summary() {
+        let result = group_memory_prompt("chat789", "   ");
+        assert_eq!(result, "## Rolling group memory\nChat: chat789\n\n");
+    }
+
+    #[test]
     fn test_is_assistant_topic_matches_group_keywords() {
         // exact matches
         assert!(is_assistant_topic("apollo"));
@@ -177,26 +201,10 @@ mod tests {
     }
 
     #[test]
-    fn test_group_memory_prompt_normal() {
-        let result = group_memory_prompt("chat123", "User said hello.");
-        assert_eq!(
-            result,
-            "## Rolling group memory\nChat: chat123\n\nUser said hello."
-        );
-    }
-
-    #[test]
-    fn test_group_memory_prompt_trimming() {
-        let result = group_memory_prompt("chat456", "  \n  Lots of spaces  \n ");
-        assert_eq!(
-            result,
-            "## Rolling group memory\nChat: chat456\n\nLots of spaces"
-        );
-    }
-
-    #[test]
-    fn test_group_memory_prompt_empty_summary() {
-        let result = group_memory_prompt("chat789", "   ");
-        assert_eq!(result, "## Rolling group memory\nChat: chat789\n\n");
+    fn test_transport_policy_prompt() {
+        let prompt = transport_policy_prompt("telegram");
+        assert!(prompt.contains("## Transport policy"));
+        assert!(prompt.contains("Default transport: telegram"));
+        assert!(prompt.contains("Treat the configured transport as a thin adapter"));
     }
 }
