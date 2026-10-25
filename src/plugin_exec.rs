@@ -231,4 +231,43 @@ mod tests {
         let err = tools[0].execute("{}").await.unwrap_err().to_string();
         assert!(err.contains("failed to start"), "{err}");
     }
+
+    #[test]
+    fn build_with_no_tools_returns_empty() {
+        let mut entry = entry_with_tool("hermes:good", "/bin/echo", &[]);
+        entry.tools.clear();
+        assert!(HostPluginToolAdapter::build(&entry, &["hermes:good".into()]).is_empty());
+    }
+
+    #[test]
+    fn build_multiple_tools() {
+        let mut entry = entry_with_tool("hermes:good", "/bin/echo", &[]);
+        entry.tools.push(HostPluginTool {
+            name: "echoer2".into(),
+            description: "echoes 2".into(),
+            command: "/bin/echo".into(),
+            args: vec![],
+        });
+        let tools = HostPluginToolAdapter::build(&entry, &["hermes:good".into()]);
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name(), "echoer");
+        assert_eq!(tools[1].name(), "echoer2");
+    }
+
+    #[test]
+    fn build_cwd_fallback() {
+        let mut entry = entry_with_tool("hermes:good", "/bin/echo", &[]);
+        // Setting path to "/" ensures parent() returns None
+        entry.path = std::path::PathBuf::from("/");
+        let tools = HostPluginToolAdapter::build(&entry, &["hermes:good".into()]);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].cwd, std::path::PathBuf::from("."));
+    }
+
+    #[test]
+    fn build_untrusted_plugin_returns_empty() {
+        let entry = entry_with_tool("hermes:untrusted", "/bin/echo", &[]);
+        let tools = HostPluginToolAdapter::build(&entry, &["hermes:other".into()]);
+        assert!(tools.is_empty());
+    }
 }
