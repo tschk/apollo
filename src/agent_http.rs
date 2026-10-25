@@ -564,6 +564,30 @@ mod tests {
     }
 
     #[test]
+    fn http_listen_addr_uses_default_when_env_not_set() {
+        temp_env::with_var("APOLLO_HTTP_PORT", None::<String>, || {
+            let addr = http_listen_addr();
+            assert_eq!(addr.port(), 31338);
+        });
+    }
+
+    #[test]
+    fn http_listen_addr_uses_default_when_env_is_invalid() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some("invalid"), || {
+            let addr = http_listen_addr();
+            assert_eq!(addr.port(), 31338);
+        });
+    }
+
+    #[test]
+    fn http_listen_addr_uses_env_when_set_and_valid() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some("12345"), || {
+            let addr = http_listen_addr();
+            assert_eq!(addr.port(), 12345);
+        });
+    }
+
+    #[test]
     fn secret_eq_matches_only_identical_secrets() {
         assert!(secret_eq("abc", "abc"));
         assert!(!secret_eq("abc", "abd"));
