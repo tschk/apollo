@@ -175,4 +175,28 @@ mod tests {
         assert!(!is_assistant_topic("let's grab some coffee"));
         assert!(!is_assistant_topic("random chat message"));
     }
+
+    #[test]
+    fn test_group_memory_prompt_normal() {
+        let result = group_memory_prompt("chat123", "User said hello.");
+        assert_eq!(
+            result,
+            "## Rolling group memory\nChat: chat123\n\nUser said hello."
+        );
+    }
+
+    #[test]
+    fn test_group_memory_prompt_trimming() {
+        let result = group_memory_prompt("chat456", "  \n  Lots of spaces  \n ");
+        assert_eq!(
+            result,
+            "## Rolling group memory\nChat: chat456\n\nLots of spaces"
+        );
+    }
+
+    #[test]
+    fn test_group_memory_prompt_empty_summary() {
+        let result = group_memory_prompt("chat789", "   ");
+        assert_eq!(result, "## Rolling group memory\nChat: chat789\n\n");
+    }
 }
