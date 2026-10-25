@@ -123,3 +123,104 @@ impl Tool for VibemaniaTool {
         })
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+
+    use super::*;
+    use crate::tools::traits::Tool;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn missing_binary_returns_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace = temp_dir.path().join("workspace");
+
+        let tool = VibemaniaTool::new(workspace);
+
+        let args = serde_json::json!({
+            "goal": "do something"
+        })
+        .to_string();
+
+        let result = tool.execute(&args).await.unwrap();
+
+        assert!(result.is_error);
+        assert!(result.output.contains("Vibemania not found"));
+    }
+
+    #[tokio::test]
+    async fn successful_execution_returns_stdout() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let bin_dir = workspace.parent().unwrap().join("vibemania/target/release");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let bin_path = bin_dir.join("vibemania");
+
+        let script = r#"#!/bin/sh
+printf "Success: %s" "$*"
+"#;
+        std::fs::write(&bin_path, script).unwrap();
+
+        let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin_path, perms).unwrap();
+
+        let tool = VibemaniaTool::new(workspace);
+
+        let args = serde_json::json!({
+            "goal": "do something",
+            "parallel": 4,
+            "orchestrator_model": "heavy-model",
+            "runner_model": "fast-model"
+        })
+        .to_string();
+
+        let result = tool.execute(&args).await.unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.output.starts_with("Success: run --parallel 4"));
+        assert!(result.output.contains("--orchestrator-model heavy-model"));
+        assert!(result.output.contains("--runner-model fast-model"));
+        assert!(result.output.contains("-- do something"));
+    }
+
+    #[tokio::test]
+    async fn failed_execution_returns_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let bin_dir = workspace.parent().unwrap().join("vibemania/target/release");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let bin_path = bin_dir.join("vibemania");
+
+        let script = r#"#!/bin/sh
+echo "Some output"
+echo "Some error" >&2
+false
+"#;
+        std::fs::write(&bin_path, script).unwrap();
+
+        let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin_path, perms).unwrap();
+
+        let tool = VibemaniaTool::new(workspace);
+
+        let args = serde_json::json!({
+            "goal": "do something"
+        })
+        .to_string();
+
+        let result = tool.execute(&args).await.unwrap();
+
+        assert!(result.is_error);
+        let text = result.output;
+        assert!(text.contains("stdout:\nSome output\n\n\nstderr:\nSome error\n"));
+    }
+}
