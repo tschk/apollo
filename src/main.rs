@@ -1940,7 +1940,12 @@ async fn start_background_server(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let log = options.open(&log_path)?;
+    // `create_new` refuses an existing file or symlink, so a path we could not
+    // remove (for example another user's file in a shared /tmp) is an error.
+    use anyhow::Context as _;
+    let log = options
+        .open(&log_path)
+        .with_context(|| format!("could not create server log {}", log_path.display()))?;
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(log));
