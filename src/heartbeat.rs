@@ -217,7 +217,7 @@ mod tests {
         let state_path = dir.path().join("memory/heartbeat-state.json");
         assert!(state_path.exists());
 
-        let content = fs::read_to_string(&state_path).unwrap();
+        let content = std::fs::read_to_string(&state_path).unwrap();
         let state: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(state.get("lastHeartbeat").is_some());
         assert!(state
@@ -254,7 +254,7 @@ mod tests {
     async fn test_start_heartbeat_empty_or_comments() {
         let dir = tempdir().unwrap();
         let heartbeat_path = dir.path().join("HEARTBEAT.md");
-        fs::write(
+        std::fs::write(
             &heartbeat_path,
             "# Just a comment\n// Another comment\n\n   \n",
         )
@@ -281,7 +281,7 @@ mod tests {
     async fn test_start_heartbeat_with_tasks() {
         let dir = tempdir().unwrap();
         let heartbeat_path = dir.path().join("HEARTBEAT.md");
-        fs::write(&heartbeat_path, "Do some work").unwrap();
+        std::fs::write(&heartbeat_path, "Do some work").unwrap();
 
         let config = HeartbeatConfig {
             interval_secs: 1,
@@ -310,7 +310,7 @@ mod tests {
     async fn test_start_heartbeat_quiet_hours() {
         let dir = tempdir().unwrap();
         let heartbeat_path = dir.path().join("HEARTBEAT.md");
-        fs::write(&heartbeat_path, "Do some work").unwrap();
+        std::fs::write(&heartbeat_path, "Do some work").unwrap();
 
         let config = HeartbeatConfig {
             interval_secs: 1,
