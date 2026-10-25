@@ -253,18 +253,12 @@ impl DelegationManager {
 
     /// Sync in-memory counts with storage (call on startup)
     pub async fn sync_counts(&self) -> Result<()> {
-        let agents = self.storage.list_all_agents().await?;
+        let delegations = self.storage.list_all_active_delegations().await?;
         let mut counts = self.active_counts.write().await;
         *counts = ActiveCounts::new();
 
-        for agent in &agents {
-            let delegations = self
-                .storage
-                .list_active_delegations(&agent.agent_id)
-                .await?;
-            for d in delegations {
-                counts.increment(&d.source_agent_id, &d.target_agent_id);
-            }
+        for d in delegations {
+            counts.increment(&d.source_agent_id, &d.target_agent_id);
         }
 
         Ok(())
