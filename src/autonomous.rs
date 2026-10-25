@@ -157,7 +157,7 @@ impl AutonomousLoop {
 
         // Read the task ledger
         let todo_path = self.workspace.join(&self.config.todo_path);
-        let todo_content = match std::fs::read_to_string(&todo_path) {
+        let todo_content = match tokio::fs::read_to_string(&todo_path).await {
             Ok(c) => c.trim().to_string(),
             Err(e) => {
                 tracing::debug!("[autonomous] no TODO.md ({}), skipping", e);
