@@ -113,7 +113,10 @@ mod tests {
         write_if_missing(&file_path, new_content).unwrap();
 
         // Verify the file content remains unchanged
-        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), initial_content);
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            initial_content
+        );
     }
 
     #[test]
