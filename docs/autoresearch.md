@@ -9,7 +9,7 @@ Create `.apollo/autoresearch.toml` in the workspace:
 
 ```toml
 objective = "Reduce warm startup latency"
-metric_command = "./measure-startup.sh"
+metric_command = "cargo bench --bench startup -- --output-format json | jq -r .median_ms"
 direction = "minimize"
 validation_command = "cargo test --workspace --all-features"
 validation_retries = 2
@@ -28,10 +28,7 @@ apollo autoresearch --workspace . --resume
 ```
 
 The metric command must print at least one finite numeric value. Commands in
-the specification are executed as direct binaries (not through a shell). If
-your command requires shell features like pipelines, operators (`&&`, `|`), or
-redirection, you must wrap them in an executable shell script (e.g., `./measure-startup.sh`)
-and specify the script path. Commands are trusted local code; do not use a
+the specification are trusted local code and run through `sh -c`; do not use a
 specification copied from an untrusted source. The workspace must be clean at
 startup. Rejected iterations are restored to their checkpoint; ignored
 configuration/state files are restored to their pre-iteration contents, and
