@@ -27,8 +27,7 @@ use super::traits::IncomingMessage;
 ///
 /// MESSAGE_CONTENT is privileged: it must be enabled on the bot's application
 /// page or Discord closes the connection at IDENTIFY. Without it every
-/// message arrives with empty content, which would look exactly like the
-/// dropped-sender bug this replaced.
+/// message arrives with empty content.
 pub const DEFAULT_INTENTS: u64 = (1 << 9) | (1 << 12) | (1 << 15);
 
 /// The public gateway, at the API version apollo speaks.
@@ -124,8 +123,15 @@ async fn run_once(
             // event stream is deliberately ignored.
             Some(0) if payload["t"].as_str() == Some("MESSAGE_CREATE") => {
                 if let Some(incoming) = parse_message_create(&payload["d"]) {
-                    if tx.send(incoming).await.is_err() {
-                        break Ok(());
+                    match tx.try_send(incoming) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break Ok(()),
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(incoming)) => {
+                            let tx = tx.clone();
+                            tokio::spawn(async move {
+                                let _ = tx.send(incoming).await;
+                            });
+                        }
                     }
                 }
             }
