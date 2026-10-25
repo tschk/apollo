@@ -1,13 +1,13 @@
 //! Autonomous coding mode.
 //!
-//! 24/7 workspace-driven loop: reads task ledger,
+//! 24/7 workspace-driven loop: reads TODO.md (or any task ledger),
 //! runs the agent on pending items, validates changes with tests,
 //! and optionally commits/pushes only on success.
 //!
 //! Port from hermes-rs `autonomous.rs`.
 //!
 //! ponytail: single-workspace, sequential. Parallel workspace support
-//! per Hermes-RS pattern is currently not implemented.
+//! per Hermes-RS pattern can be added when multi-repo management is needed.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -5,7 +5,8 @@
 //!
 //! Port from hermes-rs `trajectory.rs`.
 //!
-//! ponytail: JSON file output only. Parquet/Arrow is not supported currently.
+//! ponytail: JSON file output only. Parquet/Arrow can be added when
+//! large-scale training pipelines need direct export.
 
 use std::collections::HashMap;
 #[cfg(unix)]
