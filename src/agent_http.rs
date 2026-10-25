@@ -605,6 +605,36 @@ mod tests {
     }
 
     #[test]
+    fn authorize_checks_both_gates() {
+        // Set the token if it hasn't been set by another test
+        let _ = HTTP_TOKEN.set("s3cret".to_string());
+
+        // Missing auth and no origin: fails auth check
+        assert_eq!(authorize(&headers(&[])), Err(StatusCode::UNAUTHORIZED));
+
+        // Missing auth and has origin: fails browser origin check first
+        assert_eq!(
+            authorize(&headers(&[(header::ORIGIN, "https://evil.example")])),
+            Err(StatusCode::FORBIDDEN)
+        );
+
+        // Valid auth but has origin: fails browser origin check
+        assert_eq!(
+            authorize(&headers(&[
+                (header::AUTHORIZATION, "Bearer s3cret"),
+                (header::ORIGIN, "https://evil.example")
+            ])),
+            Err(StatusCode::FORBIDDEN)
+        );
+
+        // Valid auth and no origin: passes both gates
+        assert_eq!(
+            authorize(&headers(&[(header::AUTHORIZATION, "Bearer s3cret")])),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn a_model_request_needs_only_the_model_field() {
         let body: ModelRequestBody = serde_json::from_str(r#"{"model":"claude-opus-4"}"#).unwrap();
         assert_eq!(body.model, "claude-opus-4");
