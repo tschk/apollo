@@ -168,6 +168,7 @@ rs_ai = { version = "0.2.31", optional = true }
 rs_ai_core = { version = "0.2.31", optional = true }
 rs_ai_providers = { version = "0.2.31", optional = true, features = ["chatgpt", "gemini", "openai-compatible", "xai", "cloudflare", "claude", "cohere", "voyage"] }
 rs_ai_oauth = { version = "0.2.31", optional = true, default-features = false }
+tower-http = { version = "0.7.1", features = ["cors"] }
 
 [dev-dependencies]
 axum = "0.8"

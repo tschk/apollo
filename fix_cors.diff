@@ -1,0 +1,8 @@
+<<<<<<< SEARCH
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any);
+=======
+        let cors = CorsLayer::new();
+>>>>>>> REPLACE

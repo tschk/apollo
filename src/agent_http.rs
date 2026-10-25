@@ -9,6 +9,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tower_http::cors::CorsLayer;
 
 use crate::agent::stream::AgentStreamEvent;
 use crate::agent::AgentRunner;
@@ -286,6 +287,8 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) -> tokio::task::JoinHandle<()
         }
     }
     tokio::spawn(async move {
+        let cors = CorsLayer::new();
+
         let app = Router::new()
             .route("/health", get(|| async { "ok" }))
             .route("/v1/chat", post(chat_handler))
@@ -294,7 +297,8 @@ pub fn spawn_http_server(runner: Arc<AgentRunner>) -> tokio::task::JoinHandle<()
             .route("/v1/model", post(model_handler))
             .route("/v1/clear", post(clear_handler))
             .route("/shutdown", post(shutdown_handler))
-            .with_state(runner);
+            .with_state(runner)
+            .layer(cors);
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
