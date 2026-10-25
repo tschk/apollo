@@ -175,4 +175,12 @@ mod tests {
         assert!(!is_assistant_topic("let's grab some coffee"));
         assert!(!is_assistant_topic("random chat message"));
     }
+
+    #[test]
+    fn test_transport_policy_prompt() {
+        let result = transport_policy_prompt("mock-transport");
+        assert!(result.contains("## Transport policy"));
+        assert!(result.contains("Default transport: mock-transport"));
+        assert!(result.contains("Treat the configured transport as a thin adapter"));
+    }
 }
