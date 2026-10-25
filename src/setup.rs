@@ -306,18 +306,17 @@ fn prompt_channel_interactive(default_channel: &str) -> anyhow::Result<String> {
 
 /// Run the setup wizard and write `apollo.json`, `.env`, `run.sh`, and a user
 /// systemd unit. Returns the path of the config that was written.
-pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
-    println!("🐾 apollo setup\n");
 
-    let existing = Config::load("apollo.json").ok();
-    let interactive = opts.provider.is_none();
-
-    // === Resolve values (flags or interactive prompts) ===
-    let auth = match opts.provider {
+fn resolve_auth(
+    opts: &InitOptions,
+    existing: Option<&Config>,
+    _interactive: bool,
+) -> anyhow::Result<Auth> {
+    let auth = match &opts.provider {
         Some(p) if !p.trim().is_empty() => {
             let provider = p.trim().to_string();
-            let api_key = match opts.api_key {
-                Some(k) => k,
+            let api_key = match &opts.api_key {
+                Some(k) => k.clone(),
                 None if provider == "ollama" => String::new(),
                 None => read_secret(&format!("  API key ({provider}, input hidden): "))?,
             };
@@ -333,41 +332,66 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
         }
         _ => {
             let default_provider = existing
-                .as_ref()
                 .map(|c| c.provider.name.clone())
                 .unwrap_or_else(|| "chatgpt".to_string());
             prompt_auth_interactive(&default_provider)?
         }
     };
-    let provider = auth.provider.clone();
-    let api_key = auth.api_key.clone();
+    Ok(auth)
+}
 
-    let default_model = default_model_for_provider(&provider)
+fn resolve_model(
+    opts: &InitOptions,
+    existing: Option<&Config>,
+    provider: &str,
+    interactive: bool,
+) -> anyhow::Result<String> {
+    let default_model = default_model_for_provider(provider)
         .map(|m| m.to_string())
-        .or_else(|| existing.as_ref().map(|c| c.model.clone()))
+        .or_else(|| existing.map(|c| c.model.clone()))
         .unwrap_or_else(|| "gpt-5.5".to_string());
-    let model = match opts.model {
+    let model = match &opts.model {
         Some(m) if !m.trim().is_empty() => m.trim().to_string(),
-        _ if interactive => read_with_default("\n  Model", &default_model)?,
+        _ if interactive => read_with_default(
+            "
+  Model",
+            &default_model,
+        )?,
         _ => default_model,
     };
+    Ok(model)
+}
 
-    let channel = match opts.channel {
+fn resolve_channel(
+    opts: &InitOptions,
+    existing: Option<&Config>,
+    interactive: bool,
+) -> anyhow::Result<String> {
+    let channel = match &opts.channel {
         Some(c) if !c.trim().is_empty() => c.trim().to_string(),
         _ if interactive => {
             let default_channel = existing
-                .as_ref()
                 .map(|c| c.channel.kind.clone())
                 .unwrap_or_else(|| "cli".to_string());
             prompt_channel_interactive(&default_channel)?
         }
         _ => "cli".to_string(),
     };
+    Ok(channel)
+}
 
-    // Channel-specific tokens
+fn resolve_channel_tokens(
+    opts: &InitOptions,
+    channel: &str,
+) -> anyhow::Result<(
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+)> {
     let tg_token = if channel == "telegram" {
-        match opts.telegram_token {
-            Some(t) => Some(t),
+        match &opts.telegram_token {
+            Some(t) => Some(t.clone()),
             None => {
                 let t = read_secret("  Telegram bot token (input hidden): ")?;
                 if t.is_empty() {
@@ -378,12 +402,12 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
             }
         }
     } else {
-        opts.telegram_token
+        opts.telegram_token.clone()
     };
 
     let tg_chat_id = if channel == "telegram" {
-        match opts.telegram_chat_id {
-            Some(c) => Some(c),
+        match &opts.telegram_chat_id {
+            Some(c) => Some(c.clone()),
             None => {
                 let c = read_line("  Telegram chat ID: ")?;
                 if c.is_empty() {
@@ -394,12 +418,12 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
             }
         }
     } else {
-        opts.telegram_chat_id
+        opts.telegram_chat_id.clone()
     };
 
     let dc_token = if channel == "discord" {
-        match opts.discord_token {
-            Some(t) => Some(t),
+        match &opts.discord_token {
+            Some(t) => Some(t.clone()),
             None => {
                 let t = read_secret("  Discord bot token (input hidden): ")?;
                 if t.is_empty() {
@@ -413,8 +437,8 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
         None
     };
     let dc_channel = if channel == "discord" {
-        match opts.discord_channel_id {
-            Some(c) => Some(c),
+        match &opts.discord_channel_id {
+            Some(c) => Some(c.clone()),
             None => {
                 let c = read_line("  Discord channel ID: ")?;
                 if c.is_empty() {
@@ -436,6 +460,92 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
             "Discord channel requires a bot token (use --discord-token or enter it when prompted)"
         );
     }
+
+    Ok((tg_token, tg_chat_id, dc_token, dc_channel))
+}
+
+async fn validate_provider_and_channel(
+    provider: &str,
+    auth: &Auth,
+    api_key: &str,
+    tg_token: Option<&String>,
+) {
+    let client = reqwest::Client::new();
+    match provider {
+        "ollama" => {
+            print!(
+                "
+  Validating Ollama... "
+            );
+            let base_url = auth.base_url.as_deref().unwrap_or("http://localhost:11434");
+            let resp = client.get(format!("{}/api/tags", base_url)).send().await;
+            match resp {
+                Ok(r) if r.status().is_success() => println!("✅"),
+                Ok(r) => println!("⚠️  HTTP {} from local Ollama", r.status()),
+                Err(e) => println!("❌ {}", e),
+            }
+        }
+        "openai" => {
+            print!(
+                "
+  Validating API key... "
+            );
+            let auth_resp = client
+                .get("https://api.openai.com/v1/models")
+                .bearer_auth(api_key)
+                .send()
+                .await;
+            match auth_resp {
+                Ok(r) if r.status().is_success() => println!("✅"),
+                Ok(r) => println!("⚠️  HTTP {} (may still work)", r.status()),
+                Err(e) => println!("❌ {}", e),
+            }
+        }
+        _ if !api_key.is_empty() => {
+            println!(
+                "
+  Skipping remote key validation for provider '{}'.",
+                provider
+            );
+        }
+        _ => {}
+    }
+
+    if let Some(token) = tg_token {
+        print!("  Validating Telegram token... ");
+        let tg_resp = client
+            .get(format!("https://api.telegram.org/bot{}/getMe", token))
+            .send()
+            .await;
+        match tg_resp {
+            Ok(r) => {
+                let body: serde_json::Value = r.json().await.unwrap_or_default();
+                if body["ok"].as_bool() == Some(true) {
+                    let name = body["result"]["username"].as_str().unwrap_or("?");
+                    println!("✅ @{}", name);
+                } else {
+                    println!("❌ Invalid token");
+                }
+            }
+            Err(e) => println!("❌ {}", e),
+        }
+    }
+}
+
+pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
+    println!("🐾 apollo setup\n");
+
+    let existing = Config::load("apollo.json").ok();
+    let interactive = opts.provider.is_none();
+
+    // === Resolve values (flags or interactive prompts) ===
+    let auth = resolve_auth(&opts, existing.as_ref(), interactive)?;
+    let provider = auth.provider.clone();
+    let api_key = auth.api_key.clone();
+
+    let model = resolve_model(&opts, existing.as_ref(), &provider, interactive)?;
+    let channel = resolve_channel(&opts, existing.as_ref(), interactive)?;
+    let (tg_token, tg_chat_id, dc_token, dc_channel) = resolve_channel_tokens(&opts, &channel)?;
 
     let default_workspace = existing
         .as_ref()
@@ -469,59 +579,7 @@ pub async fn run_init(opts: InitOptions) -> anyhow::Result<PathBuf> {
     }
 
     // === Validate ===
-    let client = reqwest::Client::new();
-    match provider.as_str() {
-        "ollama" => {
-            print!("\n  Validating Ollama... ");
-            let base_url = auth.base_url.as_deref().unwrap_or("http://localhost:11434");
-            let resp = client.get(format!("{}/api/tags", base_url)).send().await;
-            match resp {
-                Ok(r) if r.status().is_success() => println!("✅"),
-                Ok(r) => println!("⚠️  HTTP {} from local Ollama", r.status()),
-                Err(e) => println!("❌ {}", e),
-            }
-        }
-        "openai" => {
-            print!("\n  Validating API key... ");
-            let auth_resp = client
-                .get("https://api.openai.com/v1/models")
-                .bearer_auth(&api_key)
-                .send()
-                .await;
-            match auth_resp {
-                Ok(r) if r.status().is_success() => println!("✅"),
-                Ok(r) => println!("⚠️  HTTP {} (may still work)", r.status()),
-                Err(e) => println!("❌ {}", e),
-            }
-        }
-        _ if !api_key.is_empty() => {
-            println!(
-                "\n  Skipping remote key validation for provider '{}'.",
-                provider
-            );
-        }
-        _ => {}
-    }
-
-    if let Some(ref token) = tg_token {
-        print!("  Validating Telegram token... ");
-        let tg_resp = client
-            .get(format!("https://api.telegram.org/bot{}/getMe", token))
-            .send()
-            .await;
-        match tg_resp {
-            Ok(r) => {
-                let body: serde_json::Value = r.json().await.unwrap_or_default();
-                if body["ok"].as_bool() == Some(true) {
-                    let name = body["result"]["username"].as_str().unwrap_or("?");
-                    println!("✅ @{}", name);
-                } else {
-                    println!("❌ Invalid token");
-                }
-            }
-            Err(e) => println!("❌ {}", e),
-        }
-    }
+    validate_provider_and_channel(&provider, &auth, &api_key, tg_token.as_ref()).await;
 
     // === Write .env ===
     let env_path = workspace.join(".env");
