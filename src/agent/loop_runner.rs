@@ -109,14 +109,18 @@ impl AgentRunner {
     // ── Existing setters ──
 
     pub fn set_stream_sink(&self, tx: Option<crate::agent::stream::AgentStreamTx>) {
-        *self.stream_sink.write().unwrap() = tx;
+        *self.stream_sink.write().unwrap_or_else(|e| e.into_inner()) = tx;
     }
 
     /// The sink events go to: the per-turn sink of the current task if one is
     /// scoped, otherwise the process-wide sink.
     pub fn stream_sink(&self) -> Option<crate::agent::stream::AgentStreamTx> {
-        crate::agent::stream::current_turn_sink()
-            .or_else(|| self.stream_sink.read().unwrap().clone())
+        crate::agent::stream::current_turn_sink().or_else(|| {
+            self.stream_sink
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        })
     }
 
     #[cfg(feature = "swarm")]
