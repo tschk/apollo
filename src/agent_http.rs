@@ -680,4 +680,88 @@ mod tests {
         );
         assert_eq!(mode_name(&AgentMode::Swarm { parallelism: 2 }), "swarm");
     }
+
+    #[test]
+    fn load_or_create_token_uses_env_var_if_set() {
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", Some("  env-token-123  ")),
+                ("HOME", None),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert_eq!(token, "env-token-123");
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_ignores_empty_env_var_and_reads_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home_path = temp_dir.path().to_str().unwrap();
+        let token_file_dir = temp_dir.path().join(".apollo");
+        std::fs::create_dir_all(&token_file_dir).unwrap();
+        std::fs::write(token_file_dir.join("http-token"), "  file-token-456  ").unwrap();
+
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", Some("   ")),
+                ("HOME", Some(home_path)),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert_eq!(token, "file-token-456");
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_creates_new_token_if_file_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home_path = temp_dir.path().to_str().unwrap();
+
+        temp_env::with_vars(
+            [("APOLLO_HTTP_TOKEN", None), ("HOME", Some(home_path))],
+            || {
+                let token1 = load_or_create_token().unwrap();
+                assert!(!token1.is_empty());
+
+                let token2 = load_or_create_token().unwrap();
+                assert_eq!(token1, token2);
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_creates_new_token_if_file_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home_path = temp_dir.path().to_str().unwrap();
+        let token_file_dir = temp_dir.path().join(".apollo");
+        std::fs::create_dir_all(&token_file_dir).unwrap();
+        std::fs::write(token_file_dir.join("http-token"), "   \n").unwrap();
+
+        temp_env::with_vars(
+            [("APOLLO_HTTP_TOKEN", None), ("HOME", Some(home_path))],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert!(!token.is_empty());
+
+                let file_content =
+                    std::fs::read_to_string(token_file_dir.join("http-token")).unwrap();
+                assert_eq!(file_content, token);
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_fails_if_home_missing() {
+        temp_env::with_vars([("APOLLO_HTTP_TOKEN", None::<&str>), ("HOME", None::<&str>)], || {
+            let result = load_or_create_token();
+            assert!(result.is_err());
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot locate HOME"));
+        });
+    }
 }
