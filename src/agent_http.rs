@@ -598,6 +598,73 @@ mod tests {
     }
 
     #[test]
+    fn load_or_create_token_returns_env_var_when_set() {
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", Some("test-env-token")),
+                ("HOME", None), // HOME not needed if env var is set
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert_eq!(token, "test-env-token");
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_ignores_empty_env_var_and_reads_from_disk() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let token_file = home.join(".apollo/http-token");
+        std::fs::create_dir_all(token_file.parent().unwrap()).unwrap();
+        std::fs::write(&token_file, "disk-token").unwrap();
+
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", Some("   ")), // empty when trimmed
+                ("HOME", Some(home.to_str().unwrap())),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert_eq!(token, "disk-token");
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_creates_new_token_when_none_exists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let token_file = home.join(".apollo/http-token");
+
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", None),
+                ("HOME", Some(home.to_str().unwrap())),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert!(!token.is_empty());
+
+                // Verify it was written to disk
+                let disk_token = std::fs::read_to_string(&token_file).unwrap();
+                assert_eq!(token, disk_token);
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_fails_when_home_is_missing_and_no_env_var() {
+        temp_env::with_vars(
+            [("APOLLO_HTTP_TOKEN", None::<&str>), ("HOME", None::<&str>)],
+            || {
+                let err = load_or_create_token().unwrap_err();
+                assert_eq!(err.to_string(), "cannot locate HOME for token file");
+            },
+        );
+    }
+
+    #[test]
     fn a_correct_bearer_token_is_accepted() {
         let h = headers(&[(header::AUTHORIZATION, "Bearer s3cret")]);
         assert!(verify_token("s3cret", &h).is_ok());
