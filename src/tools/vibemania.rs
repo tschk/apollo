@@ -149,6 +149,39 @@ mod tests {
         assert!(result.output.contains("Vibemania not found"));
     }
 
+    #[test]
+    fn test_name_and_spec() {
+        let tool = VibemaniaTool::new(PathBuf::from("/tmp"));
+        assert_eq!(tool.name(), "vibemania");
+        let spec = tool.spec();
+        assert_eq!(spec.name, "vibemania");
+        assert!(spec
+            .description
+            .contains("Vibemania for autonomous code exploration"));
+        assert!(spec
+            .parameters
+            .get("properties")
+            .unwrap()
+            .get("goal")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_execute_invalid_args() {
+        let tool = VibemaniaTool::new(PathBuf::from("/tmp"));
+        let result = tool.execute("not valid json").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_binary_not_found() {
+        let tool = VibemaniaTool::new(PathBuf::from("/does/not/exist"));
+        let args = r#"{"goal": "do something"}"#;
+        let result = tool.execute(args).await.unwrap();
+        assert!(result.is_error);
+        assert!(result.output.contains("Vibemania not found"));
+    }
+
     #[tokio::test]
     async fn successful_execution_returns_stdout() {
         let temp_dir = tempfile::tempdir().unwrap();
