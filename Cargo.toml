@@ -85,6 +85,7 @@ computer-use-praefectus = ["dep:praefectus", "dep:ed25519-dalek"]
 boxlite = []
 
 [dependencies]
+tempfile = "3"
 # Rotary (rx4) — agent harness engine providing the core agent loop, tools,
 # providers, sessions, skills, memory, guardrails, and MCP support.
 # Used during the migration from apollo's built-in agent loop to rx4's
@@ -173,7 +174,7 @@ rs_ai_oauth = { version = "0.2.31", optional = true, default-features = false }
 axum = "0.8"
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], default-features = false }
 serde_json = "1"
-tempfile = "3"
+
 temp-env = "0.3"
 tokio-test = "0.4"
 
