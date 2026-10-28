@@ -109,19 +109,23 @@ impl AgentRunner {
     // ── Existing setters ──
 
     pub fn set_stream_sink(&self, tx: Option<crate::agent::stream::AgentStreamTx>) {
-        *self.stream_sink.write().unwrap() = tx;
+        *self.stream_sink.write().unwrap_or_else(|e| e.into_inner()) = tx;
     }
 
     /// The sink events go to: the per-turn sink of the current task if one is
     /// scoped, otherwise the process-wide sink.
     pub fn stream_sink(&self) -> Option<crate::agent::stream::AgentStreamTx> {
-        crate::agent::stream::current_turn_sink()
-            .or_else(|| self.stream_sink.read().unwrap().clone())
+        crate::agent::stream::current_turn_sink().or_else(|| {
+            self.stream_sink
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        })
     }
 
     #[cfg(feature = "swarm")]
     pub fn with_swarm(self, coordinator: Arc<crate::swarm::SwarmCoordinator>) -> Self {
-        *self.swarm.write().unwrap() = Some(coordinator);
+        *self.swarm.write().unwrap_or_else(|e| e.into_inner()) = Some(coordinator);
         self
     }
 
@@ -166,7 +170,7 @@ impl AgentRunner {
     }
 
     pub fn with_mode(self, mode: AgentMode) -> Self {
-        *self.mode.write().unwrap() = mode;
+        *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
         self
     }
 
@@ -192,11 +196,11 @@ impl AgentRunner {
     }
 
     pub fn get_mode(&self) -> AgentMode {
-        self.mode.read().unwrap().clone()
+        self.mode.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn set_mode(&self, mode: AgentMode) {
-        *self.mode.write().unwrap() = mode;
+        *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
     }
 
     pub fn mode_handle(&self) -> Arc<std::sync::RwLock<AgentMode>> {
@@ -204,11 +208,17 @@ impl AgentRunner {
     }
 
     pub fn add_hook(&self, hook: Arc<dyn ToolHook>) {
-        self.hooks.write().unwrap().push(hook);
+        self.hooks
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(hook);
     }
 
     pub fn steer(&self, message: String) {
-        self.steering_queue.lock().unwrap().push(message);
+        self.steering_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(message);
     }
 
     pub fn with_workspace(mut self, workspace: PathBuf) -> Self {
@@ -271,7 +281,7 @@ impl AgentRunner {
     }
 
     pub fn get_model(&self) -> String {
-        self.model.read().unwrap().clone()
+        self.model.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn get_default_model(&self) -> &str {
@@ -279,11 +289,11 @@ impl AgentRunner {
     }
 
     pub fn set_model(&self, model: impl Into<String>) {
-        *self.model.write().unwrap() = model.into();
+        *self.model.write().unwrap_or_else(|e| e.into_inner()) = model.into();
     }
 
     pub fn reset_model(&self) {
-        *self.model.write().unwrap() = self.default_model.clone();
+        *self.model.write().unwrap_or_else(|e| e.into_inner()) = self.default_model.clone();
     }
 
     pub async fn list_tools(&self) -> Vec<String> {
@@ -320,7 +330,7 @@ impl AgentRunner {
         #[cfg(feature = "swarm")]
         {
             let swarm_opt = {
-                let s = self.swarm.read().unwrap();
+                let s = self.swarm.read().unwrap_or_else(|e| e.into_inner());
                 s.clone()
             };
 
@@ -880,7 +890,7 @@ impl AgentRunner {
                 cost_tracker: Some(Arc::clone(&self.cost_tracker)),
                 // Both engines must run the same hooks and emit the same events.
                 hook_ctx: crate::agent::rotary_bridge::ToolHookContext::new(
-                    self.hooks.read().unwrap().clone(),
+                    self.hooks.read().unwrap_or_else(|e| e.into_inner()).clone(),
                     Some(Arc::clone(&self.plugin_registry)),
                 )
                 .with_hook_manager(Arc::clone(&self.hook_manager))
@@ -913,7 +923,7 @@ impl AgentRunner {
                     break result;
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                    let mut queue = steering_queue.lock().unwrap();
+                    let mut queue = steering_queue.lock().unwrap_or_else(|e| e.into_inner());
                     if !queue.is_empty() {
                         for steer_msg in queue.drain(..) {
                             tracing::info!(
@@ -933,7 +943,10 @@ impl AgentRunner {
         };
 
         if self.agent_config.trajectory_enabled {
-            let (steps, iterations) = recorder.lock().unwrap().take_steps();
+            let (steps, iterations) = recorder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take_steps();
             let mut trajs = self.trajectories.write().await;
             if let Some(trajectory) = trajs.get_mut(chat_id) {
                 trajectory.absorb_recorded_steps(steps, iterations);
