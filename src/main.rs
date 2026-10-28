@@ -32,6 +32,7 @@ mod setup;
 
 const HEALTH_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 const HEALTH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const HEALTH_CHECK_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Parser)]
 #[command(
@@ -2185,7 +2186,7 @@ async fn server_healthy() -> bool {
     let url = format!("http://{}/health", apollo::agent_http::http_listen_addr());
     reqwest::Client::new()
         .get(url)
-        .timeout(std::time::Duration::from_millis(500))
+        .timeout(HEALTH_CHECK_REQUEST_TIMEOUT)
         .send()
         .await
         .map(|r| r.status().is_success())
