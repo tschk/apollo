@@ -77,6 +77,7 @@ impl ZkrStore {
             // `now` is the wall clock, not content: a replay of an existing key
             // reuses the stored recorded_at so only real payload differences
             // trip zkr's ingestion_key conflict check.
+            // TODO(#256): use zkr's public MemoryDb::ingestion_timestamps once released.
             let recorded_at = match &ingestion_key {
                 Some(key) => lookup
                     .lock()
