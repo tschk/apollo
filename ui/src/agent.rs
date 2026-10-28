@@ -227,6 +227,7 @@ fn ask_via_http(prompt: &str, chat_id: &str) -> Result<String, String> {
 /// The CLI is the single implementation of `config`, `doctor` and friends —
 /// masking included — so the UI drives it rather than reimplementing it. This
 /// blocks on a child process, so callers must run it off the UI thread.
+#[allow(dead_code)]
 pub fn run_apollo(args: &[&str]) -> Result<String, String> {
     let apollo = find_apollo_bin().ok_or_else(|| {
         "apollo binary not found — install it, or put it next to apollo-tui".to_string()
@@ -311,6 +312,7 @@ const APOLLO_EXE: &str = if cfg!(windows) {
 /// The server is the only place these are true: the local config file says
 /// what the agent started with, not what it is running now.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[allow(dead_code)]
 pub struct AgentState {
     pub model: String,
     pub engine: String,
@@ -325,6 +327,7 @@ pub struct AgentState {
     pub message_count: u64,
 }
 
+#[allow(dead_code)]
 fn parse_state(value: &serde_json::Value) -> AgentState {
     let text = |key: &str| {
         value
@@ -352,6 +355,7 @@ fn parse_state(value: &serde_json::Value) -> AgentState {
     }
 }
 
+#[allow(dead_code)]
 fn blocking_client(timeout_ms: u64) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
@@ -359,6 +363,7 @@ fn blocking_client(timeout_ms: u64) -> Result<reqwest::blocking::Client, String>
         .map_err(|e| e.to_string())
 }
 
+#[allow(dead_code)]
 fn authed(request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
     match auth_token() {
         Some(token) => request.bearer_auth(token),
@@ -367,6 +372,7 @@ fn authed(request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::Requ
 }
 
 /// Read the agent's live state. `None` when no agent is reachable.
+#[allow(dead_code)]
 pub fn fetch_state() -> Option<AgentState> {
     let url = format!("http://127.0.0.1:{}/v1/state", http_port());
     let response = authed(blocking_client(1500).ok()?.get(&url)).send().ok()?;
@@ -378,6 +384,7 @@ pub fn fetch_state() -> Option<AgentState> {
 }
 
 /// Switch the running agent's model, returning its new state.
+#[allow(dead_code)]
 pub fn set_model(model: &str) -> Result<AgentState, String> {
     let url = format!("http://127.0.0.1:{}/v1/model", http_port());
     let request = blocking_client(5000)?
@@ -550,6 +557,7 @@ pub fn config_model() -> String {
 
 /// Model and engine reported by the local config. The TUI status bar still
 /// asks for both; the desktop shows the model only.
+#[allow(dead_code)]
 pub fn config_summary() -> (String, String) {
     let Ok(text) = std::fs::read_to_string("apollo.json") else {
         return ("—".into(), "—".into());
