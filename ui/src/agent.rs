@@ -253,19 +253,6 @@ pub fn run_apollo(args: &[&str]) -> Result<String, String> {
     })
 }
 
-/// True when `name` resolves to a file on `PATH`.
-#[allow(dead_code)]
-pub fn on_path(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path).any(|dir| {
-                let candidate = dir.join(name);
-                candidate.is_file()
-            })
-        })
-        .unwrap_or(false)
-}
-
 /// The agent binary beside this app, on `PATH`, or built from this checkout.
 pub fn ensure_apollo_bin() -> Result<std::path::PathBuf, String> {
     if let Some(path) = find_apollo_bin() {

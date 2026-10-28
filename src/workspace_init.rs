@@ -35,3 +35,142 @@ fn write_if_missing(path: &Path, content: &str) -> std::io::Result<()> {
     }
     std::fs::write(path, content)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_ensure_workspace_kit_creates_files() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+
+        ensure_workspace_kit(workspace).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("SOUL.md")).unwrap(),
+            SOUL
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("USER.md")).unwrap(),
+            USER
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("IDENTITY.md")).unwrap(),
+            IDENTITY
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("MEMORY.md")).unwrap(),
+            MEMORY
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("HEARTBEAT.md")).unwrap(),
+            HEARTBEAT
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("NOW.md")).unwrap(),
+            NOW
+        );
+
+        let mem = workspace.join("memory");
+        assert!(mem.exists() && mem.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(mem.join("open-loops.md")).unwrap(),
+            BRIEF_LOOPS
+        );
+        assert_eq!(
+            std::fs::read_to_string(mem.join("time-contexts.md")).unwrap(),
+            BRIEF_TIME
+        );
+    }
+
+    #[test]
+    fn test_write_if_missing_creates_parent_dirs() {
+        let dir = tempdir().unwrap();
+        let nested_path = dir.path().join("nested").join("dir").join("test.txt");
+        let content = "test content";
+
+        assert!(!nested_path.exists());
+
+        write_if_missing(&nested_path, content).unwrap();
+
+        assert!(nested_path.exists());
+        assert_eq!(std::fs::read_to_string(&nested_path).unwrap(), content);
+    }
+
+    #[test]
+    fn test_write_if_missing_does_not_overwrite() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let initial_content = "initial content";
+        let new_content = "new content";
+
+        // Create the file first
+        std::fs::write(&file_path, initial_content).unwrap();
+
+        // Attempt to write using write_if_missing
+        write_if_missing(&file_path, new_content).unwrap();
+
+        // Verify the file content remains unchanged
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            initial_content
+        );
+    }
+
+    #[test]
+    fn test_ensure_workspace_kit_does_not_overwrite() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+
+        // Create some files with custom content
+        let custom_soul = "Custom SOUL";
+        let custom_time = "Custom TIME";
+
+        std::fs::write(workspace.join("SOUL.md"), custom_soul).unwrap();
+
+        let mem = workspace.join("memory");
+        std::fs::create_dir_all(&mem).unwrap();
+        std::fs::write(mem.join("time-contexts.md"), custom_time).unwrap();
+
+        // Run ensure_workspace_kit
+        ensure_workspace_kit(workspace).unwrap();
+
+        // Check that custom files are NOT overwritten
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("SOUL.md")).unwrap(),
+            custom_soul
+        );
+        assert_eq!(
+            std::fs::read_to_string(mem.join("time-contexts.md")).unwrap(),
+            custom_time
+        );
+
+        // Check that other files ARE created
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("USER.md")).unwrap(),
+            USER
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("IDENTITY.md")).unwrap(),
+            IDENTITY
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("MEMORY.md")).unwrap(),
+            MEMORY
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("HEARTBEAT.md")).unwrap(),
+            HEARTBEAT
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("NOW.md")).unwrap(),
+            NOW
+        );
+        assert_eq!(
+            std::fs::read_to_string(mem.join("open-loops.md")).unwrap(),
+            BRIEF_LOOPS
+        );
+    }
+}

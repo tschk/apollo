@@ -6,7 +6,7 @@
 //!
 //! Port from hermes-rs `autonomous.rs`.
 //!
-//! pontytail: single-workspace, sequential. Parallel workspace support
+//! ponytail: single-workspace, sequential. Parallel workspace support
 //! per Hermes-RS pattern can be added when multi-repo management is needed.
 
 use std::path::{Path, PathBuf};

@@ -191,7 +191,7 @@ impl crate::channels::DraftChannel for TelegramHttpChannel {
     ) -> anyhow::Result<()> {
         // Rate-limit to one edit per 1.5s to avoid Telegram 429s
         {
-            let mut last = self.last_edit.lock().unwrap();
+            let mut last = self.last_edit.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(t) = *last {
                 if t.elapsed().as_millis() < 1500 {
                     return Ok(());
