@@ -274,7 +274,14 @@ pub(crate) fn check_config_file(path: &str) -> Check {
 
 fn is_workspace_writable(path: &Path) -> bool {
     let probe = path.join(format!(".apollo-write-test-{}", std::process::id()));
-    match std::fs::File::create(&probe) {
+    // A probe left behind by a killed run (same pid, e.g. pid 1 in a container)
+    // would otherwise make `create_new` report a writable workspace as read-only.
+    let _ = std::fs::remove_file(&probe);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
         Ok(_) => {
             let _ = std::fs::remove_file(probe);
             true

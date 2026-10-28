@@ -3,7 +3,7 @@
 //! Port from hermes-agent `tool_guardrails.py`. Tracks per-turn tool-call observations
 //! and returns guardrail decisions.
 //!
-//! pontytail: single-threaded, in-memory history. Per-chat isolation is handled by
+//! ponytail: single-threaded, in-memory history. Per-chat isolation is handled by
 //! the HashMap<String, ToolGuardrails> in the agent loop.
 
 use std::time::Instant;

@@ -1317,6 +1317,8 @@ fn first_line(text: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    const DESCENDANT_MARKER_DELAY: Duration = Duration::from_secs(2);
+
     #[test]
     fn parses_numeric_metric_from_command_output() {
         assert_eq!(parse_metric("median_ms=19.125\n").unwrap(), 19.125);
@@ -1382,13 +1384,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("descendant-finished");
         let command = format!(
-            "sleep 2; touch {}",
+            "sleep {}; touch {}",
+            DESCENDANT_MARKER_DELAY.as_secs(),
             shlex::try_quote(&marker.to_string_lossy()).unwrap()
         );
         run_shell(&command, directory.path(), 1, Instant::now(), 0)
             .await
             .expect_err("command should time out");
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(DESCENDANT_MARKER_DELAY).await;
         assert!(!marker.exists(), "timed-out descendant survived");
     }
 
@@ -1398,14 +1401,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("wall-clock-descendant-finished");
         let command = format!(
-            "sleep 2; touch {}",
+            "sleep {}; touch {}",
+            DESCENDANT_MARKER_DELAY.as_secs(),
             shlex::try_quote(&marker.to_string_lossy()).unwrap()
         );
         let error = run_shell(&command, directory.path(), 60, Instant::now(), 1)
             .await
             .expect_err("wall-clock budget should time out the command");
         assert!(is_budget_error(&error));
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(DESCENDANT_MARKER_DELAY).await;
         assert!(!marker.exists(), "wall-clock descendant survived");
     }
 
