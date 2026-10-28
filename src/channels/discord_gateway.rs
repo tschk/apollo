@@ -28,7 +28,7 @@ use super::traits::IncomingMessage;
 /// MESSAGE_CONTENT is privileged: it must be enabled on the bot's application
 /// page or Discord closes the connection at IDENTIFY. Without it every
 /// message arrives with empty content, which would look exactly like the
-/// dropped-sender bug this replaced.
+/// dropped-sender issue this replaced.
 pub const DEFAULT_INTENTS: u64 = (1 << 9) | (1 << 12) | (1 << 15);
 
 /// The public gateway, at the API version apollo speaks.
@@ -39,17 +39,19 @@ pub fn spawn(token: String, gateway_url: String, tx: mpsc::Sender<IncomingMessag
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         loop {
-            match run_once(&token, &gateway_url, &tx).await {
-                Ok(()) => {
-                    // Clean close — reconnect promptly.
-                    backoff = Duration::from_secs(1);
+            tokio::select! {
+                res = run_once(&token, &gateway_url, &tx) => match res {
+                    Ok(()) => {
+                        // Clean close — reconnect promptly.
+                        backoff = Duration::from_secs(1);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Discord gateway disconnected: {e}");
+                    }
+                },
+                _ = tx.closed() => {
+                    return;
                 }
-                Err(e) => {
-                    tracing::warn!("Discord gateway disconnected: {e}");
-                }
-            }
-            if tx.is_closed() {
-                return;
             }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(60));
