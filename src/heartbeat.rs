@@ -46,7 +46,7 @@ pub fn start_heartbeat(
             // Check quiet hours
             let now = chrono::Local::now();
             let hour = now.hour();
-            if hour >= config.quiet_start_hour || hour < config.quiet_end_hour {
+            if is_quiet_hour(hour, config.quiet_start_hour, config.quiet_end_hour) {
                 tracing::debug!("Heartbeat: quiet hours ({:02}:00), skipping", hour);
                 continue;
             }
@@ -102,6 +102,16 @@ pub fn start_heartbeat(
             update_heartbeat_state(&config.workspace);
         }
     })
+}
+
+pub(crate) fn is_quiet_hour(hour: u32, start: u32, end: u32) -> bool {
+    if start == end {
+        false
+    } else if start > end {
+        hour >= start || hour < end
+    } else {
+        hour >= start && hour < end
+    }
 }
 
 fn update_heartbeat_state(workspace: &Path) {
@@ -493,5 +503,38 @@ mod tests {
         // the handle should complete without error
         let result = handle.await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_is_quiet_hour_overnight() {
+        // Quiet hours: 23:00 to 08:00
+        assert!(is_quiet_hour(23, 23, 8));
+        assert!(is_quiet_hour(0, 23, 8));
+        assert!(is_quiet_hour(4, 23, 8));
+        assert!(is_quiet_hour(7, 23, 8));
+
+        assert!(!is_quiet_hour(8, 23, 8));
+        assert!(!is_quiet_hour(12, 23, 8));
+        assert!(!is_quiet_hour(22, 23, 8));
+    }
+
+    #[test]
+    fn test_is_quiet_hour_daytime() {
+        // Quiet hours: 09:00 to 17:00
+        assert!(is_quiet_hour(9, 9, 17));
+        assert!(is_quiet_hour(12, 9, 17));
+        assert!(is_quiet_hour(16, 9, 17));
+
+        assert!(!is_quiet_hour(8, 9, 17));
+        assert!(!is_quiet_hour(17, 9, 17));
+        assert!(!is_quiet_hour(20, 9, 17));
+    }
+
+    #[test]
+    fn test_is_quiet_hour_no_quiet_hours() {
+        // Quiet hours: 12:00 to 12:00 (none)
+        for hour in 0..24 {
+            assert!(!is_quiet_hour(hour, 12, 12));
+        }
     }
 }
