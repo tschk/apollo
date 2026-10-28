@@ -199,6 +199,7 @@ mod tests {
 
         let msg = rx.recv().await.unwrap();
         assert!(msg.text.contains("Do task A"));
+        assert!(msg.text.contains("HEARTBEAT_OK"));
         assert_eq!(msg.chat_id, "test_chat");
 
         // Verify state file is updated
