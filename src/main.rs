@@ -30,6 +30,9 @@ use apollo::telegram_runtime::{run_telegram_chat, TelegramChatRun};
 
 mod setup;
 
+const HEALTH_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const HEALTH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Parser)]
 #[command(
     name = "apollo",
@@ -1939,18 +1942,19 @@ async fn start_background_server(
     let mut child = cmd.spawn()?;
 
     let health = async {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + HEALTH_CHECK_TIMEOUT;
         loop {
             if server_healthy().await {
                 return Ok(());
             }
             if std::time::Instant::now() > deadline {
                 return Err(anyhow::anyhow!(
-                    "background apollo serve did not become healthy in 30s (see {})",
+                    "background apollo serve did not become healthy in {}s (see {})",
+                    HEALTH_CHECK_TIMEOUT.as_secs(),
                     log_path.display()
                 ));
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(HEALTH_CHECK_INTERVAL).await;
         }
     };
 
