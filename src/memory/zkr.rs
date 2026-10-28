@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use rusqlite::OptionalExtension;
 use zkr::{
     ClaimId, ClaimInput, ClaimKind, CorrectInput, DeleteInput, EmbeddingTarget, EvidenceId,
     GetInput, MemoryDb, PersonId, ProfilesInput, RememberInput, Remembered, RetrievalItem,
@@ -10,6 +11,9 @@ use zkr::{
 
 pub struct ZkrStore {
     db: Arc<Mutex<MemoryDb>>,
+    /// Read-only view of the same file, used to look up timestamps stored
+    /// for an ingestion key (zkr does not expose that lookup publicly).
+    lookup: Arc<Mutex<rusqlite::Connection>>,
     tenant_id: TenantId,
     person_id: PersonId,
 }
@@ -23,8 +27,14 @@ impl ZkrStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let db = MemoryDb::open(path)?;
+        let lookup = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
         Ok(Self {
-            db: Arc::new(Mutex::new(MemoryDb::open(path)?)),
+            db: Arc::new(Mutex::new(db)),
+            lookup: Arc::new(Mutex::new(lookup)),
             tenant_id: TenantId::new(tenant_id.into())?,
             person_id: PersonId::new(person_id.into())?,
         })
@@ -38,23 +48,60 @@ impl ZkrStore {
         claim: Option<ClaimInput>,
         captured_at: i64,
     ) -> anyhow::Result<Remembered> {
+        self.remember_at(
+            text,
+            kind,
+            ingestion_key,
+            claim,
+            captured_at,
+            chrono::Utc::now().timestamp(),
+        )
+        .await
+    }
+
+    async fn remember_at(
+        &self,
+        text: String,
+        kind: SourceKind,
+        ingestion_key: Option<String>,
+        claim: Option<ClaimInput>,
+        captured_at: i64,
+        now: i64,
+    ) -> anyhow::Result<Remembered> {
         let db = Arc::clone(&self.db);
+        let lookup = Arc::clone(&self.lookup);
         let tenant_id = self.tenant_id.clone();
         let person_id = self.person_id.clone();
-        Ok(tokio::task::spawn_blocking(move || {
-            db.lock().remember(RememberInput {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Remembered> {
+            let mut db = db.lock();
+            // `now` is the wall clock, not content: a replay of an existing key
+            // reuses the stored recorded_at so only real payload differences
+            // trip zkr's ingestion_key conflict check.
+            let recorded_at = match &ingestion_key {
+                Some(key) => lookup
+                    .lock()
+                    .query_row(
+                        "SELECT recorded_at FROM sources WHERE tenant_id = ?1 AND person_id = ?2 AND ingestion_key = ?3",
+                        rusqlite::params![tenant_id.0, person_id.0, key],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(now),
+                None => now,
+            };
+            Ok(db.remember(RememberInput {
                 tenant_id,
                 person_id,
                 ingestion_key,
                 kind,
                 text,
                 captured_at,
-                recorded_at: chrono::Utc::now().timestamp(),
+                recorded_at,
                 claim,
                 feature_flag: None,
-            })
+            })?)
         })
-        .await??)
+        .await?
     }
 
     pub async fn search(&self, query: String, limit: u32) -> anyhow::Result<RetrievalPack> {
@@ -385,5 +432,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.source_id, second.source_id);
+    }
+
+    #[tokio::test]
+    async fn ingestion_replay_ignores_wall_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ZkrStore::open(&dir.path().join("memory.db"), "test", "person").unwrap();
+        let remember = |now| {
+            store.remember_at(
+                "same turn".to_string(),
+                SourceKind::Conversation,
+                Some("turn-1".to_string()),
+                None,
+                100,
+                now,
+            )
+        };
+        let first = remember(1_000).await.unwrap();
+        let second = remember(1_001).await.unwrap();
+        assert_eq!(first.source_id, second.source_id);
+    }
+
+    #[tokio::test]
+    async fn ingestion_key_with_changed_content_still_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ZkrStore::open(&dir.path().join("memory.db"), "test", "person").unwrap();
+        let remember = |text: &str, now| {
+            store.remember_at(
+                text.to_string(),
+                SourceKind::Conversation,
+                Some("turn-1".to_string()),
+                None,
+                100,
+                now,
+            )
+        };
+        remember("version one", 1_000).await.unwrap();
+        for now in [1_000, 1_001] {
+            let error = remember("version two", now).await.unwrap_err();
+            assert!(error.to_string().contains("ingestion_key conflicts"));
+        }
     }
 }

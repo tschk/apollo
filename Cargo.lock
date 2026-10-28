@@ -250,6 +250,7 @@ dependencies = [
  "rs_ai_core",
  "rs_ai_oauth",
  "rs_ai_providers",
+ "rusqlite",
  "rx4",
  "serde",
  "serde_json",
