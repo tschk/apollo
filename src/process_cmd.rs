@@ -20,7 +20,8 @@ pub async fn run_argv_command(command: &str, timeout_secs: u64) -> anyhow::Resul
     let program = &parts[0];
     let args = &parts[1..];
 
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    let mut child = crate::tools::child_proc::scrub(&mut command)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
