@@ -235,7 +235,7 @@ pub fn preprocess_skill_content(
 }
 
 /// Substitute `${HERMES_SKILL_DIR}` and `${HERMES_SESSION_ID}` in skill content.
-/// Unresolved tokens are left as-is so the author can debug them.
+/// Unresolved tokens are left as-is so the author can troubleshoot them.
 pub fn substitute_template_vars(
     content: &str,
     skill_dir: Option<&Path>,
