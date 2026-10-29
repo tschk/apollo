@@ -132,10 +132,11 @@ by the one subsystem that could have run it. The two functions must keep
 scanning the same roots; if you add a root to one, add it to the other.
 
 Security note: these roots load and preprocess SKILL.md, which supports inline
-shell. That is the same trust level as `.apollo/skills` — anything that can
-write to a workspace plugin directory can already write to the managed skills
-directory — but it is a wider surface than it was, so do not add roots outside
-the workspace.
+`!`cmd`` shell. None of the roots is trusted — the agent itself writes
+`.apollo/skills` — so snippets run only when `policy.allow_shell` is on *and*
+the skill sits under `policy.trusted_skill_dirs` (empty by default, paths
+canonicalised). Otherwise they are replaced with a marker and nothing runs.
+Do not add roots outside the workspace.
 
 ### Memory
 - SurrealDB + RocksDB is the intended primary backend direction
@@ -418,6 +419,28 @@ Google Chat, WhatsApp and Teams share `channels::webhook`. Bind through
 `webhook::spawn`, which awaits the bind and returns a `Result`; all three used
 to `.unwrap()` inside a spawned task, so a taken port panicked a detached task
 while `start()` still returned a healthy-looking receiver.
+
+Every webhook route takes a `WebhookVerifier` and answers 401 before parsing
+anything it cannot verify — these receivers bind publicly and feed an agent
+with shell access. WhatsApp checks `X-Hub-Signature-256` against
+`app_secret`; Google Chat (`audience` = project number) and Teams (`app_id`)
+check the platform's RS256 JWT against its JWKS. `start()` errors when the
+verification material is missing rather than accepting unverified posts.
+
+### Allowlists
+
+`[channel].allowed_chat_ids` / `allowed_sender_ids` apply to every channel:
+Telegram checks them in its poll loop, everything else is wrapped in
+`channels::FilteredChannel` in `main.rs`. A non-empty list must match; an
+empty sender id does not bypass it.
+
+### MCP server
+
+`apollo mcp --port` serves `/mcp`, `/` and `/chat` behind the desktop HTTP
+API's gates (`agent_http::authorize_with`: bearer token + `Origin` refusal).
+It binds `--host 127.0.0.1` by default and refuses a non-loopback bind unless
+`APOLLO_HTTP_TOKEN` is set. Every `tools/call`, stdio or HTTP, goes through
+`rotary_bridge::execute_tool_with_hooks`, so permission rules apply to it.
 
 ## 6) Providers
 

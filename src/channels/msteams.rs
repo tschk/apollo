@@ -11,8 +11,13 @@ pub struct TeamsChannel {
     app_password: String,
     token_url: String,
     service_base: String,
+    jwks_url: String,
     bind_addr: std::net::SocketAddr,
 }
+
+/// Bot Framework signing keys and the issuer of channel-to-bot tokens.
+const BOT_FRAMEWORK_JWKS: &str = "https://login.botframework.com/v1/.well-known/keys";
+const BOT_FRAMEWORK_ISSUER: &str = "https://api.botframework.com";
 
 impl TeamsChannel {
     pub fn new(app_id: impl Into<String>, app_password: impl Into<String>) -> Self {
@@ -22,6 +27,7 @@ impl TeamsChannel {
             token_url: "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
                 .to_string(),
             service_base: "https://smba.trafficmanager.net/teams/v3".to_string(),
+            jwks_url: BOT_FRAMEWORK_JWKS.to_string(),
             bind_addr: ([0, 0, 0, 0], 3978).into(),
         }
     }
@@ -32,6 +38,12 @@ impl TeamsChannel {
         let base = base.into().trim_end_matches('/').to_string();
         self.token_url = format!("{base}/oauth2/v2.0/token");
         self.service_base = format!("{base}/teams/v3");
+        self
+    }
+
+    /// Fetch Bot Framework signing keys from another URL (conformance tests).
+    pub fn with_jwks_url(mut self, url: impl Into<String>) -> Self {
+        self.jwks_url = url.into();
         self
     }
 
@@ -50,8 +62,21 @@ impl Channel for TeamsChannel {
 
     async fn start(&mut self) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
         let (tx, rx) = mpsc::channel(32);
-        let _app_id = self.app_id.clone();
-        super::webhook::serve_json(self.bind_addr, "/api/messages", parse_activity, tx).await?;
+        // The Bot Framework signs every activity it delivers with a JWT whose
+        // audience is this bot's app id.
+        let verifier = std::sync::Arc::new(super::webhook::JwtVerifier::new(
+            self.jwks_url.clone(),
+            BOT_FRAMEWORK_ISSUER,
+            self.app_id.clone(),
+        ));
+        super::webhook::serve_json(
+            self.bind_addr,
+            "/api/messages",
+            parse_activity,
+            verifier,
+            tx,
+        )
+        .await?;
         Ok(rx)
     }
 

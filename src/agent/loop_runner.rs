@@ -62,6 +62,10 @@ pub struct AgentRunner {
     #[cfg(feature = "zkr-memory")]
     zkr_config: crate::config::ZkrConfig,
     session_note_workspace: Option<PathBuf>,
+    /// Gate for skill inline shell: `policy.allow_shell` and
+    /// `policy.trusted_skill_dirs`. Off unless explicitly configured.
+    skill_allow_shell: bool,
+    trusted_skill_dirs: Vec<PathBuf>,
 }
 
 impl AgentRunner {
@@ -103,6 +107,8 @@ impl AgentRunner {
             #[cfg(feature = "zkr-memory")]
             zkr_config: crate::config::ZkrConfig::default(),
             session_note_workspace: None,
+            skill_allow_shell: false,
+            trusted_skill_dirs: Vec::new(),
         }
     }
 
@@ -254,6 +260,18 @@ impl AgentRunner {
     ) -> Self {
         self.zkr = store;
         self.zkr_config = cfg;
+        self
+    }
+
+    /// Let skills under `trusted_dirs` run inline `!`cmd`` snippets, provided
+    /// `allow_shell` is set. Without this no skill runs any snippet.
+    pub fn with_skill_shell_policy(
+        mut self,
+        allow_shell: bool,
+        trusted_dirs: Vec<PathBuf>,
+    ) -> Self {
+        self.skill_allow_shell = allow_shell;
+        self.trusted_skill_dirs = trusted_dirs;
         self
     }
 
@@ -708,13 +726,22 @@ impl AgentRunner {
             if let Some((skill_name, location)) = matched {
                 let chat_id = msg.chat_id.clone();
                 let workspace = self.workspace.clone();
+                let allow_shell = self.skill_allow_shell;
+                let trusted_dirs = self.trusted_skill_dirs.clone();
                 let preprocessed = tokio::task::spawn_blocking(move || {
                     let content = std::fs::read_to_string(&location).ok()?;
+                    let trusted = skills::inline_shell_trusted(
+                        &location,
+                        allow_shell,
+                        &trusted_dirs,
+                        &workspace,
+                    );
                     Some(skills::preprocess_skill_content(
                         &content,
                         location.parent(),
                         Some(&chat_id),
                         Some(&workspace),
+                        trusted,
                     ))
                 })
                 .await?;

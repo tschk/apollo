@@ -241,17 +241,66 @@ fn free_port() -> u16 {
 
 /// POST a webhook payload to a channel's own HTTP receiver, retrying until it
 /// has finished binding.
+///
+/// Returns the receiver's status code, so callers can assert that unsigned or
+/// mis-signed deliveries are refused.
 #[allow(dead_code)] // used by cfg-gated channel tests
-async fn post_webhook(port: u16, path: &str, body: serde_json::Value) {
+async fn post_webhook(
+    port: u16,
+    path: &str,
+    body: &serde_json::Value,
+    headers: &[(&str, String)],
+) -> u16 {
     let url = format!("http://127.0.0.1:{port}{path}");
     let client = reqwest::Client::new();
     for _ in 0..100 {
-        if client.post(&url).json(&body).send().await.is_ok() {
-            return;
+        let mut req = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body.to_string());
+        for (name, value) in headers {
+            req = req.header(*name, value);
+        }
+        if let Ok(resp) = req.send().await {
+            return resp.status().as_u16();
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("webhook receiver on port {port} never accepted a request");
+}
+
+/// Nothing reached the agent: a refused webhook must not leak a message.
+#[allow(dead_code)] // used by cfg-gated channel tests
+async fn assert_nothing_received(name: &str, rx: &mut Receiver<IncomingMessage>) {
+    let got = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
+    assert!(
+        got.is_err(),
+        "{name}: a rejected webhook still delivered {got:?}"
+    );
+}
+
+/// The JWKS matching `fixtures/googlechat_test_key.pem`, kid `test-key`.
+#[cfg(any(feature = "channel-googlechat", feature = "channel-msteams"))]
+const TEST_JWKS: &str = include_str!("fixtures/test_jwks.json");
+
+/// An RS256 bearer token signed with the test key, as Google Chat and the Bot
+/// Framework send on every webhook call.
+#[cfg(any(feature = "channel-googlechat", feature = "channel-msteams"))]
+fn signed_jwt(iss: &str, aud: &str) -> String {
+    let key =
+        jsonwebtoken::EncodingKey::from_rsa_pem(include_bytes!("fixtures/googlechat_test_key.pem"))
+            .unwrap();
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some("test-key".into());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = serde_json::json!({"iss": iss, "aud": aud, "iat": now, "exp": now + 300});
+    format!(
+        "Bearer {}",
+        jsonwebtoken::encode(&header, &claims, &key).unwrap()
+    )
 }
 
 // ───────────────────────── telegram ─────────────────────────
@@ -569,6 +618,8 @@ async fn googlechat_conformance() {
     let mock = Mock::start(Arc::new(|path: &str| {
         if path.ends_with("/token") {
             json(r#"{"access_token":"issued-token","expires_in":3600}"#)
+        } else if path.ends_with("/jwks") {
+            json(TEST_JWKS)
         } else {
             json("{}")
         }
@@ -581,22 +632,41 @@ async fn googlechat_conformance() {
         "token_uri": format!("{}/token", mock.base),
     })
     .to_string();
+    // Without an audience nothing can be verified, so it must not start.
+    assert!(GoogleChatChannel::new(service_account.clone())
+        .with_bind_addr(SocketAddr::from(([127, 0, 0, 1], free_port())))
+        .start()
+        .await
+        .is_err());
+
     let mut channel = GoogleChatChannel::new(service_account)
         .with_api_base(&mock.base)
+        .with_audience("1234567890")
+        .with_jwks_url(format!("{}/jwks", mock.base))
         .with_bind_addr(SocketAddr::from(([127, 0, 0, 1], port)));
 
     let mut rx = channel.start().await.unwrap();
-    post_webhook(
-        port,
-        "/googlechat/webhook",
-        serde_json::json!({
-            "type": "MESSAGE",
-            "message": {"name": "m1", "text": "hello"},
-            "user": {"name": "users/1", "displayName": "U"},
-            "space": {"name": "spaces/AAA", "type": "ROOM"},
-        }),
-    )
-    .await;
+    let event = serde_json::json!({
+        "type": "MESSAGE",
+        "message": {"name": "m1", "text": "hello"},
+        "user": {"name": "users/1", "displayName": "U"},
+        "space": {"name": "spaces/AAA", "type": "ROOM"},
+    });
+    let path = "/googlechat/webhook";
+    assert_eq!(post_webhook(port, path, &event, &[]).await, 401, "unsigned");
+    let wrong_aud = signed_jwt("chat@system.gserviceaccount.com", "999");
+    let wrong_iss = signed_jwt("attacker@example.com", "1234567890");
+    for bad in [wrong_aud, wrong_iss] {
+        let headers = [("authorization", bad)];
+        assert_eq!(post_webhook(port, path, &event, &headers).await, 401);
+    }
+    assert_nothing_received("googlechat", &mut rx).await;
+
+    let good = [(
+        "authorization",
+        signed_jwt("chat@system.gserviceaccount.com", "1234567890"),
+    )];
+    assert_eq!(post_webhook(port, path, &event, &good).await, 200);
     let msg = assert_receives("googlechat", &mut rx).await;
     assert_eq!(msg.text, "hello");
 
@@ -782,21 +852,44 @@ async fn whatsapp_conformance() {
 
     let mock = Mock::start(Arc::new(|_: &str| json(r#"{"messages":[{"id":"m1"}]}"#))).await;
     let port = free_port();
+    // Without the app secret signatures cannot be checked, so no start.
+    assert!(WhatsAppChannel::new("tok", "PHONE1", "verify")
+        .with_bind_addr(SocketAddr::from(([127, 0, 0, 1], free_port())))
+        .start()
+        .await
+        .is_err());
+
     let mut channel = WhatsAppChannel::new("tok", "PHONE1", "verify")
+        .with_app_secret("app-secret")
         .with_api_base(&mock.base)
         .with_bind_addr(SocketAddr::from(([127, 0, 0, 1], port)));
 
     let mut rx = channel.start().await.unwrap();
-    post_webhook(
-        port,
-        "/webhook",
-        serde_json::json!({
-            "entry": [{"changes": [{"value": {"messages": [
-                {"id": "m1", "from": "+15550001", "text": {"body": "hello"}}
-            ]}}]}]
-        }),
-    )
-    .await;
+    let event = serde_json::json!({
+        "entry": [{"changes": [{"value": {"messages": [
+            {"id": "m1", "from": "+15550001", "text": {"body": "hello"}}
+        ]}}]}]
+    });
+    // Meta's scheme: hex HMAC-SHA256 of the exact body, keyed by the app secret.
+    let sign = |secret: &str| {
+        use hmac::Mac;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(event.to_string().as_bytes());
+        let hex: String = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        vec![("x-hub-signature-256", format!("sha256={hex}"))]
+    };
+    assert_eq!(post_webhook(port, "/webhook", &event, &[]).await, 401);
+    let forged = sign("not-the-secret");
+    assert_eq!(post_webhook(port, "/webhook", &event, &forged).await, 401);
+    assert_nothing_received("whatsapp", &mut rx).await;
+
+    let good = sign("app-secret");
+    assert_eq!(post_webhook(port, "/webhook", &event, &good).await, 200);
     let msg = assert_receives("whatsapp", &mut rx).await;
     assert_eq!(msg.text, "hello");
 
@@ -828,6 +921,8 @@ async fn msteams_conformance() {
     let mock = Mock::start(Arc::new(|path: &str| {
         if path.ends_with("/token") {
             json(r#"{"access_token":"issued-token"}"#)
+        } else if path.ends_with("/jwks") {
+            json(TEST_JWKS)
         } else {
             json("{}")
         }
@@ -837,21 +932,36 @@ async fn msteams_conformance() {
     let port = free_port();
     let mut channel = TeamsChannel::new("app", "secret")
         .with_api_base(&mock.base)
+        .with_jwks_url(format!("{}/jwks", mock.base))
         .with_bind_addr(SocketAddr::from(([127, 0, 0, 1], port)));
 
     let mut rx = channel.start().await.unwrap();
-    post_webhook(
-        port,
-        "/api/messages",
-        serde_json::json!({
-            "type": "message",
-            "id": "m1",
-            "text": "hello",
-            "from": {"id": "u1", "name": "U"},
-            "conversation": {"id": "c1", "conversationType": "personal"},
-        }),
-    )
-    .await;
+    let activity = serde_json::json!({
+        "type": "message",
+        "id": "m1",
+        "text": "hello",
+        "from": {"id": "u1", "name": "U"},
+        "conversation": {"id": "c1", "conversationType": "personal"},
+    });
+    let path = "/api/messages";
+    assert_eq!(
+        post_webhook(port, path, &activity, &[]).await,
+        401,
+        "unsigned"
+    );
+    // A token for some other bot must not be accepted by this one.
+    let other_bot = [(
+        "authorization",
+        signed_jwt("https://api.botframework.com", "other-app"),
+    )];
+    assert_eq!(post_webhook(port, path, &activity, &other_bot).await, 401);
+    assert_nothing_received("msteams", &mut rx).await;
+
+    let good = [(
+        "authorization",
+        signed_jwt("https://api.botframework.com", "app"),
+    )];
+    assert_eq!(post_webhook(port, path, &activity, &good).await, 200);
     let msg = assert_receives("msteams", &mut rx).await;
     assert_eq!(msg.text, "hello");
 

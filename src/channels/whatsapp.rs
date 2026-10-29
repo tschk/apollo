@@ -11,6 +11,9 @@ pub struct WhatsAppChannel {
     access_token: String,
     phone_number_id: String,
     verify_token: String,
+    /// Meta app secret. Every webhook POST is signed with it
+    /// (`X-Hub-Signature-256`); without it nothing inbound can be trusted.
+    app_secret: Option<String>,
     api_base: String,
     bind_addr: std::net::SocketAddr,
 }
@@ -25,9 +28,17 @@ impl WhatsAppChannel {
             access_token: access_token.into(),
             phone_number_id: phone_number_id.into(),
             verify_token: verify_token.into(),
+            app_secret: None,
             api_base: "https://graph.facebook.com/v18.0".to_string(),
             bind_addr: ([0, 0, 0, 0], 3000).into(),
         }
+    }
+
+    /// The Meta app secret used to verify `X-Hub-Signature-256` on inbound
+    /// webhooks. Required: `start()` refuses to run without it.
+    pub fn with_app_secret(mut self, app_secret: impl Into<String>) -> Self {
+        self.app_secret = Some(app_secret.into());
+        self
     }
 
     /// Point the Cloud API at another origin (conformance tests).
@@ -51,6 +62,7 @@ impl WhatsAppChannel {
                 .map_err(|_| anyhow::anyhow!("WHATSAPP_PHONE_NUMBER_ID not set"))?,
             verify_token: std::env::var("WHATSAPP_VERIFY_TOKEN")
                 .unwrap_or_else(|_| "aclaw-verify".to_string()),
+            app_secret: std::env::var("WHATSAPP_APP_SECRET").ok(),
             api_base: "https://graph.facebook.com/v18.0".to_string(),
             bind_addr: ([0, 0, 0, 0], 3000).into(),
         })
@@ -64,10 +76,19 @@ impl Channel for WhatsAppChannel {
     }
 
     async fn start(&mut self) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
+        let app_secret = self
+            .app_secret
+            .clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "whatsapp: app_secret is required to verify webhook signatures \
+                     (channel.settings.app_secret / APOLLO_CHANNEL_APP_SECRET)"
+                )
+            })?;
         let (tx, rx) = mpsc::channel(32);
 
         // WhatsApp Cloud API uses webhooks
-        // For now, start a simple HTTP server to receive webhooks
         let verify_token = self.verify_token.clone();
         let _access_token = self.access_token.clone();
         let bind_addr = self.bind_addr;
@@ -93,7 +114,12 @@ impl Channel for WhatsAppChannel {
             ),
         );
 
-        let app = verification.merge(super::webhook::json_route("/webhook", parse_webhook, tx));
+        let app = verification.merge(super::webhook::json_route(
+            "/webhook",
+            parse_webhook,
+            std::sync::Arc::new(HubSignature { app_secret }),
+            tx,
+        ));
         super::webhook::spawn(bind_addr, app).await?;
         Ok(rx)
     }
@@ -133,6 +159,44 @@ impl Channel for WhatsAppChannel {
     async fn stop(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+/// Meta's webhook signature: `X-Hub-Signature-256: sha256=<hex HMAC-SHA256 of
+/// the raw body, keyed with the app secret>`.
+struct HubSignature {
+    app_secret: String,
+}
+
+#[async_trait]
+impl super::webhook::WebhookVerifier for HubSignature {
+    async fn verify(&self, headers: &axum::http::HeaderMap, body: &[u8]) -> bool {
+        use hmac::Mac;
+        let Some(sig) = headers
+            .get("x-hub-signature-256")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("sha256="))
+            .and_then(decode_hex)
+        else {
+            return false;
+        };
+        let Ok(mut mac) = hmac::Hmac::<sha2::Sha256>::new_from_slice(self.app_secret.as_bytes())
+        else {
+            return false;
+        };
+        mac.update(body);
+        // `verify_slice` compares in constant time.
+        mac.verify_slice(&sig).is_ok()
+    }
+}
+
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) || !s.is_ascii() {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 /// Meta nests messages three levels deep and can batch several per delivery,
