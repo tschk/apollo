@@ -56,3 +56,26 @@ impl Tool for DoctorTool {
         Ok(ToolResult::success(render_doctor_report(&report)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::traits::Tool;
+
+    #[tokio::test]
+    async fn test_doctor_execute() {
+        let tool = DoctorTool::new();
+
+        let result = tool.execute("{}").await.unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("apollo doctor"));
+
+        let result = tool.execute(r#"{"verbose": true}"#).await.unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("apollo doctor"));
+
+        let result = tool.execute("invalid json").await.unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("apollo doctor"));
+    }
+}
