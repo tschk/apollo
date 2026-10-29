@@ -557,7 +557,6 @@ pub fn config_model() -> String {
 
 /// Model and engine reported by the local config. The TUI status bar still
 /// asks for both; the desktop shows the model only.
-#[allow(dead_code)]
 pub fn config_summary() -> (String, String) {
     let Ok(text) = std::fs::read_to_string("apollo.json") else {
         return ("—".into(), "—".into());
