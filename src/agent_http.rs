@@ -826,4 +826,20 @@ mod tests {
             assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 31338)));
         });
     }
+
+    #[test]
+    fn http_listen_addr_falls_back_to_default_on_out_of_bounds_env_var() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some("99999"), || {
+            let addr = http_listen_addr();
+            assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 31338)));
+        });
+    }
+
+    #[test]
+    fn http_listen_addr_falls_back_to_default_on_empty_env_var() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some(""), || {
+            let addr = http_listen_addr();
+            assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 31338)));
+        });
+    }
 }
