@@ -227,7 +227,6 @@ fn ask_via_http(prompt: &str, chat_id: &str) -> Result<String, String> {
 /// The CLI is the single implementation of `config`, `doctor` and friends —
 /// masking included — so the UI drives it rather than reimplementing it. This
 /// blocks on a child process, so callers must run it off the UI thread.
-#[allow(dead_code)]
 pub fn run_apollo(args: &[&str]) -> Result<String, String> {
     let apollo = find_apollo_bin().ok_or_else(|| {
         "apollo binary not found — install it, or put it next to apollo-tui".to_string()
