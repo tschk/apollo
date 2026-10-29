@@ -1,4 +1,4 @@
-//! TodoWriteTool — create, append, and list markdown task files.
+//! Tool to create, append, and list markdown task files.
 
 use std::path::PathBuf;
 
@@ -45,7 +45,7 @@ struct TodoArgs {
     /// Items or content to write (one per line, or full markdown)
     #[serde(default)]
     content: String,
-    /// Optional filename without extension (defaults to "TODO")
+    /// Optional filename without extension (defaults to the default task file)
     #[serde(default)]
     file: String,
 }
