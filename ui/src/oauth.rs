@@ -39,15 +39,14 @@ pub enum OAuthKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Support {
     /// Sign-in works and apollo uses it.
     Live,
     /// Sign-in works; apollo needs a non-default build to use it.
-    #[allow(dead_code)]
     NeedsFeature(&'static str),
     /// apollo cannot use this login; sign-in is not offered. (No provider
     /// is in this state today; kept so the UI handles one honestly.)
-    #[allow(dead_code)]
     Unsupported(&'static str),
 }
 
@@ -86,18 +85,6 @@ impl OAuthKind {
         }
     }
 
-    /// Local port the provider's redirect comes back to.
-    /// (`rs_ai_oauth` keeps its own accessor private; these match its
-    /// documented redirect URIs.)
-    #[allow(dead_code)]
-    pub fn callback_port(self) -> u16 {
-        match self {
-            OAuthKind::ChatGpt => 1455,
-            OAuthKind::Copilot => 9876,
-            OAuthKind::Claude => 53692,
-        }
-    }
-
     /// A usable login is already on this machine. ChatGPT counts the Codex
     /// CLI file as well as the shared store, so a desktop that already has
     /// that login does not start a fresh browser flow.
@@ -122,11 +109,9 @@ impl OAuthKind {
                 return Some(token);
             }
         }
-        if self == OAuthKind::Claude {
-            if credentials::load(&self.provider()).is_none() {
-                if let Some(token) = claude_code_access_token() {
-                    return Some(token);
-                }
+        if self == OAuthKind::Claude && credentials::load(&self.provider()).is_none() {
+            if let Some(token) = claude_code_access_token() {
+                return Some(token);
             }
         }
         credentials::load(&self.provider())
