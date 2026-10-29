@@ -806,7 +806,10 @@ mod tests {
     #[test]
     fn http_listen_addr_uses_default_port_when_env_var_is_absent() {
         temp_env::with_var("APOLLO_HTTP_PORT", None::<&str>, || {
-            assert_eq!(http_listen_addr(), SocketAddr::from(([127, 0, 0, 1], 31338)));
+            assert_eq!(
+                http_listen_addr(),
+                SocketAddr::from(([127, 0, 0, 1], 31338))
+            );
         });
     }
 
@@ -820,14 +823,20 @@ mod tests {
     #[test]
     fn http_listen_addr_falls_back_to_default_on_empty_env_var() {
         temp_env::with_var("APOLLO_HTTP_PORT", Some(""), || {
-            assert_eq!(http_listen_addr(), SocketAddr::from(([127, 0, 0, 1], 31338)));
+            assert_eq!(
+                http_listen_addr(),
+                SocketAddr::from(([127, 0, 0, 1], 31338))
+            );
         });
     }
 
     #[test]
     fn http_listen_addr_falls_back_to_default_on_invalid_env_var() {
         temp_env::with_var("APOLLO_HTTP_PORT", Some("invalid_port"), || {
-            assert_eq!(http_listen_addr(), SocketAddr::from(([127, 0, 0, 1], 31338)));
+            assert_eq!(
+                http_listen_addr(),
+                SocketAddr::from(([127, 0, 0, 1], 31338))
+            );
         });
     }
 }
