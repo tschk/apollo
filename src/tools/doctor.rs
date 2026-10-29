@@ -56,3 +56,15 @@ impl Tool for DoctorTool {
         Ok(ToolResult::success(render_doctor_report(&report)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_doctor_tool_execute() {
+        let tool = DoctorTool::new();
+        let result = tool.execute(r#"{"verbose": false}"#).await.unwrap();
+        assert!(!result.is_error);
+    }
+}
