@@ -169,8 +169,7 @@ impl Tool for WorktreeTool {
 
 async fn run_git(workspace: &PathBuf, args: &[&str]) -> anyhow::Result<String> {
     let mut cmd = tokio::process::Command::new("git");
-    cmd.args(args)
-        .current_dir(workspace);
+    cmd.args(args).current_dir(workspace);
     crate::tools::child_proc::scrub(&mut cmd);
     let output = cmd.output().await?;
 
