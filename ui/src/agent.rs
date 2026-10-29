@@ -312,7 +312,6 @@ const APOLLO_EXE: &str = if cfg!(windows) {
 /// The server is the only place these are true: the local config file says
 /// what the agent started with, not what it is running now.
 #[derive(Debug, Clone, Default, PartialEq)]
-#[allow(dead_code)]
 pub struct AgentState {
     pub model: String,
     pub engine: String,
@@ -327,7 +326,6 @@ pub struct AgentState {
     pub message_count: u64,
 }
 
-#[allow(dead_code)]
 fn parse_state(value: &serde_json::Value) -> AgentState {
     let text = |key: &str| {
         value
@@ -355,7 +353,6 @@ fn parse_state(value: &serde_json::Value) -> AgentState {
     }
 }
 
-#[allow(dead_code)]
 fn blocking_client(timeout_ms: u64) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
@@ -363,7 +360,6 @@ fn blocking_client(timeout_ms: u64) -> Result<reqwest::blocking::Client, String>
         .map_err(|e| e.to_string())
 }
 
-#[allow(dead_code)]
 fn authed(request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
     match auth_token() {
         Some(token) => request.bearer_auth(token),
@@ -372,7 +368,6 @@ fn authed(request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::Requ
 }
 
 /// Read the agent's live state. `None` when no agent is reachable.
-#[allow(dead_code)]
 pub fn fetch_state() -> Option<AgentState> {
     let url = format!("http://127.0.0.1:{}/v1/state", http_port());
     let response = authed(blocking_client(1500).ok()?.get(&url)).send().ok()?;
