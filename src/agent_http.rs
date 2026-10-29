@@ -665,6 +665,64 @@ mod tests {
     }
 
     #[test]
+    fn load_or_create_token_ignores_empty_disk_token_and_creates_new_one() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let token_file = home.join(".apollo/http-token");
+        std::fs::create_dir_all(token_file.parent().unwrap()).unwrap();
+        std::fs::write(&token_file, "   \n  ").unwrap();
+
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", None),
+                ("HOME", Some(home.to_str().unwrap())),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert!(!token.is_empty());
+                assert_ne!(token, "   \n  ");
+
+                let disk_token = std::fs::read_to_string(&token_file).unwrap();
+                assert_eq!(token, disk_token);
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_trims_env_var_token() {
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", Some("  env-token-with-spaces  \n")),
+                ("HOME", None),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert_eq!(token, "env-token-with-spaces");
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_trims_disk_token() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let token_file = home.join(".apollo/http-token");
+        std::fs::create_dir_all(token_file.parent().unwrap()).unwrap();
+        std::fs::write(&token_file, "  disk-token-with-spaces  \n").unwrap();
+
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", None),
+                ("HOME", Some(home.to_str().unwrap())),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert_eq!(token, "disk-token-with-spaces");
+            },
+        );
+    }
+
+    #[test]
     fn a_correct_bearer_token_is_accepted() {
         let h = headers(&[(header::AUTHORIZATION, "Bearer s3cret")]);
         assert!(verify_token("s3cret", &h).is_ok());
