@@ -194,3 +194,36 @@ fn strip_html(html: &str) -> String {
 
     result.trim().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_html_basic_tags() {
+        let html = "<html><body><h1>Title</h1><p>Some text</p></body></html>";
+        let text = strip_html(html);
+        assert_eq!(text, "Title\nSome text");
+    }
+
+    #[test]
+    fn test_strip_html_script_and_style() {
+        let html = "<div>Text<script>let a = 1;</script><style>.a { color: red; }</style></div>";
+        let text = strip_html(html);
+        assert_eq!(text, "Text");
+    }
+
+    #[test]
+    fn test_strip_html_entities() {
+        let html = "<p>&amp; &lt; &gt; &quot; &nbsp; &#39;</p>";
+        let text = strip_html(html);
+        assert_eq!(text, "& < > \"   '");
+    }
+
+    #[test]
+    fn test_strip_html_whitespace() {
+        let html = "<p>Line 1</p><br><p>Line 2</p>";
+        let text = strip_html(html);
+        assert_eq!(text, "Line 1\n\nLine 2");
+    }
+}
