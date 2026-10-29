@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rusqlite::OptionalExtension;
 use zkr::{
     ClaimId, ClaimInput, ClaimKind, CorrectInput, DeleteInput, EmbeddingTarget, EvidenceId,
     GetInput, MemoryDb, PersonId, ProfilesInput, RememberInput, Remembered, RetrievalItem,
@@ -11,9 +10,6 @@ use zkr::{
 
 pub struct ZkrStore {
     db: Arc<Mutex<MemoryDb>>,
-    /// Read-only view of the same file, used to look up timestamps stored
-    /// for an ingestion key (zkr does not expose that lookup publicly).
-    lookup: Arc<Mutex<rusqlite::Connection>>,
     tenant_id: TenantId,
     person_id: PersonId,
 }
@@ -28,13 +24,8 @@ impl ZkrStore {
             std::fs::create_dir_all(parent)?;
         }
         let db = MemoryDb::open(path)?;
-        let lookup = rusqlite::Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
-            lookup: Arc::new(Mutex::new(lookup)),
             tenant_id: TenantId::new(tenant_id.into())?,
             person_id: PersonId::new(person_id.into())?,
         })
@@ -69,7 +60,6 @@ impl ZkrStore {
         now: i64,
     ) -> anyhow::Result<Remembered> {
         let db = Arc::clone(&self.db);
-        let lookup = Arc::clone(&self.lookup);
         let tenant_id = self.tenant_id.clone();
         let person_id = self.person_id.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<Remembered> {
@@ -77,17 +67,10 @@ impl ZkrStore {
             // `now` is the wall clock, not content: a replay of an existing key
             // reuses the stored recorded_at so only real payload differences
             // trip zkr's ingestion_key conflict check.
-            // TODO(#256): use zkr's public MemoryDb::ingestion_timestamps once released.
             let recorded_at = match &ingestion_key {
-                Some(key) => lookup
-                    .lock()
-                    .query_row(
-                        "SELECT recorded_at FROM sources WHERE tenant_id = ?1 AND person_id = ?2 AND ingestion_key = ?3",
-                        rusqlite::params![tenant_id.0, person_id.0, key],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .unwrap_or(now),
+                Some(key) => db
+                    .ingestion_timestamps(&tenant_id, &person_id, key)?
+                    .map_or(now, |stored| stored.recorded_at),
                 None => now,
             };
             Ok(db.remember(RememberInput {
@@ -100,6 +83,7 @@ impl ZkrStore {
                 recorded_at,
                 claim,
                 feature_flag: None,
+                aliases: Vec::new(),
             })?)
         })
         .await?
