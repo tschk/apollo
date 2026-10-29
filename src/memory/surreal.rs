@@ -1310,7 +1310,7 @@ mod tests {
     /// takes minutes.
     ///
     /// Run with `cargo test --release -p apollo-agent bench_search_embeddings
-    /// -- --ignored --nocapture`. Debug numbers are not meaningful.
+    /// -- --ignored --nocapture`. Performance measurements from debug builds are not meaningful.
     #[tokio::test]
     #[ignore = "benchmark: slow, writes a large corpus"]
     async fn bench_search_embeddings_scaling() {
