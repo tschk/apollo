@@ -2226,11 +2226,6 @@ impl ApolloView {
     }
 
     pub(crate) fn settings_sign_in(&mut self, kind: OAuthKind, cx: &mut Context<Self>) {
-        if matches!(kind.support(), crate::oauth::Support::Unsupported(_)) {
-            self.notice = "that sign-in is not available".into();
-            cx.notify();
-            return;
-        }
         if !kind.claim() {
             self.notice = "sign-in already running".into();
             cx.notify();
