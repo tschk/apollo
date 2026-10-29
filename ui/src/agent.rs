@@ -355,7 +355,6 @@ fn parse_state(value: &serde_json::Value) -> AgentState {
     }
 }
 
-#[allow(dead_code)]
 fn blocking_client(timeout_ms: u64) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
@@ -363,7 +362,6 @@ fn blocking_client(timeout_ms: u64) -> Result<reqwest::blocking::Client, String>
         .map_err(|e| e.to_string())
 }
 
-#[allow(dead_code)]
 fn authed(request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
     match auth_token() {
         Some(token) => request.bearer_auth(token),
