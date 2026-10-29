@@ -198,14 +198,51 @@ impl TeamManager {
             .ok_or_else(|| anyhow::anyhow!("Task '{}' not found after completion", task_id))?;
 
         let blocked = self.storage.get_blocked_tasks(&task.team_id).await?;
-        for bt in blocked {
-            if bt.blocked_by.contains(&task_id.to_string())
-                && !self
-                    .has_unresolved_dependencies(&bt.blocked_by, Some(task_id))
-                    .await?
-            {
-                // Unblock the task (move from blocked to pending)
-                self.storage.unblock_task(&bt.task_id).await?;
+
+        let mut dependent_tasks = Vec::new();
+        let mut all_blocker_ids = std::collections::HashSet::new();
+        let task_id_str = task_id.to_string();
+
+        for bt in &blocked {
+            if bt.blocked_by.contains(&task_id_str) {
+                dependent_tasks.push(bt.clone());
+                for blocker_id in &bt.blocked_by {
+                    if blocker_id != task_id {
+                        all_blocker_ids.insert(blocker_id.clone());
+                    }
+                }
+            }
+        }
+
+        if !dependent_tasks.is_empty() {
+            let all_blocker_ids_vec: Vec<String> = all_blocker_ids.into_iter().collect();
+            let all_blockers = self.storage.get_team_tasks(&all_blocker_ids_vec).await?;
+            let blocker_statuses: std::collections::HashMap<String, String> = all_blockers
+                .into_iter()
+                .map(|t| (t.task_id, t.status))
+                .collect();
+
+            for bt in dependent_tasks {
+                let mut has_unresolved = false;
+                for blocker_id in &bt.blocked_by {
+                    if blocker_id == task_id {
+                        continue;
+                    }
+                    let status = blocker_statuses
+                        .get(blocker_id)
+                        .map(|s| s.as_str())
+                        .unwrap_or("unknown");
+
+                    if status != "done" {
+                        has_unresolved = true;
+                        break;
+                    }
+                }
+
+                if !has_unresolved {
+                    // Unblock the task (move from blocked to pending)
+                    self.storage.unblock_task(&bt.task_id).await?;
+                }
             }
         }
 
