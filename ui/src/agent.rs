@@ -372,7 +372,6 @@ fn authed(request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::Requ
 }
 
 /// Read the agent's live state. `None` when no agent is reachable.
-#[allow(dead_code)]
 pub fn fetch_state() -> Option<AgentState> {
     let url = format!("http://127.0.0.1:{}/v1/state", http_port());
     let response = authed(blocking_client(1500).ok()?.get(&url)).send().ok()?;
