@@ -7,7 +7,6 @@
 
 // agent.rs is the desktop client's file. The TUI uses a subset; the rest
 // is live in apollo-ui, so unused items here are not dead code in the app.
-#[allow(dead_code)]
 #[path = "../../src/agent.rs"]
 mod agent;
 
