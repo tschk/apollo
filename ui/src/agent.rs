@@ -312,7 +312,6 @@ const APOLLO_EXE: &str = if cfg!(windows) {
 /// The server is the only place these are true: the local config file says
 /// what the agent started with, not what it is running now.
 #[derive(Debug, Clone, Default, PartialEq)]
-#[allow(dead_code)]
 pub struct AgentState {
     pub model: String,
     pub engine: String,
@@ -320,14 +319,10 @@ pub struct AgentState {
     pub cost_usd: f64,
     pub total_tokens: u64,
     pub call_count: u64,
-    pub context_tokens: u64,
-    pub context_window: u64,
     pub context_pct: u8,
     pub provider: String,
-    pub message_count: u64,
 }
 
-#[allow(dead_code)]
 fn parse_state(value: &serde_json::Value) -> AgentState {
     let text = |key: &str| {
         value
@@ -347,10 +342,7 @@ fn parse_state(value: &serde_json::Value) -> AgentState {
             .unwrap_or(0.0),
         total_tokens: number("total_tokens"),
         call_count: number("call_count"),
-        context_tokens: number("context_tokens"),
-        context_window: number("context_window"),
         provider: text("provider"),
-        message_count: number("message_count"),
         context_pct: number("context_pct").min(100) as u8,
     }
 }
