@@ -194,3 +194,37 @@ fn strip_html(html: &str) -> String {
 
     result.trim().to_string()
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_html_basic() {
+        let html = "<html><body><h1>Hello, World!</h1><p>This is a <b>test</b>.</p></body></html>";
+        assert_eq!(strip_html(html), "Hello, World!\nThis is a test.");
+    }
+
+    #[test]
+    fn test_strip_html_with_script_and_style() {
+        let html = "<html><head><style>body { color: red; }</style><script>alert('Hello');</script></head><body>Content</body></html>";
+        assert_eq!(strip_html(html), "Content");
+    }
+
+    #[test]
+    fn test_strip_html_entities() {
+        let html = "Some &amp; text &lt;with&gt; &quot;quotes&quot; and &#39;apostrophes&#39;&nbsp;spaced.";
+        assert_eq!(strip_html(html), "Some & text <with> \"quotes\" and 'apostrophes' spaced.");
+    }
+
+    #[test]
+    fn test_strip_html_newlines() {
+        let html = "<div>Line 1</div><br><div>Line 2</div><p>Line 3</p>";
+        assert_eq!(strip_html(html), "Line 1\n\nLine 2\nLine 3");
+    }
+
+    #[test]
+    fn test_strip_html_collapse_newlines() {
+        let html = "<p>Line 1</p><br><br><br><p>Line 2</p>";
+        assert_eq!(strip_html(html), "Line 1\n\nLine 2");
+    }
+}
