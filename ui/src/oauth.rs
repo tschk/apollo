@@ -86,18 +86,6 @@ impl OAuthKind {
         }
     }
 
-    /// Local port the provider's redirect comes back to.
-    /// (`rs_ai_oauth` keeps its own accessor private; these match its
-    /// documented redirect URIs.)
-    #[allow(dead_code)]
-    pub fn callback_port(self) -> u16 {
-        match self {
-            OAuthKind::ChatGpt => 1455,
-            OAuthKind::Copilot => 9876,
-            OAuthKind::Claude => 53692,
-        }
-    }
-
     /// A usable login is already on this machine. ChatGPT counts the Codex
     /// CLI file as well as the shared store, so a desktop that already has
     /// that login does not start a fresh browser flow.
