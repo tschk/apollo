@@ -222,7 +222,6 @@ fn ask_via_http(prompt: &str, chat_id: &str) -> Result<String, String> {
         .ok_or_else(|| "unexpected /v1/chat response".into())
 }
 
-
 /// The agent binary beside this app, on `PATH`, or built from this checkout.
 pub fn ensure_apollo_bin() -> Result<std::path::PathBuf, String> {
     if let Some(path) = find_apollo_bin() {
@@ -347,7 +346,6 @@ pub fn fetch_state() -> Option<AgentState> {
     let value: serde_json::Value = response.json().ok()?;
     Some(parse_state(&value))
 }
-
 
 /// Start `apollo serve` for this instance's config, or keep the one already
 /// serving it. One process stays up across messages; a different instance
@@ -505,7 +503,6 @@ pub fn config_model() -> String {
         .unwrap_or("—")
         .to_string()
 }
-
 
 #[cfg(test)]
 mod tests {
