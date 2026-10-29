@@ -384,7 +384,7 @@ pub fn fetch_state() -> Option<AgentState> {
 }
 
 /// Switch the running agent's model, returning its new state.
-#[allow(dead_code)]
+#[allow(dead_code)] // nolint:dead_code
 pub fn set_model(model: &str) -> Result<AgentState, String> {
     let url = format!("http://127.0.0.1:{}/v1/model", http_port());
     let request = blocking_client(5000)?
