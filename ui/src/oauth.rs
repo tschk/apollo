@@ -79,8 +79,6 @@ impl OAuthKind {
         }
     }
 
-
-
     /// A usable login is already on this machine. ChatGPT counts the Codex
     /// CLI file as well as the shared store, so a desktop that already has
     /// that login does not start a fresh browser flow.

@@ -1407,11 +1407,7 @@ impl OnboardingView {
                         div()
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(if selected {
-                                ACCENT
-                            } else {
-                                TEXT
-                            }))
+                            .text_color(rgb(if selected { ACCENT } else { TEXT }))
                             .child(p.label),
                     )
                     .child(div().text_xs().text_color(rgb(GHOST)).child(p.blurb))
