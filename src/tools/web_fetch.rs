@@ -202,11 +202,26 @@ mod tests {
     #[test]
     fn test_strip_html() {
         assert_eq!(strip_html("<p>Hello <b>World</b></p>"), "Hello World");
-        assert_eq!(strip_html("<div>Line 1</div><div>Line 2</div>"), "Line 1\nLine 2");
-        assert_eq!(strip_html("<h1>Heading</h1><p>Paragraph</p>"), "Heading\nParagraph");
-        assert_eq!(strip_html("<script>alert('test');</script>Content"), "Content");
-        assert_eq!(strip_html("<style>body { margin: 0; }</style>Content"), "Content");
-        assert_eq!(strip_html("Hello &amp; World &quot;test&quot;"), "Hello & World \"test\"");
+        assert_eq!(
+            strip_html("<div>Line 1</div><div>Line 2</div>"),
+            "Line 1\nLine 2"
+        );
+        assert_eq!(
+            strip_html("<h1>Heading</h1><p>Paragraph</p>"),
+            "Heading\nParagraph"
+        );
+        assert_eq!(
+            strip_html("<script>alert('test');</script>Content"),
+            "Content"
+        );
+        assert_eq!(
+            strip_html("<style>body { margin: 0; }</style>Content"),
+            "Content"
+        );
+        assert_eq!(
+            strip_html("Hello &amp; World &quot;test&quot;"),
+            "Hello & World \"test\""
+        );
         assert_eq!(strip_html("<p>One</p><br><br><br><p>Two</p>"), "One\n\nTwo");
     }
 }
