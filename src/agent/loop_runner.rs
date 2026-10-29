@@ -6,7 +6,7 @@
 //! around it — system prompt, skill injection, conversation history, memory
 //! recall, tool set, persistence, and lifecycle hooks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -180,14 +180,17 @@ impl AgentRunner {
         // accepted it, the log said so, and the agent could not call it.
         {
             let mut tools = self.tools.write().await;
+            let mut existing_names: HashSet<String> =
+                tools.iter().map(|t| t.name().to_string()).collect();
             for tool in registry.tools() {
-                if tools.iter().any(|t| t.name() == tool.name()) {
+                if existing_names.contains(tool.name()) {
                     tracing::warn!(
                         "plugin tool '{}' shadows a built-in of the same name; keeping the built-in",
                         tool.name()
                     );
                     continue;
                 }
+                existing_names.insert(tool.name().to_string());
                 tools.push(Arc::clone(tool));
             }
         }
