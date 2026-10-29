@@ -233,10 +233,7 @@ mod tests {
 
     #[test]
     fn test_strip_html_entities() {
-        assert_eq!(
-            strip_html("I &lt;3 HTML &amp; CSS"),
-            "I <3 HTML & CSS"
-        );
+        assert_eq!(strip_html("I &lt;3 HTML &amp; CSS"), "I <3 HTML & CSS");
     }
 
     #[test]
