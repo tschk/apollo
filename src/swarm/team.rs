@@ -198,14 +198,46 @@ impl TeamManager {
             .ok_or_else(|| anyhow::anyhow!("Task '{}' not found after completion", task_id))?;
 
         let blocked = self.storage.get_blocked_tasks(&task.team_id).await?;
+        if blocked.is_empty() {
+            return Ok(());
+        }
+
+        let mut all_blocker_ids = std::collections::HashSet::new();
+        for bt in &blocked {
+            if bt.blocked_by.contains(&task_id.to_string()) {
+                all_blocker_ids.extend(bt.blocked_by.iter().cloned());
+            }
+        }
+
+        if all_blocker_ids.is_empty() {
+            return Ok(());
+        }
+
+        let all_blocker_ids: Vec<String> = all_blocker_ids.into_iter().collect();
+        let fetched_blockers = self.storage.get_team_tasks(&all_blocker_ids).await?;
+        let blocker_map: std::collections::HashMap<_, _> = fetched_blockers
+            .into_iter()
+            .map(|t| (t.task_id.clone(), t))
+            .collect();
+
         for bt in blocked {
-            if bt.blocked_by.contains(&task_id.to_string())
-                && !self
-                    .has_unresolved_dependencies(&bt.blocked_by, Some(task_id))
-                    .await?
-            {
-                // Unblock the task (move from blocked to pending)
-                self.storage.unblock_task(&bt.task_id).await?;
+            if bt.blocked_by.contains(&task_id.to_string()) {
+                let mut unresolved = false;
+                for b_id in &bt.blocked_by {
+                    if b_id == task_id {
+                        continue;
+                    }
+                    if let Some(b_task) = blocker_map.get(b_id) {
+                        if b_task.status != "done" {
+                            unresolved = true;
+                            break;
+                        }
+                    }
+                }
+
+                if !unresolved {
+                    self.storage.unblock_task(&bt.task_id).await?;
+                }
             }
         }
 
