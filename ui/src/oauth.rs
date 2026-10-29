@@ -39,15 +39,14 @@ pub enum OAuthKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Support {
     /// Sign-in works and apollo uses it.
     Live,
     /// Sign-in works; apollo needs a non-default build to use it.
-    #[allow(dead_code)]
     NeedsFeature(&'static str),
     /// apollo cannot use this login; sign-in is not offered. (No provider
     /// is in this state today; kept so the UI handles one honestly.)
-    #[allow(dead_code)]
     Unsupported(&'static str),
 }
 
