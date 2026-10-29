@@ -90,6 +90,29 @@ fn spinner_frame(start: Instant) -> &'static str {
     SPINNER_FRAMES[index]
 }
 
+fn config_summary() -> (String, String) {
+    let Ok(text) = std::fs::read_to_string("apollo.json") else {
+        return ("—".into(), "—".into());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return ("—".into(), "—".into());
+    };
+    let model = v
+        .get("model")
+        .and_then(|m| m.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("—")
+        .to_string();
+    let engine = v
+        .get("agent")
+        .and_then(|a| a.get("engine"))
+        .and_then(|e| e.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("—")
+        .to_string();
+    (model, engine)
+}
+
 /// Idle spinner frames would rotate every 80ms and defeat the changed_keys()
 /// redraw gate, repainting a still screen at 12Hz — so idle is empty.
 fn spinner_text(busy: bool, start: Instant) -> &'static str {
@@ -449,7 +472,7 @@ struct App {
 impl App {
     fn new() -> Self {
         let (tx, rx) = channel();
-        let (model, engine) = agent::config_summary();
+        let (model, engine) = config_summary();
         Self {
             live: Vec::new(),
             scrollback: Vec::new(),
