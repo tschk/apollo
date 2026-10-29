@@ -577,8 +577,8 @@ pub fn register_apollo_tools(
 
     for tool in tools {
         let spec = tool.spec();
-        let name = spec.name.clone();
-        let description = spec.description.clone();
+        let name = spec.name;
+        let description = spec.description;
         let parameters_json = serde_json::to_string(&spec.parameters).unwrap_or_default();
 
         let tool_clone = Arc::clone(tool);
