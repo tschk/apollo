@@ -327,7 +327,6 @@ pub struct AgentState {
     pub message_count: u64,
 }
 
-#[allow(dead_code)]
 fn parse_state(value: &serde_json::Value) -> AgentState {
     let text = |key: &str| {
         value
