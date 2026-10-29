@@ -102,12 +102,23 @@ impl TeamManager {
         &self,
         blocked_by: &[String],
         ignore_task_id: Option<&str>,
+        prefetched_tasks: Option<&std::collections::HashMap<String, TeamTask>>,
     ) -> Result<bool> {
         if blocked_by.is_empty() {
             return Ok(false);
         }
 
-        let blockers = self.storage.get_team_tasks(blocked_by).await?;
+        let fetched_blockers;
+        let blockers: Vec<&TeamTask> = if let Some(prefetched) = prefetched_tasks {
+            blocked_by
+                .iter()
+                .filter_map(|id| prefetched.get(id))
+                .collect()
+        } else {
+            fetched_blockers = self.storage.get_team_tasks(blocked_by).await?;
+            fetched_blockers.iter().collect()
+        };
+
         for blocker in blockers {
             if Some(blocker.task_id.as_str()) == ignore_task_id {
                 continue;
@@ -177,7 +188,7 @@ impl TeamManager {
         // Check if task is blocked
         if task.status == "blocked"
             && self
-                .has_unresolved_dependencies(&task.blocked_by, None)
+                .has_unresolved_dependencies(&task.blocked_by, None, None)
                 .await?
         {
             bail!("Task '{}' is blocked by incomplete dependencies", task_id);
@@ -198,10 +209,26 @@ impl TeamManager {
             .ok_or_else(|| anyhow::anyhow!("Task '{}' not found after completion", task_id))?;
 
         let blocked = self.storage.get_blocked_tasks(&task.team_id).await?;
+
+        let mut all_blocker_ids = std::collections::HashSet::new();
+        for bt in &blocked {
+            if bt.blocked_by.contains(&task_id.to_string()) {
+                for id in &bt.blocked_by {
+                    all_blocker_ids.insert(id.clone());
+                }
+            }
+        }
+        let all_blocker_ids: Vec<String> = all_blocker_ids.into_iter().collect();
+        let all_blockers = self.storage.get_team_tasks(&all_blocker_ids).await?;
+        let prefetched: std::collections::HashMap<String, TeamTask> = all_blockers
+            .into_iter()
+            .map(|t| (t.task_id.clone(), t))
+            .collect();
+
         for bt in blocked {
             if bt.blocked_by.contains(&task_id.to_string())
                 && !self
-                    .has_unresolved_dependencies(&bt.blocked_by, Some(task_id))
+                    .has_unresolved_dependencies(&bt.blocked_by, Some(task_id), Some(&prefetched))
                     .await?
             {
                 // Unblock the task (move from blocked to pending)
