@@ -11,10 +11,12 @@
   as a non-root user and needs `-e APOLLO_HTTP_TOKEN=…`.
 - MCP `tools/call` (stdio and HTTP) runs through the permission hooks, so
   `agent.permissions.deny`/`allow` apply to it like any agent tool call.
-- Webhook channels verify every request: WhatsApp checks
+- Webhook channels verify every POST delivery: WhatsApp checks
   `X-Hub-Signature-256` (new required `app_secret` setting), Google Chat and
   Teams check the platform's RS256 JWT (Google Chat needs the new required
-  `audience` setting, the app's project number). Unverified requests get 401.
+  `audience` setting, the app's project number). Unverified POSTs get 401.
+  WhatsApp's GET subscription challenge is still checked against
+  `verify_token` only, as Meta specifies.
 - `[channel].allowed_chat_ids` / `allowed_sender_ids` are enforced on every
   channel, not only Telegram. A configured sender list no longer admits
   messages with an empty sender id.

@@ -64,6 +64,9 @@ impl Channel for TeamsChannel {
         let (tx, rx) = mpsc::channel(32);
         // The Bot Framework signs every activity it delivers with a JWT whose
         // audience is this bot's app id.
+        if self.app_id.trim().is_empty() {
+            anyhow::bail!("msteams: app_id is required to verify webhook requests");
+        }
         let verifier = std::sync::Arc::new(super::webhook::JwtVerifier::new(
             self.jwks_url.clone(),
             BOT_FRAMEWORK_ISSUER,

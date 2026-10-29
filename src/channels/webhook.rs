@@ -111,7 +111,16 @@ pub struct JwtVerifier {
     jwks_url: String,
     issuer: String,
     audience: String,
-    keys: tokio::sync::Mutex<Option<(std::time::Instant, jsonwebtoken::jwk::JwkSet)>>,
+    keys: tokio::sync::Mutex<JwksCache>,
+}
+
+#[cfg(any(feature = "channel-googlechat", feature = "channel-msteams"))]
+#[derive(Default)]
+struct JwksCache {
+    /// The last set fetched successfully, and when.
+    set: Option<(std::time::Instant, jsonwebtoken::jwk::JwkSet)>,
+    /// The last fetch attempt, successful or not. Throttles refetches.
+    attempted: Option<std::time::Instant>,
 }
 
 #[cfg(any(feature = "channel-googlechat", feature = "channel-msteams"))]
@@ -121,6 +130,9 @@ impl JwtVerifier {
     /// An unknown `kid` triggers a refetch, but no more often than this, so
     /// garbage tokens cannot turn the receiver into a JWKS-fetch amplifier.
     const MIN_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
+    /// While the JWKS endpoint is unreachable a stale set keeps working, but
+    /// only this long, so a key the platform has revoked stops authorising.
+    const MAX_STALE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
     pub fn new(
         jwks_url: impl Into<String>,
@@ -131,35 +143,41 @@ impl JwtVerifier {
             jwks_url: jwks_url.into(),
             issuer: issuer.into(),
             audience: audience.into(),
-            keys: tokio::sync::Mutex::new(None),
+            keys: tokio::sync::Mutex::new(JwksCache::default()),
         }
     }
 
     async fn key_for(&self, kid: &str) -> Option<jsonwebtoken::DecodingKey> {
         let mut cache = self.keys.lock().await;
-        if let Some((fetched, set)) = cache.as_ref() {
-            let age = fetched.elapsed();
-            match set.find(kid) {
-                Some(jwk) if age < Self::TTL => {
-                    return jsonwebtoken::DecodingKey::from_jwk(jwk).ok()
-                }
-                None if age < Self::MIN_REFRESH => return None,
-                _ => {}
+        let age = |c: &JwksCache| c.set.as_ref().map(|(at, _)| at.elapsed());
+        let known = |c: &JwksCache| c.set.as_ref().is_some_and(|(_, s)| s.find(kid).is_some());
+
+        let due = !(known(&cache) && age(&cache).is_some_and(|a| a < Self::TTL));
+        // Failed attempts count too, so an unreachable endpoint plus a stream
+        // of unknown `kid`s cannot trigger a fetch per request.
+        let throttled = cache
+            .attempted
+            .is_some_and(|at| at.elapsed() < Self::MIN_REFRESH);
+        if due && !throttled {
+            cache.attempted = Some(std::time::Instant::now());
+            match self.fetch().await {
+                Ok(set) => cache.set = Some((std::time::Instant::now(), set)),
+                // Keep the stale set (up to MAX_STALE) rather than failing
+                // every request while the endpoint is briefly unreachable.
+                Err(e) => tracing::warn!("webhook JWKS fetch from {} failed: {e}", self.jwks_url),
             }
         }
 
-        match self.fetch().await {
-            Ok(set) => *cache = Some((std::time::Instant::now(), set)),
-            // Keep a stale set rather than failing every request while the
-            // JWKS endpoint is briefly unreachable.
-            Err(e) => tracing::warn!("webhook JWKS fetch from {} failed: {e}", self.jwks_url),
+        if !age(&cache).is_some_and(|a| a < Self::MAX_STALE) {
+            return None;
         }
-        let (_, set) = cache.as_ref()?;
+        let (_, set) = cache.set.as_ref()?;
         jsonwebtoken::DecodingKey::from_jwk(set.find(kid)?).ok()
     }
 
     async fn fetch(&self) -> anyhow::Result<jsonwebtoken::jwk::JwkSet> {
-        Ok(crate::http::shared()
+        // Bounded timeout: the cache lock is held across this call.
+        Ok(crate::http::standard()
             .get(&self.jwks_url)
             .send()
             .await?
@@ -201,5 +219,42 @@ impl WebhookVerifier for JwtVerifier {
         validation.set_audience(&[&self.audience]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         jsonwebtoken::decode::<Value>(token, &key, &validation).is_ok()
+    }
+}
+
+#[cfg(all(test, any(feature = "channel-googlechat", feature = "channel-msteams")))]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn failed_jwks_fetches_are_throttled() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
+        let app = Router::new().fallback(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            async { StatusCode::INTERNAL_SERVER_ERROR }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/jwks", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let verifier = JwtVerifier::new(url, "iss", "aud");
+        let b64 = |v: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
+        };
+        for i in 0..5 {
+            // A distinct unknown kid each time, as an attacker would send.
+            let header = b64(serde_json::json!({"alg": "RS256", "kid": format!("k{i}")}));
+            let token = format!("{header}.{}.sig", b64(serde_json::json!({})));
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            );
+            assert!(!verifier.verify(&headers, b"").await);
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "one fetch, then throttled");
     }
 }

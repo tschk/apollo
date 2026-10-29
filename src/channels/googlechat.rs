@@ -185,6 +185,7 @@ impl Channel for GoogleChatChannel {
         let audience = self
             .audience
             .clone()
+            .map(|a| a.trim().to_string())
             .filter(|a| !a.is_empty())
             .ok_or_else(|| {
                 anyhow::anyhow!(

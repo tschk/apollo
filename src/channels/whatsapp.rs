@@ -79,7 +79,7 @@ impl Channel for WhatsAppChannel {
         let app_secret = self
             .app_secret
             .clone()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "whatsapp: app_secret is required to verify webhook signatures \
