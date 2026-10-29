@@ -383,7 +383,6 @@ pub fn fetch_state() -> Option<AgentState> {
     Some(parse_state(&value))
 }
 
-
 /// Start `apollo serve` for this instance's config, or keep the one already
 /// serving it. One process stays up across messages; a different instance
 /// replaces it. The server is the tool loop, not a one-shot completion.
