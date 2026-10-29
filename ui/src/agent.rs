@@ -555,7 +555,6 @@ pub fn config_model() -> String {
         .to_string()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
