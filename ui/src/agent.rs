@@ -555,31 +555,6 @@ pub fn config_model() -> String {
         .to_string()
 }
 
-/// Model and engine reported by the local config. The TUI status bar still
-/// asks for both; the desktop shows the model only.
-#[allow(dead_code)]
-pub fn config_summary() -> (String, String) {
-    let Ok(text) = std::fs::read_to_string("apollo.json") else {
-        return ("—".into(), "—".into());
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return ("—".into(), "—".into());
-    };
-    let model = v
-        .get("model")
-        .and_then(|m| m.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("—")
-        .to_string();
-    let engine = v
-        .get("agent")
-        .and_then(|a| a.get("engine"))
-        .and_then(|e| e.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("—")
-        .to_string();
-    (model, engine)
-}
 
 #[cfg(test)]
 mod tests {
