@@ -103,12 +103,11 @@ impl OAuthKind {
                 return Some(token);
             }
         }
-        if self == OAuthKind::Claude
-            && credentials::load(&self.provider()).is_none() {
-                if let Some(token) = claude_code_access_token() {
-                    return Some(token);
-                }
+        if self == OAuthKind::Claude && credentials::load(&self.provider()).is_none() {
+            if let Some(token) = claude_code_access_token() {
+                return Some(token);
             }
+        }
         credentials::load(&self.provider())
             .filter(|t| !credentials::is_expired(t))
             .map(|t| t.access_token)
