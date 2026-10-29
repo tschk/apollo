@@ -137,16 +137,6 @@ fn context_color(pct: u8) -> &'static str {
     }
 }
 
-fn format_tokens(count: u64) -> String {
-    if count < 1000 {
-        count.to_string()
-    } else if count < 1_000_000 {
-        format!("{}k", count / 1000)
-    } else {
-        format!("{:.1}M", count as f64 / 1_000_000.0)
-    }
-}
-
 /// Commands whose name starts with what has been typed.
 fn palette_matches(input: &str) -> Vec<(&'static str, &'static str)> {
     if !input.starts_with('/') || input.contains(' ') {
@@ -429,7 +419,6 @@ struct App {
     mode: String,
     cost_usd: f64,
     context_pct: u8,
-    context_window: u64,
     project: String,
     branch: String,
     online: bool,
@@ -463,7 +452,6 @@ impl App {
             mode: "—".into(),
             cost_usd: 0.0,
             context_pct: 0,
-            context_window: 0,
             project: project_name(),
             branch: git_branch(),
             online: agent::agent_online(),
@@ -568,7 +556,6 @@ impl App {
         self.mode = state.mode;
         self.cost_usd = state.cost_usd;
         self.context_pct = state.context_pct;
-        self.context_window = state.context_window;
         self.online = true;
     }
 
@@ -670,11 +657,7 @@ impl App {
                 self.refresh_state();
             }
             "/context" => {
-                let text = format!(
-                    "{}% of a {} token compaction budget",
-                    self.context_pct,
-                    format_tokens(self.context_window)
-                );
+                let text = format!("{}% of a compaction budget", self.context_pct);
                 self.note(text);
                 self.refresh_state();
             }
@@ -946,7 +929,6 @@ impl App {
         tpl.set("mode", self.mode.clone());
         tpl.set("cost", format!("{:.3}", self.cost_usd));
         tpl.set("context_pct", self.context_pct.to_string());
-        tpl.set("context_window", format_tokens(self.context_window));
         tpl.set("context_color", context_color(self.context_pct));
         tpl.set("conn", if self.online { "connected" } else { "offline" });
         tpl.set(
@@ -1326,13 +1308,6 @@ mod tests {
     }
 
     #[test]
-    fn token_counts_are_abbreviated() {
-        assert_eq!(format_tokens(999), "999");
-        assert_eq!(format_tokens(32_000), "32k");
-        assert_eq!(format_tokens(1_500_000), "1.5M");
-    }
-
-    #[test]
     fn state_from_the_server_replaces_the_config_guess() {
         let mut a = app();
         a.apply_state(AgentState {
@@ -1342,11 +1317,8 @@ mod tests {
             cost_usd: 1.5,
             total_tokens: 10,
             call_count: 2,
-            context_tokens: 900,
-            context_window: 1000,
             context_pct: 90,
             provider: "anthropic".into(),
-            message_count: 4,
         });
         assert_eq!(a.model, "claude-opus-4");
         assert_eq!(a.engine, "rx4");
