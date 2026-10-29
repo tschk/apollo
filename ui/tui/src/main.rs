@@ -36,7 +36,7 @@ const MODEL_ROWS: usize = 5;
 /// Slash commands, in palette order.
 ///
 /// apollo's server-side surface decides what can be here: telekinesis'
-/// /scope, /subagent, /todo, /budget, /review, /mcp and /plan have no apollo
+/// /scope, /subagent, /to-do, /budget, /review, /mcp and /plan have no apollo
 /// endpoint to drive, so they are absent rather than inert. /compact is absent
 /// for the same reason: apollo compacts a turn's in-flight messages, never a
 /// stored chat, so there is nothing for a command to ask for.
