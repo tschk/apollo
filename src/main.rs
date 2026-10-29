@@ -21,6 +21,7 @@ use apollo::channels::discord::DiscordChannel;
 use apollo::config::Config;
 use apollo::cron_scheduler::CronScheduler;
 use apollo::diagnostics::{collect_doctor_report, render_doctor_report, render_findings};
+#[allow(unused_imports)]
 use apollo::heartbeat::{self, HeartbeatConfig};
 use apollo::policy::ExecutionPolicy;
 use apollo::prompt;
@@ -1238,6 +1239,7 @@ async fn main() -> anyhow::Result<()> {
                     &cfg.system_prompt,
                     prompt::build_system_prompt(&workspace).await,
                 );
+                #[allow(unused_mut)]
                 let mut runner = apollo::agent::AgentRunner::new(
                     Arc::clone(&provider),
                     tools.clone(),
