@@ -1,0 +1,32 @@
+<<<<<<< SEARCH
+    #[test]
+    fn load_or_create_token_fails_when_home_is_missing_and_no_env_var() {
+=======
+    #[test]
+    fn load_or_create_token_ignores_empty_disk_file_and_creates_new() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let token_file = home.join(".apollo/http-token");
+        std::fs::create_dir_all(token_file.parent().unwrap()).unwrap();
+        std::fs::write(&token_file, "   \n  ").unwrap(); // Empty when trimmed
+
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", None),
+                ("HOME", Some(home.to_str().unwrap())),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert!(!token.is_empty());
+                assert_ne!(token, "   \n  ");
+
+                // Verify the new token was written over the empty file
+                let disk_token = std::fs::read_to_string(&token_file).unwrap();
+                assert_eq!(token, disk_token);
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_fails_when_home_is_missing_and_no_env_var() {
+>>>>>>> REPLACE
