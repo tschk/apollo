@@ -271,7 +271,18 @@ pub fn inline_shell_trusted(
         } else {
             workspace.join(dir)
         };
-        dir.canonicalize().is_ok_and(|dir| skill.starts_with(dir))
+        match dir.canonicalize() {
+            Ok(dir) => skill.starts_with(dir),
+            Err(e) => {
+                // Otherwise skills silently stop running their snippets.
+                tracing::warn!(
+                    "policy.trusted_skill_dirs entry {} cannot be resolved ({e}); \
+                     skills there will not run inline shell",
+                    dir.display()
+                );
+                false
+            }
+        }
     })
 }
 

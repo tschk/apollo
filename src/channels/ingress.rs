@@ -19,6 +19,13 @@ pub struct IngressFilter {
 
 impl IngressFilter {
     pub fn new(allowed_chat_ids: Vec<String>, allowed_sender_ids: Vec<String>) -> Self {
+        if allowed_chat_ids
+            .iter()
+            .chain(&allowed_sender_ids)
+            .any(|x| x.trim().is_empty())
+        {
+            tracing::warn!("channel allowlist contains a blank entry; it matches nothing");
+        }
         Self {
             allowed_chat_ids,
             allowed_sender_ids,
@@ -31,9 +38,12 @@ impl IngressFilter {
 
     /// An empty list admits everything on that axis. A non-empty list must
     /// match — including an empty sender id, which fails closed rather than
-    /// bypassing the sender list.
+    /// bypassing the sender list. Blank entries in a list never match: `[""]`
+    /// is a configured list that admits nobody, not an open one.
     pub fn allows(&self, chat_id: &str, sender_id: &str) -> bool {
-        let listed = |list: &[String], id: &str| list.is_empty() || list.iter().any(|x| x == id);
+        let listed = |list: &[String], id: &str| {
+            list.is_empty() || list.iter().any(|x| !x.trim().is_empty() && x == id)
+        };
         listed(&self.allowed_chat_ids, chat_id) && listed(&self.allowed_sender_ids, sender_id)
     }
 }
@@ -170,5 +180,13 @@ mod tests {
             got.push(m.id);
         }
         assert_eq!(got, vec!["c1/alice", "c1/bob"]);
+    }
+
+    #[test]
+    fn a_blank_allowlist_entry_admits_nobody() {
+        let f = IngressFilter::new(vec![], vec!["".into(), " ".into()]);
+        assert!(!f.allows("c1", ""));
+        assert!(!f.allows("c1", " "));
+        assert!(!f.allows("c1", "alice"));
     }
 }

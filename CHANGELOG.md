@@ -19,7 +19,7 @@
   `verify_token` only, as Meta specifies.
 - `[channel].allowed_chat_ids` / `allowed_sender_ids` are enforced on every
   channel, not only Telegram. A configured sender list no longer admits
-  messages with an empty sender id.
+  messages with an empty sender id, and a blank list entry matches nothing.
 - Skill `!`cmd`` snippets only run when `policy.allow_shell` is on and the
   skill lives under `policy.trusted_skill_dirs` (empty by default).
 
