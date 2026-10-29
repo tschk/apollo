@@ -276,11 +276,7 @@ async fn maybe_restart_service(
 async fn run_git(workspace: &Path, args: &[&str]) -> anyhow::Result<String> {
     let mut cmd = tokio::process::Command::new("git");
     crate::tools::child_proc::scrub(&mut cmd);
-    let output = cmd
-        .args(args)
-        .current_dir(workspace)
-        .output()
-        .await?;
+    let output = cmd.args(args).current_dir(workspace).output().await?;
 
     if !output.status.success() {
         anyhow::bail!(
