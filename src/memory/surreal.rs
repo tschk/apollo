@@ -1314,6 +1314,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "benchmark: slow, writes a large corpus"]
     async fn bench_search_embeddings_scaling() {
+        if cfg!(debug_assertions) {
+            eprintln!(
+                "WARNING: Debug numbers are not meaningful. Run with `cargo test --release ...`"
+            );
+            return;
+        }
         const DIM: usize = 1536;
         const QUERIES: usize = 100;
         // A 10k-row corpus at 1536 dims costs ~900MB on disk, so 50k needs
