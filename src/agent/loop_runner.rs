@@ -180,7 +180,8 @@ impl AgentRunner {
         // accepted it, the log said so, and the agent could not call it.
         {
             let mut tools = self.tools.write().await;
-            let mut existing_names: std::collections::HashSet<_> = tools.iter().map(|t| t.name().to_string()).collect();
+            let mut existing_names: std::collections::HashSet<_> =
+                tools.iter().map(|t| t.name().to_string()).collect();
             for tool in registry.tools() {
                 if existing_names.contains(tool.name()) {
                     tracing::warn!(
