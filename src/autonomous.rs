@@ -283,7 +283,8 @@ impl AutonomousLoop {
 /// Run a test command, return true if it passes.
 async fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
     tracing::info!("[autonomous] running tests: {}", cmd);
-    let output = tokio::process::Command::new("sh")
+    let mut cmd_obj = tokio::process::Command::new("sh");
+    let output = crate::tools::child_proc::scrub(&mut cmd_obj)
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
@@ -304,7 +305,8 @@ async fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
 
 /// Check if workspace has uncommitted changes.
 async fn workspace_has_changes(workspace: &Path) -> bool {
-    let output = tokio::process::Command::new("git")
+    let mut cmd_obj = tokio::process::Command::new("git");
+    let output = crate::tools::child_proc::scrub(&mut cmd_obj)
         .args(["status", "--porcelain"])
         .current_dir(workspace)
         .output()
@@ -318,7 +320,8 @@ async fn workspace_has_changes(workspace: &Path) -> bool {
 
 /// Stash workspace changes.
 async fn git_stash(workspace: &Path) {
-    let _ = tokio::process::Command::new("git")
+    let mut cmd_obj = tokio::process::Command::new("git");
+    let _ = crate::tools::child_proc::scrub(&mut cmd_obj)
         .args(["stash", "push", "-m", "autonomous: pre-task stash"])
         .current_dir(workspace)
         .output()
@@ -327,20 +330,23 @@ async fn git_stash(workspace: &Path) {
 
 /// Commit all changes and push.
 async fn git_commit_and_push(message: &str, remote: &str, branch: &str, cwd: &Path) {
-    let _ = tokio::process::Command::new("git")
+    let mut cmd_obj_add = tokio::process::Command::new("git");
+    let _ = crate::tools::child_proc::scrub(&mut cmd_obj_add)
         .args(["add", "-A"])
         .current_dir(cwd)
         .output()
         .await;
 
-    let _ = tokio::process::Command::new("git")
+    let mut cmd_obj_commit = tokio::process::Command::new("git");
+    let _ = crate::tools::child_proc::scrub(&mut cmd_obj_commit)
         .args(["commit", "-m", message])
         .current_dir(cwd)
         .output()
         .await;
 
     tracing::info!("[autonomous] pushing to {}/{}", remote, branch);
-    if let Ok(output) = tokio::process::Command::new("git")
+    let mut cmd_obj_push = tokio::process::Command::new("git");
+    if let Ok(output) = crate::tools::child_proc::scrub(&mut cmd_obj_push)
         .args(["push", remote, branch])
         .current_dir(cwd)
         .output()
