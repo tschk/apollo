@@ -135,11 +135,13 @@ impl TeamManager {
         // Verify blocker tasks exist
         if !blocked_by.is_empty() {
             let existing_blockers = self.storage.get_team_tasks(&blocked_by).await?;
-            let existing_ids: std::collections::HashSet<_> =
-                existing_blockers.into_iter().map(|t| t.task_id).collect();
-            for blocker_id in &blocked_by {
-                if !existing_ids.contains(blocker_id) {
-                    bail!("Blocker task '{}' not found", blocker_id);
+            if existing_blockers.len() != blocked_by.len() {
+                let existing_ids: std::collections::HashSet<_> =
+                    existing_blockers.into_iter().map(|t| t.task_id).collect();
+                for blocker_id in &blocked_by {
+                    if !existing_ids.contains(blocker_id) {
+                        bail!("Blocker task '{}' not found", blocker_id);
+                    }
                 }
             }
         }
