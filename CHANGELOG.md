@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Upgrade requirements
+
+- WhatsApp requires `channel.settings.app_secret` (the Meta app secret).
+  Google Chat requires `channel.settings.audience` (the app's project number).
+  Both channels now fail at startup without these settings.
+- Before upgrading a Docker deployment, set `-e APOLLO_HTTP_TOKEN=<secret>`
+  and configure clients to send `Authorization: Bearer <secret>`. Without the
+  token the container refuses to start. It now runs as non-root; mounted
+  workspace directories must be writable by the container's `apollo` user.
+- `apollo mcp --port` now binds loopback by default. Remote access requires
+  an explicit `--host` and `APOLLO_HTTP_TOKEN`.
+- Skill inline command snippets stop running unless `policy.allow_shell` is
+  enabled and the skill is under `policy.trusted_skill_dirs` (empty by default).
+- An older MCP HTTP server exposed on `0.0.0.0` is an urgent security risk:
+  restrict access immediately while preparing the authenticated upgrade.
+
 ### Security
 
 - `apollo mcp --port` now requires `Authorization: Bearer <token>` on `/mcp`,
