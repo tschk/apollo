@@ -268,6 +268,20 @@ fn authorize(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
     check_auth(headers)
 }
 
+/// The same two gates against an explicit token, for other agent-driving HTTP
+/// servers in this process (the MCP HTTP server).
+pub(crate) fn authorize_with(
+    expected: &str,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), StatusCode> {
+    reject_browser_origin(headers)?;
+    if expected.is_empty() {
+        // An empty token would match an absent header.
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    verify_token(expected, headers)
+}
+
 /// Start the HTTP server.
 ///
 /// The `JoinHandle` is returned rather than dropped: `with_graceful_shutdown`

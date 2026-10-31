@@ -3,7 +3,7 @@
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -14,7 +14,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-use crate::agent::AgentRunner;
+use crate::agent::rotary_bridge::execute_tool_with_hooks;
+use crate::agent::{AgentRunner, ToolHookContext};
 use crate::channels::traits::{Channel, IncomingMessage, OutgoingMessage};
 use crate::tools::traits::{Tool, ToolSpec};
 
@@ -414,6 +415,11 @@ struct McpState {
     provider: Option<Arc<dyn crate::providers::traits::Provider>>,
     model: Option<String>,
     runner: Option<Arc<AgentRunner>>,
+    /// Pre/post tool hooks (permission rules). Every `tools/call` runs
+    /// through them, exactly as an agent-initiated call does.
+    hook_ctx: ToolHookContext,
+    /// Bearer token every route except `/health` requires.
+    token: Arc<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -434,6 +440,7 @@ pub async fn run_mcp_server(
     tools: Vec<Arc<dyn Tool>>,
     provider: Option<Arc<dyn crate::providers::traits::Provider>>,
     model: Option<String>,
+    hook_ctx: ToolHookContext,
 ) -> anyhow::Result<()> {
     let stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
@@ -458,7 +465,7 @@ pub async fn run_mcp_server(
             }
         };
 
-        let response = handle_request(&request, &tools, &provider, &model).await;
+        let response = handle_request(&request, &tools, &provider, &model, &hook_ctx).await;
         write_response(&mut stdout, &response).await?;
     }
 
@@ -475,30 +482,67 @@ async fn health_handler() -> Json<serde_json::Value> {
     }))
 }
 
-pub async fn run_mcp_server_http(
-    tools: Vec<Arc<dyn Tool>>,
-    provider: Option<Arc<dyn crate::providers::traits::Provider>>,
-    model: Option<String>,
-    runner: Option<Arc<AgentRunner>>,
-    port: u16,
-) -> anyhow::Result<()> {
+/// Everything the HTTP server needs besides its listen address.
+pub struct McpHttpConfig {
+    pub tools: Vec<Arc<dyn Tool>>,
+    pub provider: Option<Arc<dyn crate::providers::traits::Provider>>,
+    pub model: Option<String>,
+    pub runner: Option<Arc<AgentRunner>>,
+    pub hook_ctx: ToolHookContext,
+}
+
+/// The bearer token for an MCP HTTP server bound to `addr`.
+///
+/// Same token as the desktop HTTP API (`APOLLO_HTTP_TOKEN`, else
+/// `~/.apollo/http-token`). A non-loopback bind must be given the token
+/// explicitly through `APOLLO_HTTP_TOKEN`: a token generated into a file
+/// inside a container is one nobody outside it can present, which would push
+/// operators toward disabling auth rather than using it.
+pub fn mcp_http_token(addr: std::net::SocketAddr) -> anyhow::Result<String> {
+    if !addr.ip().is_loopback() {
+        let token = std::env::var("APOLLO_HTTP_TOKEN").unwrap_or_default();
+        let token = token.trim();
+        if token.is_empty() {
+            anyhow::bail!(
+                "refusing to serve MCP on non-loopback address {addr} without \
+                 APOLLO_HTTP_TOKEN set: the server exposes shell and file tools"
+            );
+        }
+        return Ok(token.to_string());
+    }
+    crate::agent_http::load_or_create_token()
+}
+
+fn router(cfg: McpHttpConfig, token: String) -> Router {
     let state = McpState {
-        tools: Arc::new(tools),
-        provider,
-        model,
-        runner,
+        tools: Arc::new(cfg.tools),
+        provider: cfg.provider,
+        model: cfg.model,
+        runner: cfg.runner,
+        hook_ctx: cfg.hook_ctx,
+        token: Arc::new(token),
     };
 
-    let app = Router::new()
+    Router::new()
         .route("/health", get(health_handler))
         .route("/chat", post(handle_http_chat))
         .route("/mcp", post(handle_http_mcp))
         .route("/", post(handle_http_mcp))
-        .with_state(state);
+        .with_state(state)
+}
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+pub async fn run_mcp_server_http(
+    cfg: McpHttpConfig,
+    addr: std::net::SocketAddr,
+) -> anyhow::Result<()> {
+    let token = mcp_http_token(addr)?;
+    let app = router(cfg, token);
+
     tracing::info!("MCP HTTP server listening on {}", addr);
-    eprintln!("MCP HTTP server listening on {}", addr);
+    eprintln!(
+        "MCP HTTP server listening on {} (bearer token required)",
+        addr
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -508,8 +552,17 @@ pub async fn run_mcp_server_http(
 
 async fn handle_http_chat(
     State(state): State<McpState>,
+    headers: HeaderMap,
     Json(req): Json<HttpChatRequest>,
 ) -> (StatusCode, Json<HttpChatResponse>) {
+    if let Err(status) = crate::agent_http::authorize_with(&state.token, &headers) {
+        return (
+            status,
+            Json(HttpChatResponse {
+                text: "Unauthorized".to_string(),
+            }),
+        );
+    }
     let Some(runner) = state.runner else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -551,10 +604,21 @@ async fn handle_http_chat(
 
 async fn handle_http_mcp(
     State(state): State<McpState>,
+    headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
-) -> impl IntoResponse {
-    let response = handle_request(&request, &state.tools, &state.provider, &state.model).await;
-    Json(response)
+) -> axum::response::Response {
+    if let Err(status) = crate::agent_http::authorize_with(&state.token, &headers) {
+        return status.into_response();
+    }
+    let response = handle_request(
+        &request,
+        &state.tools,
+        &state.provider,
+        &state.model,
+        &state.hook_ctx,
+    )
+    .await;
+    Json(response).into_response()
 }
 
 async fn write_response(
@@ -573,13 +637,22 @@ async fn handle_request(
     tools: &[Arc<dyn Tool>],
     provider: &Option<Arc<dyn crate::providers::traits::Provider>>,
     model: &Option<String>,
+    hook_ctx: &ToolHookContext,
 ) -> JsonRpcResponse {
     match req.method.as_str() {
         "initialize" => handle_initialize(req.id.clone()),
         "notifications/initialized" => JsonRpcResponse::success(req.id.clone(), Value::Null),
         "tools/list" => handle_tools_list(req.id.clone(), tools, provider.is_some()),
         "tools/call" => {
-            handle_tools_call(req.id.clone(), req.params.as_ref(), tools, provider, model).await
+            handle_tools_call(
+                req.id.clone(),
+                req.params.as_ref(),
+                tools,
+                provider,
+                model,
+                hook_ctx,
+            )
+            .await
         }
         "shutdown" => {
             tracing::info!("MCP server shutting down");
@@ -642,6 +715,7 @@ async fn handle_tools_call(
     tools: &[Arc<dyn Tool>],
     provider: &Option<Arc<dyn crate::providers::traits::Provider>>,
     model: &Option<String>,
+    hook_ctx: &ToolHookContext,
 ) -> JsonRpcResponse {
     let params = match params {
         Some(p) => p,
@@ -662,8 +736,22 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
-    // Handle the "ask" meta-tool
+    let args_str = serde_json::to_string(&arguments).unwrap_or_default();
+
+    // Handle the "ask" meta-tool. It calls no tool itself, but it is still a
+    // tool call from the client's side, so permission rules get a say.
     if name == "ask" {
+        if let crate::agent::hooks::HookDecision::Block(reason) =
+            hook_ctx.check_pre_tool(name, &args_str).await
+        {
+            return JsonRpcResponse::success(
+                id,
+                serde_json::json!({
+                    "content": [{"type": "text", "text": reason}],
+                    "isError": true
+                }),
+            );
+        }
         if let Some(provider) = provider {
             let message = arguments
                 .get("message")
@@ -703,21 +791,166 @@ async fn handle_tools_call(
         }
     };
 
-    let args_str = serde_json::to_string(&arguments).unwrap_or_default();
-    match tool.execute(&args_str).await {
-        Ok(result) => JsonRpcResponse::success(
-            id,
-            serde_json::json!({
-                "content": [{"type": "text", "text": result.output}],
-                "isError": result.is_error
-            }),
-        ),
-        Err(e) => JsonRpcResponse::success(
-            id,
-            serde_json::json!({
-                "content": [{"type": "text", "text": format!("Tool error: {}", e)}],
-                "isError": true
-            }),
-        ),
+    // The same path an agent-initiated call takes: lifecycle events, plugin
+    // and permission pre-checks, then execution, then post hooks.
+    let result = execute_tool_with_hooks(hook_ctx, name, &args_str, Some(tool)).await;
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "content": [{"type": "text", "text": result.output}],
+            "isError": result.is_error
+        }),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::hooks::PermissionHook;
+    use crate::tools::traits::ToolResult;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Stands in for `shell`: counts how often it actually ran.
+    struct CountingTool(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            "shell"
+        }
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "shell".into(),
+                description: "test".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }
+        }
+        async fn execute(&self, _arguments: &str) -> anyhow::Result<ToolResult> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::success("ran"))
+        }
+    }
+
+    fn call(tool: &str) -> JsonRpcRequest {
+        serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": tool, "arguments": {"command": "id"}}
+        }))
+        .unwrap()
+    }
+
+    fn deny(pattern: &str) -> ToolHookContext {
+        ToolHookContext::new(
+            vec![Arc::new(PermissionHook::new(vec![pattern.into()], vec![]))],
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn tools_call_honours_permission_deny_rules() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(CountingTool(Arc::clone(&runs)))];
+
+        let resp = handle_request(&call("shell"), &tools, &None, &None, &deny("shell")).await;
+        let result = resp
+            .result
+            .expect("tool errors are results, not RPC errors");
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("deny list"));
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "denied tool must not run");
+
+        // Control: with no matching rule the same call does run.
+        let resp = handle_request(&call("shell"), &tools, &None, &None, &deny("other")).await;
+        assert_eq!(resp.result.unwrap()["isError"], false);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ask_honours_permission_deny_rules() {
+        let resp = handle_request(&call("ask"), &[], &None, &None, &deny("ask")).await;
+        assert_eq!(resp.result.expect("blocked, not missing")["isError"], true);
+    }
+
+    async fn serve(runs: Arc<AtomicUsize>) -> String {
+        let cfg = McpHttpConfig {
+            tools: vec![Arc::new(CountingTool(runs))],
+            provider: None,
+            model: None,
+            runner: None,
+            hook_ctx: ToolHookContext::default(),
+        };
+        let app = router(cfg, "s3cret".into());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn http_routes_require_the_bearer_token() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let base = serve(Arc::clone(&runs)).await;
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "shell", "arguments": {}}
+        });
+        let chat = serde_json::json!({"text": "hi", "chat_id": "c"});
+
+        for path in ["/mcp", "/"] {
+            let status = |r: reqwest::Response| r.status().as_u16();
+            let none = client.post(format!("{base}{path}")).json(&body).send();
+            assert_eq!(status(none.await.unwrap()), 401, "{path} without token");
+            let wrong = client
+                .post(format!("{base}{path}"))
+                .bearer_auth("nope")
+                .json(&body)
+                .send();
+            assert_eq!(status(wrong.await.unwrap()), 401, "{path} wrong token");
+            let browser = client
+                .post(format!("{base}{path}"))
+                .bearer_auth("s3cret")
+                .header("Origin", "https://evil.example")
+                .json(&body)
+                .send();
+            assert_eq!(status(browser.await.unwrap()), 403, "{path} from a browser");
+        }
+        let chat_none = client.post(format!("{base}/chat")).json(&chat).send();
+        assert_eq!(chat_none.await.unwrap().status().as_u16(), 401);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "no tool ran unauthenticated"
+        );
+
+        let ok = client
+            .post(format!("{base}/mcp"))
+            .bearer_auth("s3cret")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status().as_u16(), 200);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        let health = client.get(format!("{base}/health")).send().await.unwrap();
+        assert_eq!(health.status().as_u16(), 200, "health stays open");
+    }
+
+    #[test]
+    fn a_public_bind_needs_an_explicit_token() {
+        let public: std::net::SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        temp_env::with_var("APOLLO_HTTP_TOKEN", None::<&str>, || {
+            assert!(mcp_http_token(public).is_err());
+        });
+        temp_env::with_var("APOLLO_HTTP_TOKEN", Some("  "), || {
+            assert!(mcp_http_token(public).is_err());
+        });
+        temp_env::with_var("APOLLO_HTTP_TOKEN", Some("tok"), || {
+            assert_eq!(mcp_http_token(public).unwrap(), "tok");
+        });
     }
 }

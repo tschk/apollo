@@ -35,9 +35,18 @@ struct CachedToken {
     expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Google Chat signs webhook calls as this service account.
+const GOOGLE_CHAT_ISSUER: &str = "chat@system.gserviceaccount.com";
+const GOOGLE_CHAT_JWKS: &str =
+    "https://www.googleapis.com/service_accounts/v1/jwk/chat@system.gserviceaccount.com";
+
 pub struct GoogleChatChannel {
     service_account_key: String,
     space_id: Option<String>,
+    /// The "Authentication Audience" configured for the Chat app: its Google
+    /// Cloud project number. Inbound webhook JWTs must carry it as `aud`.
+    audience: Option<String>,
+    jwks_url: String,
     api_base: String,
     bind_addr: std::net::SocketAddr,
     token: Mutex<Option<CachedToken>>,
@@ -48,6 +57,8 @@ impl GoogleChatChannel {
         Self {
             service_account_key: service_account_key.into(),
             space_id: None,
+            audience: None,
+            jwks_url: GOOGLE_CHAT_JWKS.to_string(),
             api_base: "https://chat.googleapis.com/v1".to_string(),
             bind_addr: ([0, 0, 0, 0], 3001).into(),
             token: Mutex::new(None),
@@ -125,6 +136,19 @@ impl GoogleChatChannel {
         self
     }
 
+    /// The Chat app's authentication audience (its project number). Required:
+    /// `start()` refuses to accept webhooks it cannot verify.
+    pub fn with_audience(mut self, audience: impl Into<String>) -> Self {
+        self.audience = Some(audience.into());
+        self
+    }
+
+    /// Fetch Google's signing keys from another URL (conformance tests).
+    pub fn with_jwks_url(mut self, url: impl Into<String>) -> Self {
+        self.jwks_url = url.into();
+        self
+    }
+
     pub fn with_space(mut self, space_id: impl Into<String>) -> Self {
         self.space_id = Some(space_id.into());
         self
@@ -158,12 +182,29 @@ impl Channel for GoogleChatChannel {
     }
 
     async fn start(&mut self) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
+        let audience = self
+            .audience
+            .clone()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "googlechat: audience (the Chat app's project number) is required \
+                     to verify webhook requests"
+                )
+            })?;
+        let verifier = std::sync::Arc::new(super::webhook::JwtVerifier::new(
+            self.jwks_url.clone(),
+            GOOGLE_CHAT_ISSUER,
+            audience,
+        ));
         let (tx, rx) = mpsc::channel(32);
         // Google Chat pushes over a webhook rather than offering a poll.
         super::webhook::serve_json(
             self.bind_addr,
             "/googlechat/webhook",
             parse_webhook_message,
+            verifier,
             tx,
         )
         .await?;
