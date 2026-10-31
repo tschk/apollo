@@ -2,6 +2,17 @@
   display: none;
 }
 @media (max-width: 767px) {
+  .nav:not(.switcher-header) {
+    flex-wrap: wrap;
+  }
+  .nav-links:not(.switcher-source) {
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+  }
+  .nav-links:not(.switcher-source) > a {
+    white-space: nowrap;
+  }
   .nav-links.switcher-source {
     display: none;
   }
@@ -93,11 +104,11 @@
     background: var(--ink);
     color: var(--bg);
   }
-  .page-switcher-list a:hover {
+  .page-switcher-list a:not([aria-current]):not(.gesture-active):hover {
     background: #3f3f46;
   }
   .page-switcher :focus-visible {
-    outline: 2px solid var(--ink);
+    outline: 2px solid currentColor;
     outline-offset: -2px;
   }
 }
