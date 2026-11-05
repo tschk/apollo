@@ -379,8 +379,10 @@ mod tests {
             .await
             .unwrap();
         let alias = dir.path().join("checkout-link");
-        std::os::unix::fs::symlink(&checkout, &alias).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("outside"), checkout.join("escape")).unwrap();
+        tokio::fs::symlink(&checkout, &alias).await.unwrap();
+        tokio::fs::symlink(dir.path().join("outside"), checkout.join("escape"))
+            .await
+            .unwrap();
 
         assert_eq!(
             resolve_inside(&alias.join("inside"), &alias).await.unwrap(),
