@@ -224,7 +224,9 @@ async fn git_fast_forward(workspace: &Path, remote: &str, branch: &str) -> anyho
 }
 
 async fn cargo_build_release(workspace: &Path) -> anyhow::Result<()> {
-    let output = tokio::process::Command::new("cargo")
+    let mut cmd = tokio::process::Command::new("cargo");
+    crate::tools::child_proc::scrub(&mut cmd);
+    let output = cmd
         .arg("build")
         .arg("--release")
         .current_dir(workspace)
@@ -249,7 +251,9 @@ async fn maybe_restart_service(
         return Ok(false);
     };
 
-    let output = tokio::process::Command::new("systemctl")
+    let mut cmd = tokio::process::Command::new("systemctl");
+    crate::tools::child_proc::scrub(&mut cmd);
+    let output = cmd
         .arg("--user")
         .arg("restart")
         .arg(service)
@@ -270,11 +274,9 @@ async fn maybe_restart_service(
 }
 
 async fn run_git(workspace: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(workspace)
-        .output()
-        .await?;
+    let mut cmd = tokio::process::Command::new("git");
+    crate::tools::child_proc::scrub(&mut cmd);
+    let output = cmd.args(args).current_dir(workspace).output().await?;
 
     if !output.status.success() {
         anyhow::bail!(
