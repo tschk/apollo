@@ -380,6 +380,19 @@ async fn autonomous_preserves_existing_work_in_nested_workspace() {
     git(&root, &["add", "outside.txt"]).await;
     std::fs::write(workspace.join("private.txt"), "pre-existing private data").unwrap();
 
+    let checkout = apollo::autonomous_isolation::prepare_autonomous_checkout(
+        &workspace,
+        temp.path(),
+        std::path::Path::new("TODO.md"),
+    )
+    .await
+    .unwrap();
+    checkout.configure_remote("origin").await.unwrap();
+    std::fs::write(
+        checkout.workspace().join("private.txt"),
+        "clone private data",
+    )
+    .unwrap();
     let h = harness().await;
     let mut controller = apollo::autonomous::AutonomousLoop::new(
         apollo::autonomous::AutonomousConfig {
@@ -391,7 +404,7 @@ async fn autonomous_preserves_existing_work_in_nested_workspace() {
             test_command: "true".into(),
             ..Default::default()
         },
-        workspace.clone(),
+        checkout,
     );
     controller.step(&h.runner).await;
 
@@ -465,6 +478,20 @@ async fn autonomous_preserves_private_work(persisted_running: bool) {
         .unwrap();
     }
 
+    let checkout = apollo::autonomous_isolation::prepare_autonomous_checkout(
+        &workspace,
+        temp.path(),
+        std::path::Path::new("TODO.md"),
+    )
+    .await
+    .unwrap();
+    checkout.configure_remote("origin").await.unwrap();
+    std::fs::write(
+        checkout.workspace().join("private.txt"),
+        "clone private data",
+    )
+    .unwrap();
+    autonomous_git(checkout.workspace(), &["add", "private.txt"]).await;
     let h = harness().await;
     let mut controller = apollo::autonomous::AutonomousLoop::new(
         apollo::autonomous::AutonomousConfig {
@@ -472,7 +499,7 @@ async fn autonomous_preserves_private_work(persisted_running: bool) {
             test_command: "true".into(),
             ..Default::default()
         },
-        workspace.clone(),
+        checkout,
     );
     controller.step(&h.runner).await;
 
@@ -482,7 +509,10 @@ async fn autonomous_preserves_private_work(persisted_running: bool) {
             toml::from_str(&std::fs::read_to_string(status_path).unwrap()).unwrap();
         assert_eq!(status.state, apollo::autonomous::AutonomousState::Running);
     } else {
-        assert!(!status_path.exists());
+        let status: apollo::autonomous::AutonomousStatus =
+            toml::from_str(&std::fs::read_to_string(status_path).unwrap()).unwrap();
+        assert_eq!(status.state, apollo::autonomous::AutonomousState::Failed);
+        assert!(status.paused);
     }
     assert_eq!(
         std::fs::read_to_string(root.join("outside.txt")).unwrap(),
@@ -544,6 +574,14 @@ async fn autonomous_publishes_only_new_workspace_changes() {
     autonomous_git(&root, &["push", "origin", "main"]).await;
     std::fs::write(workspace.join("private.txt"), "pre-existing private data").unwrap();
 
+    let checkout = apollo::autonomous_isolation::prepare_autonomous_checkout(
+        &workspace,
+        temp.path(),
+        std::path::Path::new("TODO.md"),
+    )
+    .await
+    .unwrap();
+    checkout.configure_remote("origin").await.unwrap();
     let h = harness().await;
     let mut controller = apollo::autonomous::AutonomousLoop::new(
         apollo::autonomous::AutonomousConfig {
@@ -555,7 +593,7 @@ async fn autonomous_publishes_only_new_workspace_changes() {
             test_command: "printf result > ':result'".into(),
             ..Default::default()
         },
-        workspace,
+        checkout,
     );
     controller.step(&h.runner).await;
 
@@ -568,6 +606,348 @@ async fn autonomous_publishes_only_new_workspace_changes() {
     assert_eq!(
         std::fs::read_to_string(root.join("workspace/private.txt")).unwrap(),
         "pre-existing private data"
+    );
+}
+
+struct IsolatedWriteProbe(apollo::tools::file_ops::FileWriteTool);
+
+#[async_trait]
+impl Tool for IsolatedWriteProbe {
+    fn name(&self) -> &str {
+        "probe"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "probe".into(),
+            description: "Write the autonomous result".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    async fn execute(&self, _arguments: &str) -> anyhow::Result<ToolResult> {
+        self.0
+            .execute(r#"{"path":"result.txt","content":"isolated result"}"#)
+            .await
+    }
+}
+
+#[cfg(unix)]
+async fn isolated_autonomous_turn(inject_unaccounted_commit_path: bool) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("repo");
+    let source = root.join("nested/workspace");
+    let remote = temp.path().join("remote.git");
+    std::fs::create_dir_all(&source).unwrap();
+    autonomous_git(&root, &["init", "-b", "main"]).await;
+    autonomous_git(&root, &["config", "user.name", "Test"]).await;
+    autonomous_git(&root, &["config", "user.email", "test@example.invalid"]).await;
+    std::fs::write(root.join("outside.txt"), "original").unwrap();
+    std::fs::write(source.join("TODO.md"), "- [ ] task").unwrap();
+    std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+    autonomous_git(
+        &root,
+        &[
+            "add",
+            "outside.txt",
+            "nested/workspace/TODO.md",
+            ".gitignore",
+        ],
+    )
+    .await;
+    autonomous_git(&root, &["commit", "-m", "initial"]).await;
+    autonomous_git(temp.path(), &["init", "--bare", remote.to_str().unwrap()]).await;
+    autonomous_git(
+        &root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )
+    .await;
+    autonomous_git(&root, &["push", "origin", "main"]).await;
+    let source_head = autonomous_git(&root, &["rev-parse", "HEAD"]).await;
+    std::fs::write(root.join("outside.txt"), "staged private data").unwrap();
+    autonomous_git(&root, &["add", "outside.txt"]).await;
+    std::fs::write(source.join("private.txt"), "untracked private data").unwrap();
+    std::fs::write(source.join("ignored.txt"), "ignored private data").unwrap();
+    let source_index = std::fs::read(root.join(".git/index")).unwrap();
+
+    let checkout = apollo::autonomous_isolation::prepare_autonomous_checkout(
+        &source,
+        temp.path(),
+        std::path::Path::new("TODO.md"),
+    )
+    .await
+    .unwrap();
+    checkout.configure_remote("origin").await.unwrap();
+    assert!(!checkout.workspace().join("private.txt").exists());
+    assert!(!checkout.workspace().join("ignored.txt").exists());
+    if inject_unaccounted_commit_path {
+        autonomous_git(
+            checkout.clone_root(),
+            &["config", "--local", "core.hooksPath", ".git/hooks"],
+        )
+        .await;
+        let hook = checkout.clone_root().join(".git/hooks/post-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf injected > injected.txt\ngit add -- injected.txt\ngit -c core.hooksPath=/dev/null commit --amend --no-edit\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let memory_dir = tempfile::tempdir().unwrap();
+    let memory = SurrealMemory::new(memory_dir.path()).await.unwrap();
+    let provider = Arc::new(ToolThenTextProvider::new());
+    let tool: Arc<dyn Tool> = Arc::new(IsolatedWriteProbe(
+        apollo::tools::file_ops::FileWriteTool::new(checkout.workspace().to_path_buf()),
+    ));
+    let runner = AgentRunner::new(provider, vec![tool], Arc::new(memory), "test", "test-model")
+        .with_workspace(checkout.workspace().to_path_buf())
+        .with_memory_enabled(false);
+    let mut controller = apollo::autonomous::AutonomousLoop::new(
+        apollo::autonomous::AutonomousConfig {
+            status_path: checkout
+                .clone_parent()
+                .join("status.toml")
+                .to_string_lossy()
+                .into_owned(),
+            test_command: format!(
+                "test \"$(pwd -P)\" = '{}' && test -f result.txt",
+                checkout.workspace().display()
+            ),
+            ..Default::default()
+        },
+        checkout.clone(),
+    );
+    controller.step(&runner).await;
+
+    assert_eq!(
+        std::fs::read_to_string(checkout.workspace().join("result.txt")).unwrap(),
+        "isolated result"
+    );
+    assert!(!source.join("result.txt").exists());
+    assert_eq!(
+        std::fs::read(root.join(".git/index")).unwrap(),
+        source_index
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("outside.txt")).unwrap(),
+        "staged private data"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("private.txt")).unwrap(),
+        "untracked private data"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("ignored.txt")).unwrap(),
+        "ignored private data"
+    );
+    assert_eq!(
+        autonomous_git(&root, &["rev-parse", "HEAD"]).await,
+        source_head
+    );
+    assert!(autonomous_git(&root, &["stash", "list"]).await.is_empty());
+    if inject_unaccounted_commit_path {
+        assert_eq!(
+            autonomous_git(
+                checkout.clone_root(),
+                &["diff", "--name-only", "HEAD^", "HEAD"]
+            )
+            .await,
+            "injected.txt\nnested/workspace/result.txt\n"
+        );
+        assert_eq!(
+            autonomous_git(&remote, &["rev-parse", "main"]).await,
+            source_head
+        );
+        let status: apollo::autonomous::AutonomousStatus = toml::from_str(
+            &std::fs::read_to_string(checkout.clone_parent().join("status.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status.state, apollo::autonomous::AutonomousState::Failed);
+        assert!(status.paused);
+    } else {
+        assert_eq!(
+            autonomous_git(&remote, &["show", "main:nested/workspace/result.txt"]).await,
+            "isolated result"
+        );
+        assert_eq!(
+            autonomous_git(&remote, &["diff", "--name-only", "main^", "main"]).await,
+            "nested/workspace/result.txt\n"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn autonomous_isolated_turn_preserves_source_and_publishes_result() {
+    isolated_autonomous_turn(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn autonomous_refuses_commit_with_unaccounted_path() {
+    isolated_autonomous_turn(true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn autonomous_cli_binds_real_tools_to_isolated_checkout() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("repo");
+    let source = root.join("nested/workspace");
+    let remote = temp.path().join("remote.git");
+    let bin = temp.path().join("bin");
+    let state = temp.path().join("state");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    autonomous_git(&root, &["init", "-b", "main"]).await;
+    autonomous_git(&root, &["config", "user.name", "Test"]).await;
+    autonomous_git(&root, &["config", "user.email", "test@example.invalid"]).await;
+    std::fs::write(root.join("outside.txt"), "base").unwrap();
+    std::fs::write(source.join("TODO.md"), "- [ ] task").unwrap();
+    autonomous_git(&root, &["add", "outside.txt", "nested/workspace/TODO.md"]).await;
+    autonomous_git(&root, &["commit", "-m", "initial"]).await;
+    autonomous_git(temp.path(), &["init", "--bare", remote.to_str().unwrap()]).await;
+    autonomous_git(
+        &root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )
+    .await;
+    autonomous_git(&root, &["push", "origin", "main"]).await;
+    let base = autonomous_git(&root, &["rev-parse", "HEAD"]).await;
+    std::fs::write(root.join("outside.txt"), "staged private data").unwrap();
+    autonomous_git(&root, &["add", "outside.txt"]).await;
+    std::fs::write(source.join("private.txt"), "untracked private data").unwrap();
+    let index = std::fs::read(root.join(".git/index")).unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move || {
+            let calls = Arc::clone(&handler_calls);
+            async move {
+                let message = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    serde_json::json!({"role":"assistant","content":null,"tool_calls":[{
+                        "id":"call_1","type":"function","function":{
+                            "name":"Write","arguments":"{\"path\":\"result.txt\",\"content\":\"from real cli\"}"
+                        }
+                    }]})
+                } else {
+                    serde_json::json!({"role":"assistant","content":"done"})
+                };
+                axum::Json(serde_json::json!({"choices":[{"message":message}]}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = temp.path().join("config.json");
+    std::fs::write(&config, serde_json::json!({
+        "provider": {"name":"local-test", "api_key":"test", "base_url":format!("http://{addr}/v1")},
+        "model":"test-model", "workspace":source,
+    }).to_string()).unwrap();
+    let fake_cargo = bin.join("cargo");
+    std::fs::write(
+        &fake_cargo,
+        "#!/bin/sh\ntest \"$1\" = test && test -f result.txt\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_cargo, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_apollo"))
+        .args([
+            "autonomous",
+            "--config",
+            config.to_str().unwrap(),
+            "--workspace",
+            source.to_str().unwrap(),
+            "--interval",
+            "1",
+        ])
+        .current_dir(&root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("PATH", &path)
+        .env("APOLLO_PROVIDER_API_KEY", "test")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut pushed = false;
+    for _ in 0..300 {
+        if autonomous_git(&remote, &["rev-parse", "main"]).await != base {
+            pushed = true;
+            break;
+        }
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if child.try_wait().unwrap().is_none() {
+        child.kill().await.unwrap();
+    }
+    let output = child.wait_with_output().await.unwrap();
+    server.abort();
+    assert!(
+        pushed,
+        "CLI did not push; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(calls.load(Ordering::SeqCst) >= 2);
+    assert_eq!(
+        autonomous_git(&remote, &["show", "main:nested/workspace/result.txt"]).await,
+        "from real cli"
+    );
+    assert_eq!(
+        autonomous_git(&remote, &["diff", "--name-only", "main^", "main"]).await,
+        "nested/workspace/result.txt\n"
+    );
+    assert_eq!(std::fs::read(root.join(".git/index")).unwrap(), index);
+    assert_eq!(
+        std::fs::read_to_string(root.join("outside.txt")).unwrap(),
+        "staged private data"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("private.txt")).unwrap(),
+        "untracked private data"
+    );
+    assert!(!source.join("result.txt").exists());
+    assert_eq!(autonomous_git(&root, &["rev-parse", "HEAD"]).await, base);
+    assert!(autonomous_git(&root, &["stash", "list"]).await.is_empty());
+    let published = autonomous_git(&remote, &["rev-parse", "main"]).await;
+    let retry = tokio::process::Command::new(env!("CARGO_BIN_EXE_apollo"))
+        .args([
+            "autonomous",
+            "--config",
+            config.to_str().unwrap(),
+            "--workspace",
+            source.to_str().unwrap(),
+            "--start",
+        ])
+        .current_dir(&root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("PATH", &path)
+        .env("APOLLO_PROVIDER_API_KEY", "test")
+        .output()
+        .await
+        .unwrap();
+    assert!(!retry.status.success());
+    assert!(String::from_utf8_lossy(&retry.stderr).contains("recovery marker"));
+    assert_eq!(
+        autonomous_git(&remote, &["rev-parse", "main"]).await,
+        published
     );
 }
 

@@ -1,73 +1,54 @@
 # Isolating autonomous runs
 
-This is a design, not a description of the current implementation. Until
-isolation lands, the risks in [the runtime audit](runtime-audit.md#protect-autonomous-workspaces)
-still apply. Guards that reject dirty state or limit Git paths reduce the blast
-radius, but they cannot tell whether an agent or another process made a change
-to a shared checkout.
+`apollo autonomous` runs from a private standalone clone of the source
+repository's committed `HEAD`. The clone has its own working files, index,
+refs, and Git metadata. It costs additional disk space and setup time, but
+unlike a linked worktree it does not share Git metadata with the source.
+The private state directory requires Unix permissions, so this mode currently
+fails closed on non-Unix systems.
 
-## Execution workspace
+The controller creates the clone before constructing the runner. For a nested
+workspace, it uses the same relative directory in the clone. The agent's
+filesystem tools, shell working directory, prompt, validation command, and Git
+operations use that directory. The run disables shared skills, host plugins,
+dynamic tools, conversational memory, and Telekinesis. The supplied config is
+read at startup and is not reloaded during a turn. Runtime memory and status
+are stored outside the checkout, in the private run directory.
 
-An autonomous run needs a dedicated checkout created from a named, committed
-base. The controller creates it before constructing the agent, and binds the
-runner, filesystem tools, shell working directory, prompt, skills, plugins,
-validation command, and Git operations to the corresponding directory in that
-checkout. For a workspace nested inside a repository, preserve its relative
-path and restrict changes eligible for publication to that subtree.
-
-A separate local clone is preferred to a linked worktree. A linked worktree
-shares the source repository's refs, object database, and other Git metadata.
-A clone costs additional disk and setup time, but its index, refs, and working
-files are independent. A local clone still reads committed objects from the
-source. It must not mutate the source checkout or its index. Record the source
-commit and the clone location before running, and stop rather than reuse an
-ambiguous or dirty clone after an interruption.
-
-The checkout begins with committed files only. It does not copy staged or
-unstaged edits, untracked files, ignored files such as `.env`, or local build
-outputs. If the task ledger or a required dependency exists only in those
-files, the run must stop with an actionable error rather than silently copy
-them. Setup and runtime files created by Apollo before the agent starts are
-not automatically eligible for a commit. Keep status and recovery metadata
-outside the checkout's publishable files.
+The clone contains committed files only. Staged and unstaged edits, untracked
+files, and ignored files that are not committed are not copied. The task ledger
+must be committed and present inside the workspace. Dependencies, credentials,
+or build outputs that exist only in the source checkout are not copied; a run
+that needs them must arrange them separately. The clone may therefore need a
+fresh dependency setup.
 
 ## Publication and recovery
 
-The run records its base commit and identifies the files it changed in its
-exclusive checkout. Stage only explicit literal paths for those files; never
-use `git add -A`. Reject an unexpected staged entry, an unexpected HEAD change,
-or a change outside the workspace. Check every Git command's result. Before
-pushing, compare the commit's changed paths with the recorded set and refuse
-to push any unaccounted path. Push the verified commit with an explicit
-refspec; never push an unrelated local branch after a failed commit.
+The controller checks the starting index and HEAD, stages explicit literal
+paths, and checks the resulting commit's parent and paths. It refuses changes
+outside a nested workspace and refuses to push when the remote branch no longer
+matches the starting commit. A successful commit is pushed to the source's
+configured push destination. It is not applied to the source checkout.
 
-The source checkout remains untouched. A successful result is a commit in the
-isolated checkout and, when configured, a push to the selected remote branch.
-It is not automatically applied to the source checkout. Tell the operator the
-commit and checkout location so they can inspect or integrate the result.
-Retain failed or interrupted work for inspection; do not automatically discard
-it, reset it, or replay a push whose result is uncertain. Recovery must verify
-the checkout, base, branch, and recorded phase before continuing. A concurrent
-run must not reuse the same checkout.
+Apollo prints the clone and recovery-marker paths, or includes them in the
+error if checkout preparation fails after creating the marker. It retains both
+after a run, including failed or interrupted runs. Another run for the same
+source workspace is refused while the marker exists, even with `--start`. Automatic
+`--resume` is unavailable. Inspect the retained checkout, its status, its
+commit, and the remote before deciding whether to integrate changes or retry a
+push. After inspection and any manual recovery, remove the printed marker to
+allow a new run. Removing it does not remove the retained checkout.
 
-## Limits and verification
+## Attribution and limits
 
-Exclusive ownership of the checkout is a condition of the attribution claim.
-Use a per-run checkout and prevent the controller from sharing it across runs.
-An isolated checkout is not an operating-system sandbox: unrestricted shell
-commands, plugins, absolute paths, symlinks, and other processes with the same
-user permissions can still reach outside it. Do not describe this design as
-protection against a malicious agent or another process with filesystem access.
+With exclusive access to the private checkout, a published change came from
+the run and its processes, rather than from the source checkout's pre-existing
+work. That does not identify the model as the writer: tools, validation
+commands, and Git hooks can write files too.
 
-Test the controller against a disposable repository with a nested workspace
-and a local bare remote. Include staged changes outside the workspace, tracked
-edits, and untracked and ignored private files before a run. Verify that the
-original files, index, and stash remain unchanged; only accounted-for changes
-in the isolated workspace reach the commit and remote. Cover unusual filenames,
-pre-staged entries, a changed HEAD, failure before and after commit, failed
-push, restart, and concurrent run attempts. Test that agent tools and the test
-command actually use the isolated workspace, not just that Git does.
-
-The cost is another checkout and dependency setup, more disk and startup time,
-and an explicit integration step for local results. Measure those costs on a
-representative repository before publishing numbers.
+The checkout is not an operating-system sandbox. Shell commands, absolute
+paths, symlinks, Git hooks, and other processes with the same user permissions
+can reach outside the checkout or modify it. A malicious process or concurrent
+writer with access to the private directory defeats the exclusive-access
+assumption. The earlier shared-checkout guards remain blast-radius reductions,
+not proof of authorship.

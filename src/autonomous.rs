@@ -16,6 +16,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::NullChannel;
+use crate::autonomous_isolation::AutonomousCheckout;
 use crate::channels::IncomingMessage;
 
 /// Configuration for autonomous mode.
@@ -92,8 +93,15 @@ pub struct AutonomousLoop {
 }
 
 impl AutonomousLoop {
-    /// Create a new autonomous loop for a given workspace.
-    pub fn new(config: AutonomousConfig, workspace: PathBuf) -> Self {
+    /// Create a loop for a prepared checkout. Supplied agents and tools are not sandboxed.
+    ///
+    /// A path to a shared workspace cannot be used in place of a checkout:
+    /// ```compile_fail
+    /// use apollo::autonomous::{AutonomousConfig, AutonomousLoop};
+    /// AutonomousLoop::new(AutonomousConfig::default(), std::path::PathBuf::from("."));
+    /// ```
+    pub fn new(config: AutonomousConfig, checkout: AutonomousCheckout) -> Self {
+        let workspace = checkout.workspace().to_path_buf();
         let status_path = workspace.join(&config.status_path);
         let status = Self::load_status(&status_path);
         Self {
@@ -144,7 +152,7 @@ impl AutonomousLoop {
         Self::save_status_to_file(&self.status, &self.status_path);
     }
 
-    /// Start the autonomous loop. Runs indefinitely.
+    /// Start the autonomous loop, stopping when a run needs recovery.
     pub async fn run(mut self, agent: std::sync::Arc<crate::agent::AgentRunner>) {
         tracing::info!(
             "[autonomous] starting (interval={}s, workspace={:?})",
@@ -155,6 +163,13 @@ impl AutonomousLoop {
         loop {
             tokio::time::sleep(Duration::from_secs(self.config.interval_secs)).await;
             self.step(&agent).await;
+            if self.status.paused
+                || self.status.state == AutonomousState::Failed
+                || self.status.state == AutonomousState::Running
+            {
+                tracing::warn!("[autonomous] stopped; inspect the workspace before recovery");
+                return;
+            }
         }
     }
 
@@ -195,6 +210,9 @@ impl AutonomousLoop {
                 Ok(baseline) => Some(baseline),
                 Err(e) => {
                     tracing::error!("[autonomous] refusing to start: {}", e);
+                    self.status.paused = true;
+                    self.status.state = AutonomousState::Failed;
+                    Self::save_status_to_file(&self.status, &self.status_path);
                     return;
                 }
             }
@@ -332,7 +350,9 @@ async fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
 struct GitBaseline {
     head: String,
     prefix: String,
+    root: PathBuf,
     untracked: BTreeSet<String>,
+    all_untracked: BTreeSet<String>,
 }
 
 async fn git(cwd: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
@@ -371,6 +391,8 @@ async fn check_git_workspace(workspace: &Path) -> anyhow::Result<GitBaseline> {
     }
     let head = String::from_utf8(git(workspace, &["rev-parse", "--verify", "HEAD"]).await?)?;
     let prefix = String::from_utf8(git(workspace, &["rev-parse", "--show-prefix"]).await?)?;
+    let root = String::from_utf8(git(workspace, &["rev-parse", "--show-toplevel"]).await?)?;
+    let root = PathBuf::from(root.strip_suffix('\n').unwrap_or(&root));
     let untracked = git_paths(
         git(
             workspace,
@@ -385,10 +407,14 @@ async fn check_git_workspace(workspace: &Path) -> anyhow::Result<GitBaseline> {
         )
         .await?,
     )?;
+    let all_untracked =
+        git_paths(git(&root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?)?;
     Ok(GitBaseline {
         head: head.trim_end_matches('\n').to_owned(),
         prefix: prefix.strip_suffix('\n').unwrap_or(&prefix).to_owned(),
+        root,
         untracked,
+        all_untracked,
     })
 }
 
@@ -410,6 +436,29 @@ async fn git_commit_and_push(
             .await?
             .is_empty(),
         "index changed during the turn"
+    );
+    let all_tracked = git_paths(
+        git(
+            &baseline.root,
+            &["diff", "--name-only", "--no-renames", "-z"],
+        )
+        .await?,
+    )?;
+    let all_untracked = git_paths(
+        git(
+            &baseline.root,
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        .await?,
+    )?;
+    anyhow::ensure!(
+        all_tracked
+            .iter()
+            .all(|path| path.starts_with(&baseline.prefix))
+            && all_untracked
+                .difference(&baseline.all_untracked)
+                .all(|path| path.starts_with(&baseline.prefix)),
+        "changes appeared outside the workspace"
     );
     let mut paths = git_paths(
         git(
@@ -515,6 +564,7 @@ async fn git_commit_and_push(
     );
     let refspec = format!("{commit_id}:{target}");
     git(cwd, &["push", "--", remote, &refspec]).await?;
+    tracing::info!("[autonomous] published commit {} to {}", commit_id, target);
     Ok(())
 }
 
@@ -523,40 +573,79 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_status_persistence() {
+    async fn checkout(dir: &Path) -> AutonomousCheckout {
+        let source = dir.join("source");
+        std::fs::create_dir(&source).unwrap();
+        for args in [
+            vec!["init"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@example.invalid"],
+        ] {
+            assert!(tokio::process::Command::new("git")
+                .current_dir(&source)
+                .args(args)
+                .status()
+                .await
+                .unwrap()
+                .success());
+        }
+        std::fs::write(source.join("TODO.md"), "- [ ] task").unwrap();
+        for args in [vec!["add", "TODO.md"], vec!["commit", "-m", "initial"]] {
+            assert!(tokio::process::Command::new("git")
+                .current_dir(&source)
+                .args(args)
+                .status()
+                .await
+                .unwrap()
+                .success());
+        }
+        crate::autonomous_isolation::prepare_autonomous_checkout(&source, dir, Path::new("TODO.md"))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_status_persistence() {
         let dir = tempdir().unwrap();
+        let checkout = checkout(dir.path()).await;
         let config = AutonomousConfig {
             status_path: "test-status.toml".into(),
             ..AutonomousConfig::default()
         };
-        let aloop = AutonomousLoop::new(config, dir.path().to_path_buf());
+        let aloop = AutonomousLoop::new(config, checkout.clone());
         assert_eq!(aloop.status.state, AutonomousState::Idle);
 
         // Save should create file
-        AutonomousLoop::save_status_to_file(&aloop.status, &dir.path().join("test-status.toml"));
-        let path = dir.path().join("test-status.toml");
+        AutonomousLoop::save_status_to_file(
+            &aloop.status,
+            &checkout.workspace().join("test-status.toml"),
+        );
+        let path = checkout.workspace().join("test-status.toml");
         assert!(path.exists());
 
         // Test again
-        AutonomousLoop::save_status_to_file(&aloop.status, &dir.path().join("test-status.toml"));
+        AutonomousLoop::save_status_to_file(&aloop.status, &path);
         assert!(path.exists());
     }
 
-    #[test]
-    fn test_status_roundtrip() {
+    #[tokio::test]
+    async fn test_status_roundtrip() {
         let dir = tempdir().unwrap();
+        let checkout = checkout(dir.path()).await;
         let config = AutonomousConfig {
             status_path: "test-status.toml".into(),
             ..AutonomousConfig::default()
         };
 
         // First creation
-        let aloop = AutonomousLoop::new(config.clone(), dir.path().to_path_buf());
-        AutonomousLoop::save_status_to_file(&aloop.status, &dir.path().join("test-status.toml"));
+        let aloop = AutonomousLoop::new(config.clone(), checkout.clone());
+        AutonomousLoop::save_status_to_file(
+            &aloop.status,
+            &checkout.workspace().join("test-status.toml"),
+        );
 
         // Second creation should load saved state
-        let aloop2 = AutonomousLoop::new(config, dir.path().to_path_buf());
+        let aloop2 = AutonomousLoop::new(config, checkout);
         assert_eq!(aloop2.status.state, aloop.status.state);
     }
 }

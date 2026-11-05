@@ -34,10 +34,11 @@ files, stages literal paths, and checks the resulting commit before pushing.
 It also refuses to resume a persisted running state automatically. These
 checks reduce the blast radius but **do not establish authorship**: another
 process can change a file during a turn, and timing alone cannot attribute it
-to the agent. The shared-checkout design remains unsafe for unattended use
-where unintended publication matters. Use a dedicated clean repository without
-private data until the [isolated-run design](autonomous-isolation.md) is
-implemented and verified.
+to the agent. `apollo autonomous` now creates a private clone for the run and
+binds the runner and validation to it. Under exclusive access, changes in that
+checkout are attributable to the run and its processes, not necessarily to the
+model. The clone is not a sandbox against other same-user processes or shell
+commands. See [isolated runs](autonomous-isolation.md) for recovery and limits.
 
 ## Conversation history was not sent to the model
 

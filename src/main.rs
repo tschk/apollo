@@ -290,7 +290,7 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         start: bool,
 
-        /// Clear paused state and continue
+        /// Automatic recovery is unavailable; inspect the retained run instead
         #[arg(long, default_value_t = false)]
         resume: bool,
     },
@@ -601,10 +601,14 @@ async fn build_automation_agent(
     config_path: &str,
     workspace: &Path,
     restricted: bool,
+    isolated_state: Option<&Path>,
 ) -> anyhow::Result<(Arc<AgentRunner>, Config)> {
     let mut cfg = apollo::bootstrap::load_config_workspace(config_path, Some(workspace));
     if restricted {
         configure_restricted_automation(&mut cfg);
+    }
+    if let Some(state) = isolated_state {
+        cfg.storage.root = state.join("memory");
     }
     let provider = build_provider(&cfg);
     let policy = Arc::new(ExecutionPolicy::from_config(&cfg.policy));
@@ -646,6 +650,10 @@ async fn build_automation_agent(
         &cfg,
     );
 
+    if isolated_state.is_some() {
+        tools.retain(|tool| tool.name() != "telekinesis");
+    }
+
     if !restricted {
         for tool in apollo::tools::dynamic::DynamicTool::load_all(Arc::clone(&policy)) {
             tools.push(Arc::new(tool));
@@ -654,7 +662,6 @@ async fn build_automation_agent(
 
     let mut runner = AgentRunner::new(provider, tools, memory, &system_prompt, cfg.model.clone())
         .with_config(cfg.agent.clone())
-        .with_config_path(config_path)
         .with_mode(agent_mode_from_permission_profile(
             &cfg.agent.permission_profile,
         ))
@@ -668,6 +675,9 @@ async fn build_automation_agent(
         )
         .with_skills(discovered_skills)
         .await;
+    if isolated_state.is_none() {
+        runner = runner.with_config_path(config_path);
+    }
     #[cfg(feature = "zkr-memory")]
     {
         runner = runner.with_zkr(zkr_store, cfg.zkr.clone());
@@ -1508,7 +1518,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(iterations) = iterations {
                 autoresearch_config.max_iterations = iterations;
             }
-            let (runner, _cfg) = build_automation_agent(&config, &workspace, true).await?;
+            let (runner, _cfg) = build_automation_agent(&config, &workspace, true, None).await?;
             println!(
                 "apollo v{} — autoresearch (objective: {})",
                 env!("CARGO_PKG_VERSION"),
@@ -1532,98 +1542,52 @@ async fn main() -> anyhow::Result<()> {
             start,
             resume,
         } => {
-            let workspace = workspace.unwrap_or_else(|| load_config(&config).workspace.clone());
-            let cfg = apollo::bootstrap::load_config_workspace(&config, Some(&workspace));
-            let model = cfg.model.clone();
-            let _ = apollo::workspace_init::ensure_workspace_kit(&workspace);
-
-            let provider = build_provider(&cfg);
-            let policy = Arc::new(ExecutionPolicy::from_config(&cfg.policy));
-            let memory = build_memory_backend(&workspace, &cfg).await?;
-            let embedding_provider = build_embedding_provider(&cfg)?;
-
-            let system_prompt = prompt::apply_configured(
-                &cfg.system_prompt,
-                prompt::build_system_prompt(&workspace).await,
+            anyhow::ensure!(
+                !resume,
+                "isolated autonomous runs cannot resume automatically; inspect the retained checkout and recovery marker first"
             );
-            let discovered_skills = skills::discover_skills_for_workspace(Some(&workspace));
-
-            #[cfg(feature = "zkr-memory")]
-            let zkr_store = apollo::bootstrap::build_zkr_store(&workspace, &cfg)
-                .ok()
-                .flatten();
-            #[cfg(feature = "zkr-memory")]
-            let mut tools = build_base_tools(
-                &workspace,
-                Arc::clone(&policy),
-                memory.clone(),
-                embedding_provider,
-                Arc::clone(&provider),
-                &cfg,
-                zkr_store.clone(),
-            );
-            #[cfg(not(feature = "zkr-memory"))]
-            let mut tools = build_base_tools(
-                &workspace,
-                Arc::clone(&policy),
-                memory.clone(),
-                embedding_provider,
-                Arc::clone(&provider),
-                &cfg,
-            );
-
-            for dt in apollo::tools::dynamic::DynamicTool::load_all(Arc::clone(&policy)) {
-                tools.push(Arc::new(dt));
-            }
-
-            let mut runner =
-                AgentRunner::new(provider, tools, memory.clone(), &system_prompt, model)
-                    .with_config(cfg.agent.clone())
-                    .with_config_path(config.as_str())
-                    .with_mode(agent_mode_from_permission_profile(
-                        &cfg.agent.permission_profile,
-                    ))
-                    .with_workspace(workspace.clone())
-                    .with_memory_ideas(cfg.memory.clone())
-                    .with_group_chat(cfg.group_chat.clone())
-                    .with_skill_shell_policy(
-                        cfg.policy.allow_shell,
-                        cfg.policy.trusted_skill_dirs.clone(),
-                    )
-                    .with_skills(discovered_skills)
-                    .await;
-            #[cfg(feature = "zkr-memory")]
-            {
-                runner = runner.with_zkr(zkr_store.clone(), cfg.zkr.clone());
-            }
-
-            {
-                let mut host_reg = apollo::plugin::PluginRegistry::new();
-                host_reg.ingest_host_plugins_trusting(
-                    &workspace,
-                    &cfg.plugin_layer.host_plugin_roots,
-                    &cfg.plugin_layer.trusted_host_plugins,
-                );
-                runner = runner.with_plugin_registry(host_reg).await;
-            }
-
-            let runner_arc = Arc::new(runner);
-            runner_arc.add_hook(Arc::new(PermissionHook::new(
-                cfg.agent.permissions.deny.clone(),
-                cfg.agent.permissions.allow.clone(),
-            )));
-
+            let source_workspace =
+                workspace.unwrap_or_else(|| load_config(&config).workspace.clone());
             let mut autonomous_config = AutonomousConfig::default();
             if let Some(secs) = interval {
                 autonomous_config.interval_secs = secs;
             }
             let interval_secs = autonomous_config.interval_secs;
 
-            let mut autonomous_loop = AutonomousLoop::new(autonomous_config, workspace.clone());
+            let state_root = dirs::state_dir()
+                .or_else(dirs::data_local_dir)
+                .ok_or_else(|| anyhow::anyhow!("cannot locate a private state directory"))?
+                .join("apollo/autonomous-runs");
+            let checkout = apollo::autonomous_isolation::prepare_autonomous_checkout(
+                &source_workspace,
+                &state_root,
+                Path::new(&autonomous_config.todo_path),
+            )
+            .await?;
+            println!("   Isolated checkout: {}", checkout.clone_root().display());
+            println!(
+                "   Recovery marker: {}",
+                checkout.recovery_marker().display()
+            );
+            checkout
+                .configure_remote(&autonomous_config.git_remote)
+                .await?;
+            autonomous_config.status_path = checkout
+                .clone_parent()
+                .join("status.toml")
+                .to_string_lossy()
+                .into_owned();
+            let (runner_arc, _cfg) = build_automation_agent(
+                &config,
+                checkout.workspace(),
+                true,
+                Some(checkout.clone_parent()),
+            )
+            .await?;
+            let agent_workspace = checkout.workspace().to_path_buf();
+            let mut autonomous_loop = AutonomousLoop::new(autonomous_config, checkout);
             if start {
                 autonomous_loop.start_fresh();
-            } else if resume {
-                autonomous_loop.resume();
             }
 
             println!(
@@ -1631,8 +1595,10 @@ async fn main() -> anyhow::Result<()> {
                 env!("CARGO_PKG_VERSION"),
                 interval_secs
             );
-            println!("   Workspace: {}", workspace.display());
-            println!("   Press Ctrl+C to stop");
+            println!("   Source workspace: {}", source_workspace.display());
+            println!("   Agent workspace: {}", agent_workspace.display());
+            println!("   Source changes and untracked files are not copied; results remain in the isolated checkout.");
+            println!("   Inspect the checkout and recovery marker after stopping; no automatic cleanup or replay occurs.");
 
             autonomous_loop.run(runner_arc).await;
         }
