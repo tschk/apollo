@@ -55,12 +55,12 @@ channel-cli = []
 channel-telegram = []
 channel-discord = ["dep:tokio-tungstenite"]
 channel-slack = []
-channel-whatsapp = []
+channel-whatsapp = ["dep:hmac"]
 channel-signal = []
 channel-matrix = []
 channel-irc = []
 channel-googlechat = ["dep:jsonwebtoken"]
-channel-msteams = []
+channel-msteams = ["dep:jsonwebtoken"]
 
 # Providers — pick what you need
 provider-copilot = []
@@ -144,6 +144,7 @@ darash = "0.6.0"
 
 # Crypto (credential security)
 sha2 = "0.10"
+hmac = { version = "0.12", optional = true }
 aes-gcm = "0.10"
 rand = "0.8"
 
