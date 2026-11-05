@@ -42,6 +42,16 @@ async fn git(dir: &Path, args: &[&std::ffi::OsStr]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+async fn resolve_inside(path: &Path, root: &Path) -> Result<PathBuf> {
+    let root = tokio::fs::canonicalize(root).await?;
+    let path = tokio::fs::canonicalize(path).await?;
+    anyhow::ensure!(
+        path.starts_with(root),
+        "path is outside the allowed directory"
+    );
+    Ok(path)
+}
+
 /// Clone the committed HEAD into a unique directory under `private_parent`.
 ///
 /// `ledger` is a workspace-relative path to a committed regular file. The
@@ -164,6 +174,15 @@ pub async fn prepare_autonomous_checkout(
             ],
         )
         .await?;
+        let clone_root = tokio::fs::canonicalize(&clone_root)
+            .await
+            .context("cannot resolve cloned checkout root")?;
+        let clone_parent = tokio::fs::canonicalize(&clone_parent)
+            .await
+            .context("cannot resolve clone parent")?;
+        if !clone_root.starts_with(&clone_parent) {
+            bail!("cloned checkout is outside its run directory");
+        }
         git(
             &clone_root,
             &[
@@ -179,10 +198,10 @@ pub async fn prepare_autonomous_checkout(
             &["remote".as_ref(), "remove".as_ref(), "origin".as_ref()],
         )
         .await?;
-        let workspace = tokio::fs::canonicalize(clone_root.join(relative))
+        let workspace = resolve_inside(&clone_root.join(relative), &clone_root)
             .await
-            .context("committed workspace is missing")?;
-        if !workspace.starts_with(&clone_root) || !tokio::fs::metadata(&workspace).await?.is_dir() {
+            .context("committed workspace is missing or outside the clone")?;
+        if !tokio::fs::metadata(&workspace).await?.is_dir() {
             bail!("committed workspace is not a directory inside the clone");
         }
         git(
@@ -197,12 +216,10 @@ pub async fn prepare_autonomous_checkout(
         )
         .await
         .context("ledger is not committed")?;
-        let ledger_path = tokio::fs::canonicalize(workspace.join(ledger))
+        let ledger_path = resolve_inside(&workspace.join(ledger), &workspace)
             .await
-            .context("committed ledger is missing")?;
-        if !ledger_path.starts_with(&workspace)
-            || !tokio::fs::metadata(&ledger_path).await?.is_file()
-        {
+            .context("committed ledger is missing or outside the workspace")?;
+        if !tokio::fs::metadata(&ledger_path).await?.is_file() {
             bail!("committed ledger is not a regular file inside the workspace");
         }
         Ok(AutonomousCheckout {
@@ -347,6 +364,34 @@ mod tests {
         run(&root, &["add", "."]).await;
         run(&root, &["commit", "-m", "base"]).await;
         (dir, root)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkout_boundary_resolves_symlinks_and_rejects_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().join("checkout");
+        tokio::fs::create_dir(&checkout).await.unwrap();
+        tokio::fs::write(checkout.join("inside"), "inside")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("outside"), "outside")
+            .await
+            .unwrap();
+        let alias = dir.path().join("checkout-link");
+        std::os::unix::fs::symlink(&checkout, &alias).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("outside"), checkout.join("escape")).unwrap();
+
+        assert_eq!(
+            resolve_inside(&alias.join("inside"), &alias).await.unwrap(),
+            tokio::fs::canonicalize(checkout.join("inside"))
+                .await
+                .unwrap()
+        );
+        assert!(resolve_inside(&alias.join("escape"), &alias).await.is_err());
+        assert!(resolve_inside(&alias.join("missing"), &alias)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

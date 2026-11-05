@@ -30,6 +30,11 @@ outside a nested workspace and refuses to push when the remote branch no longer
 matches the starting commit. A successful commit is pushed to the source's
 configured push destination. It is not applied to the source checkout.
 
+Checkout preparation resolves filesystem paths on both sides of its containment
+checks and fails if either path cannot be resolved. Publication separately checks
+Git-reported repository-relative names against the workspace prefix. That
+lexical Git check limits what is staged; it is not a filesystem sandbox.
+
 Apollo prints the clone and recovery-marker paths, or includes them in the
 error if checkout preparation fails after creating the marker. It retains both
 after a run, including failed or interrupted runs. Another run for the same
