@@ -283,12 +283,10 @@ impl AutonomousLoop {
 /// Run a test command, return true if it passes.
 async fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
     tracing::info!("[autonomous] running tests: {}", cmd);
-    let output = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(cwd)
-        .output()
-        .await?;
+    let mut command = tokio::process::Command::new("sh");
+    command.arg("-c").arg(cmd).current_dir(cwd);
+    crate::tools::child_proc::scrub(&mut command);
+    let output = command.output().await?;
 
     if output.status.success() {
         Ok(true)
