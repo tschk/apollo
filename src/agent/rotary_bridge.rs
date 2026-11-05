@@ -853,9 +853,7 @@ impl RotaryAgentBridge {
         self.agent.clear_messages();
         for msg in history {
             let rx4_msg = chat_message_to_rx4(msg);
-            // rx4's messages are stored internally; we push them via the
-            // messages RwLock
-            self.agent.messages.write().push(rx4_msg);
+            self.agent.append_message(rx4_msg);
         }
 
         self.run_prompt(prompt).await

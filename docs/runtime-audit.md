@@ -16,19 +16,17 @@ whether a workspace is dirty.
 
 ## Make parallel agents safely steerable
 
-`src/tools/coding_swarm.rs` passes the same base chat ID on each deployment;
-workers in `src/agent/loop_runner.rs` derive their chat IDs from it, so later
-deployments can load earlier workers' histories. Workers also share a
-workspace, despite the tool's isolation claim. Give each deployment unique
-conversation IDs and either isolate worktrees or describe the shared workspace
-accurately. A useful next step is an integration workflow that reports each
-worker's changed files and conflicts before applying its result.
+Coding swarm workers share a workspace. An integration workflow could isolate
+their worktrees and report changed files and conflicts before applying results.
 
-The runner also has one steering queue for every active turn. Concurrent turns
-can consume one another's instructions. Address steering to a specific turn and
-test a parent turn running alongside a worker. In `src/swarm/delegation.rs`,
-limit checks and reservations are separate operations; reserve capacity
-atomically and make completion and cancellation idempotent.
+The runner has one steering queue for every active turn. Concurrent turns can
+consume one another's instructions. It also writes steering to rx4's live
+message projection, but rx4 builds requests from its session log, so the model
+does not receive those messages. Address steering to a specific turn, append it
+to the session, and test a parent turn running alongside a worker. In
+`src/swarm/delegation.rs`, limit checks and reservations are separate
+operations; reserve capacity atomically and make completion and cancellation
+idempotent.
 
 ## Trustworthy, useful recall
 

@@ -43,6 +43,7 @@ struct ToolThenTextProvider {
     calls: AtomicUsize,
     seen_system: Mutex<Vec<String>>,
     seen_tools: Mutex<Vec<Vec<String>>>,
+    seen_messages: Mutex<Vec<Vec<String>>>,
 }
 
 impl ToolThenTextProvider {
@@ -51,6 +52,7 @@ impl ToolThenTextProvider {
             calls: AtomicUsize::new(0),
             seen_system: Mutex::new(Vec::new()),
             seen_tools: Mutex::new(Vec::new()),
+            seen_messages: Mutex::new(Vec::new()),
         }
     }
 }
@@ -72,6 +74,10 @@ impl Provider for ToolThenTextProvider {
     }
 
     async fn chat(&self, request: &ChatRequest<'_>) -> anyhow::Result<ChatResponse> {
+        self.seen_messages
+            .lock()
+            .unwrap()
+            .push(request.messages.iter().map(|m| m.content.clone()).collect());
         self.seen_system.lock().unwrap().extend(
             request
                 .messages
@@ -288,6 +294,49 @@ async fn rx4_engine_persists_the_turn() {
             .any(|(_, content)| content.contains(FINAL_REPLY)),
         "rx4 reply not persisted: {history:?}"
     );
+}
+
+#[tokio::test]
+async fn rx4_engine_loads_previous_turn_into_provider_request() {
+    let h = harness().await;
+    let channel = NullChannel::new("test");
+    h.runner
+        .handle_message(&message("history", "earlier request"), &channel)
+        .await
+        .unwrap();
+    h.runner
+        .handle_message(&message("history", "later request"), &channel)
+        .await
+        .unwrap();
+    let messages = h.provider.seen_messages.lock().unwrap();
+    let last = messages.last().unwrap().join("\n");
+    assert!(last.contains("earlier request"), "{last}");
+    assert!(last.contains("later request"), "{last}");
+}
+
+#[cfg(feature = "swarm")]
+#[tokio::test]
+async fn coding_swarm_deployments_do_not_share_conversation_history() {
+    let h = harness().await;
+    let provider = Arc::clone(&h.provider);
+    let runner = Arc::new(h.runner);
+    let tool = apollo::tools::coding_swarm::CodingSwarmTool::new(Arc::clone(&runner), 1);
+
+    let first = tool
+        .execute(r#"{"tasks":["first unique task"]}"#)
+        .await
+        .unwrap();
+    assert!(first.output.contains(FINAL_REPLY), "{}", first.output);
+    let second = tool
+        .execute(r#"{"tasks":["second unique task"]}"#)
+        .await
+        .unwrap();
+    assert!(second.output.contains(FINAL_REPLY), "{}", second.output);
+
+    let messages = provider.seen_messages.lock().unwrap();
+    let second_turn = messages.last().unwrap().join("\n");
+    assert!(second_turn.contains("second unique task"));
+    assert!(!second_turn.contains("first unique task"), "{second_turn}");
 }
 
 #[tokio::test]
