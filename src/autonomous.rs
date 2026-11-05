@@ -9,6 +9,7 @@
 //! ponytail: single-workspace, sequential. Parallel workspace support
 //! per Hermes-RS pattern can be added when multi-repo management is needed.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -110,18 +111,27 @@ impl AutonomousLoop {
             .unwrap_or_else(AutonomousStatus::new)
     }
 
-    fn save_status_to_file(status: &AutonomousStatus, path: &Path) {
+    fn save_status_to_file(status: &AutonomousStatus, path: &Path) -> bool {
         match toml::to_string_pretty(status) {
             Ok(content) => {
                 if let Err(e) = std::fs::write(path, &content) {
                     tracing::warn!("[autonomous] failed to save status: {}", e);
+                    return false;
                 }
+                true
             }
-            Err(e) => tracing::warn!("[autonomous] failed to serialize status: {}", e),
+            Err(e) => {
+                tracing::warn!("[autonomous] failed to serialize status: {}", e);
+                false
+            }
         }
     }
 
     pub fn start_fresh(&mut self) {
+        if self.status.state == AutonomousState::Running {
+            tracing::error!("[autonomous] interrupted run requires manual recovery");
+            return;
+        }
         self.status = AutonomousStatus::new();
         Self::save_status_to_file(&self.status, &self.status_path);
     }
@@ -155,6 +165,11 @@ impl AutonomousLoop {
             return;
         }
 
+        if self.status.state == AutonomousState::Running {
+            tracing::error!("[autonomous] interrupted run requires manual recovery");
+            return;
+        }
+
         // Read the task ledger
         let todo_path = self.workspace.join(&self.config.todo_path);
         let todo_content = match std::fs::read_to_string(&todo_path) {
@@ -173,21 +188,24 @@ impl AutonomousLoop {
             return;
         }
 
-        // Check workspace is clean before starting a new task
-        if self.status.state == AutonomousState::Idle
-            || self.status.state == AutonomousState::Succeeded
-            || self.status.state == AutonomousState::Failed
-        {
-            let workspace_changed = workspace_has_changes(&self.workspace).await;
-            if workspace_changed {
-                tracing::info!("[autonomous] workspace has changes, stashing before new task");
-                git_stash(&self.workspace).await;
+        let baseline = if self.config.git_remote.is_empty() || self.config.test_command.is_empty() {
+            None
+        } else {
+            match check_git_workspace(&self.workspace).await {
+                Ok(baseline) => Some(baseline),
+                Err(e) => {
+                    tracing::error!("[autonomous] refusing to start: {}", e);
+                    return;
+                }
             }
-        }
+        };
 
         self.status.state = AutonomousState::Running;
         self.status.current_task = Some("processing TODO.md".into());
-        Self::save_status_to_file(&self.status, &self.status_path);
+        if !Self::save_status_to_file(&self.status, &self.status_path) {
+            tracing::error!("[autonomous] refusing to start without a saved running status");
+            return;
+        }
 
         tracing::info!("[autonomous] running agent on TODO.md");
         let instruction = format!(
@@ -224,19 +242,28 @@ impl AutonomousLoop {
                     match run_test_command(&self.config.test_command, &self.workspace).await {
                         Ok(true) => {
                             tracing::info!("[autonomous] tests passed");
-                            self.status.consecutive_failures = 0;
-                            self.status.state = AutonomousState::Succeeded;
-
-                            // Git commit + push
-                            if !self.config.git_remote.is_empty() {
+                            let publication = if let Some(baseline) = &baseline {
                                 git_commit_and_push(
                                     "autonomous: auto-commit",
                                     &self.config.git_remote,
                                     &self.config.git_branch,
                                     &self.workspace,
+                                    &self.status_path,
+                                    baseline,
                                 )
-                                .await;
+                                .await
+                            } else {
+                                Ok(())
+                            };
+                            if let Err(e) = publication {
+                                tracing::error!("[autonomous] publication refused: {}", e);
+                                self.status.state = AutonomousState::Failed;
+                                self.status.paused = true;
+                                Self::save_status_to_file(&self.status, &self.status_path);
+                                return;
                             }
+                            self.status.consecutive_failures = 0;
+                            self.status.state = AutonomousState::Succeeded;
                         }
                         Ok(false) => {
                             tracing::warn!("[autonomous] tests failed");
@@ -302,60 +329,193 @@ async fn run_test_command(cmd: &str, cwd: &Path) -> anyhow::Result<bool> {
     }
 }
 
-/// Check if workspace has uncommitted changes.
-async fn workspace_has_changes(workspace: &Path) -> bool {
+struct GitBaseline {
+    head: String,
+    prefix: String,
+    untracked: BTreeSet<String>,
+}
+
+async fn git(cwd: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
     let output = tokio::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(workspace)
+        .args(args)
+        .current_dir(cwd)
         .output()
-        .await;
+        .await?;
+    anyhow::ensure!(output.status.success(), "git {} failed", args[0]);
+    Ok(output.stdout)
+}
 
-    match output {
-        Ok(out) => !out.stdout.is_empty(),
-        Err(_) => false,
+fn git_paths(output: Vec<u8>) -> anyhow::Result<BTreeSet<String>> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| Ok(std::str::from_utf8(path)?.to_owned()))
+        .collect()
+}
+
+/// Reject a shared index or modified tracked files before starting a turn.
+async fn check_git_workspace(workspace: &Path) -> anyhow::Result<GitBaseline> {
+    for args in [
+        &["diff", "--cached", "--quiet"][..],
+        &["diff", "--quiet", "--", "."][..],
+    ] {
+        let output = tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .await?;
+        anyhow::ensure!(
+            output.status.success(),
+            "Git preflight failed or found existing tracked changes"
+        );
     }
+    let head = String::from_utf8(git(workspace, &["rev-parse", "--verify", "HEAD"]).await?)?;
+    let prefix = String::from_utf8(git(workspace, &["rev-parse", "--show-prefix"]).await?)?;
+    let untracked = git_paths(
+        git(
+            workspace,
+            &[
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                ".",
+            ],
+        )
+        .await?,
+    )?;
+    Ok(GitBaseline {
+        head: head.trim_end_matches('\n').to_owned(),
+        prefix: prefix.strip_suffix('\n').unwrap_or(&prefix).to_owned(),
+        untracked,
+    })
 }
 
-/// Stash workspace changes.
-async fn git_stash(workspace: &Path) {
-    let _ = tokio::process::Command::new("git")
-        .args(["stash", "push", "-m", "autonomous: pre-task stash"])
-        .current_dir(workspace)
-        .output()
-        .await;
-}
-
-/// Commit all changes and push.
-async fn git_commit_and_push(message: &str, remote: &str, branch: &str, cwd: &Path) {
-    let _ = tokio::process::Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(cwd)
-        .output()
-        .await;
-
-    let _ = tokio::process::Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(cwd)
-        .output()
-        .await;
-
-    tracing::info!("[autonomous] pushing to {}/{}", remote, branch);
-    if let Ok(output) = tokio::process::Command::new("git")
-        .args(["push", remote, branch])
-        .current_dir(cwd)
-        .output()
-        .await
+async fn git_commit_and_push(
+    message: &str,
+    remote: &str,
+    branch: &str,
+    cwd: &Path,
+    status_path: &Path,
+    baseline: &GitBaseline,
+) -> anyhow::Result<()> {
+    let head = String::from_utf8(git(cwd, &["rev-parse", "--verify", "HEAD"]).await?)?;
+    anyhow::ensure!(
+        head.trim_end_matches('\n') == baseline.head,
+        "HEAD changed during the turn"
+    );
+    anyhow::ensure!(
+        git(cwd, &["diff", "--cached", "--name-only", "-z"])
+            .await?
+            .is_empty(),
+        "index changed during the turn"
+    );
+    let mut paths = git_paths(
+        git(
+            cwd,
+            &[
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "--relative",
+                "-z",
+                "--",
+                ".",
+            ],
+        )
+        .await?,
+    )?;
+    let untracked = git_paths(
+        git(
+            cwd,
+            &[
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                ".",
+            ],
+        )
+        .await?,
+    )?;
+    paths.extend(untracked.difference(&baseline.untracked).cloned());
+    let resolved_workspace = tokio::fs::canonicalize(cwd).await?;
+    let resolved_status = tokio::fs::canonicalize(status_path).await?;
+    if let Some(relative) = resolved_status
+        .strip_prefix(resolved_workspace)
+        .ok()
+        .and_then(Path::to_str)
     {
-        if output.status.success() {
-            tracing::info!("[autonomous] push successful");
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                "[autonomous] push failed: {}",
-                crate::text::truncate_chars(&stderr, 500)
-            );
-        }
+        paths.remove(relative);
     }
+    anyhow::ensure!(!paths.is_empty(), "no eligible changes to commit");
+    let expected: BTreeSet<String> = paths
+        .iter()
+        .map(|path| format!("{}{path}", baseline.prefix))
+        .collect();
+    let mut add = vec!["--literal-pathspecs", "add", "--"];
+    add.extend(paths.iter().map(String::as_str));
+    git(cwd, &add).await?;
+    let staged = git_paths(
+        git(
+            cwd,
+            &["diff", "--cached", "--name-only", "--no-renames", "-z"],
+        )
+        .await?,
+    )?;
+    anyhow::ensure!(staged == expected, "index contains unexpected paths");
+    let mut commit = vec![
+        "--literal-pathspecs",
+        "commit",
+        "--only",
+        "-m",
+        message,
+        "--",
+    ];
+    commit.extend(paths.iter().map(String::as_str));
+    git(cwd, &commit).await?;
+    let commit_id = String::from_utf8(git(cwd, &["rev-parse", "HEAD"]).await?)?;
+    let commit_id = commit_id.trim_end_matches('\n');
+    let parent_ref = format!("{commit_id}^");
+    let parent = String::from_utf8(git(cwd, &["rev-parse", &parent_ref]).await?)?;
+    anyhow::ensure!(
+        parent.trim_end_matches('\n') == baseline.head,
+        "commit has unexpected parent"
+    );
+    let committed = git_paths(
+        git(
+            cwd,
+            &[
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "--no-renames",
+                "-r",
+                "-z",
+                commit_id,
+            ],
+        )
+        .await?,
+    )?;
+    anyhow::ensure!(committed == expected, "commit contains unexpected paths");
+    git(cwd, &["check-ref-format", "--branch", branch]).await?;
+    let target = format!("refs/heads/{branch}");
+    let remote_head = String::from_utf8(
+        git(
+            cwd,
+            &["ls-remote", "--exit-code", "--refs", "--", remote, &target],
+        )
+        .await?,
+    )?;
+    anyhow::ensure!(
+        remote_head.split_whitespace().next() == Some(baseline.head.as_str()),
+        "remote branch differs from the starting commit"
+    );
+    let refspec = format!("{commit_id}:{target}");
+    git(cwd, &["push", "--", remote, &refspec]).await?;
+    Ok(())
 }
 
 #[cfg(test)]

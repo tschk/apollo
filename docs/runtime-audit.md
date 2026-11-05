@@ -6,7 +6,7 @@ as complete.
 
 ## Protect autonomous workspaces
 
-`apollo autonomous` uses the current workspace and defaults to running
+The original `apollo autonomous` implementation uses the current workspace and defaults to running
 `cargo test --workspace`, then committing and pushing to `origin main` when
 the agent succeeds and tests pass. In `src/autonomous.rs`, the pre-task
 `git stash push` hides tracked changes without restoring them. From a nested
@@ -26,11 +26,18 @@ These Git effects were reproduced in a disposable nested repository and local
 bare remote, not by running a full agent turn. They demonstrate possible
 disclosure to a remote configured by the operator and loss of access to local
 changes. They do not establish that an untrusted party can trigger a run or
-control its workspace or remote. Until fixed, use a dedicated clean repository
-without private untracked files and do not run autonomous mode unattended.
-Isolate tasks in a worktree or refuse dirty workspaces, propagate Git failures,
-and test restart, status-file, and failed-push behavior. See the proposed
-[isolated-run design](autonomous-isolation.md).
+control its workspace or remote.
+
+The interim mitigation removes automatic stashing, rejects a pre-existing
+index or modified tracked workspace files, excludes pre-existing untracked
+files, stages literal paths, and checks the resulting commit before pushing.
+It also refuses to resume a persisted running state automatically. These
+checks reduce the blast radius but **do not establish authorship**: another
+process can change a file during a turn, and timing alone cannot attribute it
+to the agent. The shared-checkout design remains unsafe for unattended use
+where unintended publication matters. Use a dedicated clean repository without
+private data until the [isolated-run design](autonomous-isolation.md) is
+implemented and verified.
 
 ## Conversation history was not sent to the model
 

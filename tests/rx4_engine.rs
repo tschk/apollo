@@ -340,6 +340,238 @@ async fn coding_swarm_deployments_do_not_share_conversation_history() {
 }
 
 #[tokio::test]
+async fn autonomous_preserves_existing_work_in_nested_workspace() {
+    async fn git(cwd: &std::path::Path, args: &[&str]) -> String {
+        let output = tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("repo");
+    let workspace = root.join("workspace");
+    let remote = temp.path().join("remote.git");
+    std::fs::create_dir_all(&workspace).unwrap();
+    git(&root, &["init", "-b", "main"]).await;
+    git(&root, &["config", "user.name", "Test"]).await;
+    git(&root, &["config", "user.email", "test@example.invalid"]).await;
+    std::fs::write(root.join("outside.txt"), "original outside").unwrap();
+    std::fs::write(workspace.join("TODO.md"), "- [ ] task").unwrap();
+    git(&root, &["add", "outside.txt", "workspace/TODO.md"]).await;
+    git(&root, &["commit", "-m", "initial"]).await;
+    git(temp.path(), &["init", "--bare", remote.to_str().unwrap()]).await;
+    git(
+        &root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )
+    .await;
+    git(&root, &["push", "origin", "main"]).await;
+    let before = git(&root, &["rev-parse", "HEAD"]).await;
+    std::fs::write(root.join("outside.txt"), "staged outside").unwrap();
+    git(&root, &["add", "outside.txt"]).await;
+    std::fs::write(workspace.join("private.txt"), "pre-existing private data").unwrap();
+
+    let h = harness().await;
+    let mut controller = apollo::autonomous::AutonomousLoop::new(
+        apollo::autonomous::AutonomousConfig {
+            status_path: temp
+                .path()
+                .join("status.toml")
+                .to_string_lossy()
+                .into_owned(),
+            test_command: "true".into(),
+            ..Default::default()
+        },
+        workspace.clone(),
+    );
+    controller.step(&h.runner).await;
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("outside.txt")).unwrap(),
+        "staged outside"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("private.txt")).unwrap(),
+        "pre-existing private data"
+    );
+    assert_eq!(
+        git(&root, &["diff", "--cached", "--name-only"])
+            .await
+            .trim(),
+        "outside.txt"
+    );
+    assert!(git(&root, &["stash", "list"]).await.is_empty());
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/main"]).await,
+        before
+    );
+}
+
+async fn autonomous_git(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+async fn autonomous_preserves_private_work(persisted_running: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("repo");
+    let workspace = root.join("workspace");
+    let remote = temp.path().join("remote.git");
+    let status_path = temp.path().join("status.toml");
+    std::fs::create_dir_all(&workspace).unwrap();
+    autonomous_git(&root, &["init", "-b", "main"]).await;
+    autonomous_git(&root, &["config", "user.name", "Test"]).await;
+    autonomous_git(&root, &["config", "user.email", "test@example.invalid"]).await;
+    std::fs::write(root.join("outside.txt"), "original outside").unwrap();
+    std::fs::write(workspace.join("TODO.md"), "- [ ] task").unwrap();
+    autonomous_git(&root, &["add", "outside.txt", "workspace/TODO.md"]).await;
+    autonomous_git(&root, &["commit", "-m", "initial"]).await;
+    autonomous_git(temp.path(), &["init", "--bare", remote.to_str().unwrap()]).await;
+    autonomous_git(
+        &root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )
+    .await;
+    autonomous_git(&root, &["push", "origin", "main"]).await;
+    let before = autonomous_git(&root, &["rev-parse", "HEAD"]).await;
+
+    std::fs::write(root.join("outside.txt"), "staged outside").unwrap();
+    autonomous_git(&root, &["add", "outside.txt"]).await;
+    std::fs::write(workspace.join("private.txt"), "pre-existing private data").unwrap();
+    if persisted_running {
+        std::fs::write(
+            &status_path,
+            "state = \"running\"\nconsecutive_failures = 0\npaused = false\n",
+        )
+        .unwrap();
+    }
+
+    let h = harness().await;
+    let mut controller = apollo::autonomous::AutonomousLoop::new(
+        apollo::autonomous::AutonomousConfig {
+            status_path: status_path.to_string_lossy().into_owned(),
+            test_command: "true".into(),
+            ..Default::default()
+        },
+        workspace.clone(),
+    );
+    controller.step(&h.runner).await;
+
+    assert_eq!(h.provider.calls.load(Ordering::SeqCst), 0);
+    if persisted_running {
+        let status: apollo::autonomous::AutonomousStatus =
+            toml::from_str(&std::fs::read_to_string(status_path).unwrap()).unwrap();
+        assert_eq!(status.state, apollo::autonomous::AutonomousState::Running);
+    } else {
+        assert!(!status_path.exists());
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("outside.txt")).unwrap(),
+        "staged outside"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("private.txt")).unwrap(),
+        "pre-existing private data"
+    );
+    assert_eq!(
+        autonomous_git(&root, &["diff", "--cached", "--name-only"])
+            .await
+            .trim(),
+        "outside.txt"
+    );
+    assert_eq!(
+        autonomous_git(&root, &["ls-files", "--others", "--exclude-standard"])
+            .await
+            .trim(),
+        "workspace/private.txt"
+    );
+    assert!(autonomous_git(&root, &["stash", "list"]).await.is_empty());
+    assert_eq!(autonomous_git(&root, &["rev-parse", "HEAD"]).await, before);
+    assert_eq!(
+        autonomous_git(&remote, &["rev-parse", "refs/heads/main"]).await,
+        before
+    );
+}
+
+#[tokio::test]
+async fn autonomous_persisted_running_preserves_private_work() {
+    autonomous_preserves_private_work(true).await;
+}
+
+#[tokio::test]
+async fn autonomous_idle_preserves_untracked_private_and_staged_outside() {
+    autonomous_preserves_private_work(false).await;
+}
+
+#[tokio::test]
+async fn autonomous_publishes_only_new_workspace_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("repo");
+    let workspace = root.join("workspace");
+    let remote = temp.path().join("remote.git");
+    std::fs::create_dir_all(&workspace).unwrap();
+    autonomous_git(&root, &["init", "-b", "main"]).await;
+    autonomous_git(&root, &["config", "user.name", "Test"]).await;
+    autonomous_git(&root, &["config", "user.email", "test@example.invalid"]).await;
+    std::fs::write(workspace.join("TODO.md"), "- [ ] task").unwrap();
+    autonomous_git(&root, &["add", "workspace/TODO.md"]).await;
+    autonomous_git(&root, &["commit", "-m", "initial"]).await;
+    autonomous_git(temp.path(), &["init", "--bare", remote.to_str().unwrap()]).await;
+    autonomous_git(
+        &root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )
+    .await;
+    autonomous_git(&root, &["push", "origin", "main"]).await;
+    std::fs::write(workspace.join("private.txt"), "pre-existing private data").unwrap();
+
+    let h = harness().await;
+    let mut controller = apollo::autonomous::AutonomousLoop::new(
+        apollo::autonomous::AutonomousConfig {
+            status_path: temp
+                .path()
+                .join("status.toml")
+                .to_string_lossy()
+                .into_owned(),
+            test_command: "printf result > ':result'".into(),
+            ..Default::default()
+        },
+        workspace,
+    );
+    controller.step(&h.runner).await;
+
+    let files = autonomous_git(&remote, &["ls-tree", "-r", "--name-only", "main"]).await;
+    assert_eq!(files, "workspace/:result\nworkspace/TODO.md\n");
+    assert_eq!(
+        autonomous_git(&remote, &["show", "main:workspace/:result"]).await,
+        "result"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("workspace/private.txt")).unwrap(),
+        "pre-existing private data"
+    );
+}
+
+#[tokio::test]
 async fn rx4_engine_records_tool_steps_on_the_trajectory() {
     let h = harness().await;
     h.runner
