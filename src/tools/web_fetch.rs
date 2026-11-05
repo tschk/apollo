@@ -194,3 +194,57 @@ fn strip_html(html: &str) -> String {
 
     result.trim().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_html_basic() {
+        assert_eq!(
+            strip_html("<html><body>Hello World!</body></html>"),
+            "Hello World!"
+        );
+    }
+
+    #[test]
+    fn test_strip_html_newlines() {
+        assert_eq!(
+            strip_html("<div>Line 1</div><p>Line 2</p><br>Line 3"),
+            "Line 1\nLine 2\nLine 3"
+        );
+        assert_eq!(
+            strip_html("<h1>Header</h1><ul><li>Item 1</li><li>Item 2</li></ul>"),
+            "Header\nItem 1\nItem 2"
+        );
+    }
+
+    #[test]
+    fn test_strip_html_script_style() {
+        assert_eq!(
+            strip_html("<script>alert('test');</script>Content"),
+            "Content"
+        );
+        assert_eq!(
+            strip_html("<style>body { color: red; }</style>Content"),
+            "Content"
+        );
+    }
+
+    #[test]
+    fn test_strip_html_entities() {
+        assert_eq!(strip_html("I &lt;3 HTML &amp; CSS"), "I <3 HTML & CSS");
+    }
+
+    #[test]
+    fn test_strip_html_whitespace() {
+        assert_eq!(
+            strip_html("Multiple<br><br><br>Newlines"),
+            "Multiple\n\nNewlines"
+        );
+        assert_eq!(
+            strip_html("  Spaces   before and after  "),
+            "Spaces   before and after"
+        );
+    }
+}
