@@ -18,6 +18,7 @@ use apollo::bootstrap::{
 use apollo::channels::cli::CliChannel;
 #[cfg(feature = "channel-discord")]
 use apollo::channels::discord::DiscordChannel;
+use apollo::channels::Channel;
 use apollo::config::Config;
 use apollo::cron_scheduler::CronScheduler;
 use apollo::diagnostics::{collect_doctor_report, render_doctor_report, render_findings};
@@ -162,6 +163,11 @@ enum Commands {
         /// Run in HTTP mode on this port (default: stdio mode)
         #[arg(long)]
         port: Option<u16>,
+
+        /// Address to bind in HTTP mode. Loopback by default; any other
+        /// address requires APOLLO_HTTP_TOKEN to be set.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: std::net::IpAddr,
     },
 
     /// Run one self-update cycle against the current repo
@@ -656,6 +662,10 @@ async fn build_automation_agent(
         .with_memory_enabled(!restricted)
         .with_memory_ideas(cfg.memory.clone())
         .with_group_chat(cfg.group_chat.clone())
+        .with_skill_shell_policy(
+            cfg.policy.allow_shell,
+            cfg.policy.trusted_skill_dirs.clone(),
+        )
         .with_skills(discovered_skills)
         .await;
     #[cfg(feature = "zkr-memory")]
@@ -679,6 +689,15 @@ async fn build_automation_agent(
         cfg.agent.permissions.allow.clone(),
     )));
     Ok((runner, cfg))
+}
+
+/// `[channel]` allowlists, applied to every inbound channel — not only
+/// Telegram, which enforces the same filter in its own poll loop.
+fn ingress_filter(channel: &apollo::config::ChannelConfig) -> apollo::channels::IngressFilter {
+    apollo::channels::IngressFilter::new(
+        channel.allowed_chat_ids.clone(),
+        channel.allowed_sender_ids.clone(),
+    )
 }
 
 #[tokio::main]
@@ -843,6 +862,10 @@ async fn main() -> anyhow::Result<()> {
                     .with_workspace(workspace.clone())
                     .with_memory_ideas(cfg.memory.clone())
                     .with_group_chat(cfg.group_chat.clone())
+                    .with_skill_shell_policy(
+                        cfg.policy.allow_shell,
+                        cfg.policy.trusted_skill_dirs.clone(),
+                    )
                     .with_skills(discovered_skills.clone())
                     .await;
             #[cfg(feature = "zkr-memory")]
@@ -1027,7 +1050,10 @@ async fn main() -> anyhow::Result<()> {
                         println!("   Channel ID: {}", channel_id);
                         println!("   Listening for messages...");
 
-                        let mut ch = DiscordChannel::new(token, channel_id);
+                        let mut ch = apollo::channels::FilteredChannel::new(
+                            Box::new(DiscordChannel::new(token, channel_id)),
+                            ingress_filter(&cfg.channel),
+                        );
                         if let Some((cron_rx, cron_shutdown, cron_sched)) = cron_runtime.take() {
                             let (_extra_tx, extra_rx) = tokio::sync::mpsc::channel(1);
                             runner_arc
@@ -1064,7 +1090,10 @@ async fn main() -> anyhow::Result<()> {
                             cfg.channel.token.clone(),
                             cfg.channel.settings.clone(),
                         );
-                        let mut ch = channel_registry.build(other, &settings)?;
+                        let mut ch = apollo::channels::FilteredChannel::new(
+                            channel_registry.build(other, &settings)?,
+                            ingress_filter(&cfg.channel),
+                        );
 
                         println!("apollo — {} via {}", cfg.model, ch.name());
                         println!("   Listening for messages...");
@@ -1072,11 +1101,11 @@ async fn main() -> anyhow::Result<()> {
                         if let Some((cron_rx, cron_shutdown, cron_sched)) = cron_runtime.take() {
                             let (_extra_tx, extra_rx) = tokio::sync::mpsc::channel(1);
                             runner_arc
-                                .run_with_runtime_rx(ch.as_mut(), extra_rx, cron_rx, cron_sched)
+                                .run_with_runtime_rx(&mut ch, extra_rx, cron_rx, cron_sched)
                                 .await?;
                             cron_shutdown.notify_waiters();
                         } else {
-                            runner_arc.run(ch.as_mut()).await?;
+                            runner_arc.run(&mut ch).await?;
                         }
                     }
                 }
@@ -1199,7 +1228,12 @@ async fn main() -> anyhow::Result<()> {
             workspace,
             model,
             port,
+            host,
         } => {
+            // Fail before opening the database if the bind would be refused.
+            if let Some(port) = port {
+                apollo::mcp_server::mcp_http_token(std::net::SocketAddr::new(host, port))?;
+            }
             let cfg = load_config(&config);
             let model = model.unwrap_or(cfg.model.clone());
             let workspace = workspace.unwrap_or(cfg.workspace.clone());
@@ -1233,7 +1267,18 @@ async fn main() -> anyhow::Result<()> {
                 &cfg,
             );
 
+            // Every MCP `tools/call` passes the same permission rules an
+            // agent-initiated call does.
+            let hook_ctx = apollo::agent::ToolHookContext::new(
+                vec![Arc::new(PermissionHook::new(
+                    cfg.agent.permissions.deny.clone(),
+                    cfg.agent.permissions.allow.clone(),
+                ))],
+                None,
+            );
+
             if let Some(port) = port {
+                let addr = std::net::SocketAddr::new(host, port);
                 let system_prompt = prompt::apply_configured(
                     &cfg.system_prompt,
                     prompt::build_system_prompt(&workspace).await,
@@ -1259,17 +1304,20 @@ async fn main() -> anyhow::Result<()> {
                     cfg.agent.permissions.allow.clone(),
                 )));
                 eprintln!(
-                    "apollo v{} — MCP HTTP server on port {} ({})",
+                    "apollo v{} — MCP HTTP server on {} ({})",
                     env!("CARGO_PKG_VERSION"),
-                    port,
+                    addr,
                     model
                 );
                 apollo::mcp_server::run_mcp_server_http(
-                    tools,
-                    Some(provider),
-                    Some(model),
-                    Some(runner),
-                    port,
+                    apollo::mcp_server::McpHttpConfig {
+                        tools,
+                        provider: Some(provider),
+                        model: Some(model),
+                        runner: Some(runner),
+                        hook_ctx,
+                    },
+                    addr,
                 )
                 .await?;
             } else {
@@ -1278,7 +1326,8 @@ async fn main() -> anyhow::Result<()> {
                     env!("CARGO_PKG_VERSION"),
                     model
                 );
-                apollo::mcp_server::run_mcp_server(tools, Some(provider), Some(model)).await?;
+                apollo::mcp_server::run_mcp_server(tools, Some(provider), Some(model), hook_ctx)
+                    .await?;
             }
         }
 
@@ -1537,6 +1586,10 @@ async fn main() -> anyhow::Result<()> {
                     .with_workspace(workspace.clone())
                     .with_memory_ideas(cfg.memory.clone())
                     .with_group_chat(cfg.group_chat.clone())
+                    .with_skill_shell_policy(
+                        cfg.policy.allow_shell,
+                        cfg.policy.trusted_skill_dirs.clone(),
+                    )
                     .with_skills(discovered_skills)
                     .await;
             #[cfg(feature = "zkr-memory")]
