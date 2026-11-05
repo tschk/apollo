@@ -29,7 +29,8 @@ changes. They do not establish that an untrusted party can trigger a run or
 control its workspace or remote. Until fixed, use a dedicated clean repository
 without private untracked files and do not run autonomous mode unattended.
 Isolate tasks in a worktree or refuse dirty workspaces, propagate Git failures,
-and test restart, status-file, and failed-push behavior.
+and test restart, status-file, and failed-push behavior. See the proposed
+[isolated-run design](autonomous-isolation.md).
 
 ## Conversation history was not sent to the model
 
