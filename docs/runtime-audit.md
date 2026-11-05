@@ -6,13 +6,39 @@ as complete.
 
 ## Protect autonomous workspaces
 
-`src/autonomous.rs` stashes tracked changes before a task without restoring
-them. Untracked files remain in the workspace and a later `git add -A` can
-include them in an automatic commit. Git failures are not propagated to the
-task status. Run tasks in an isolated worktree, or refuse dirty workspaces;
-propagate Git failures and test tracked and untracked user changes, restart,
-and failed push scenarios. Account for the status file itself when deciding
-whether a workspace is dirty.
+`apollo autonomous` uses the current workspace and defaults to running
+`cargo test --workspace`, then committing and pushing to `origin main` when
+the agent succeeds and tests pass. In `src/autonomous.rs`, the pre-task
+`git stash push` hides tracked changes without restoring them. From a nested
+workspace, Git stashes tracked changes elsewhere in the enclosing repository
+too. The ledger is read before the stash, so its contents can differ from the
+file the agent subsequently reads.
+
+The stash does not include untracked files. After a successful agent turn and
+test command, `git add -A` can stage and commit those pre-existing files, then
+push them to the configured remote. A pre-staged file outside a nested
+workspace can also enter the commit if a prior `Running` state skips the stash
+or the stash fails. The loop ignores stash, add, and commit failures, and can
+attempt a push even when the new commit failed. Its status file can be staged
+in its intermediate `Running` state.
+
+These Git effects were reproduced in a disposable nested repository and local
+bare remote, not by running a full agent turn. They demonstrate possible
+disclosure to a remote configured by the operator and loss of access to local
+changes. They do not establish that an untrusted party can trigger a run or
+control its workspace or remote. Until fixed, use a dedicated clean repository
+without private untracked files and do not run autonomous mode unattended.
+Isolate tasks in a worktree or refuse dirty workspaces, propagate Git failures,
+and test restart, status-file, and failed-push behavior.
+
+## Conversation history was not sent to the model
+
+Apollo persisted conversation turns, but its rx4 bridge wrote loaded history
+only to rx4's live message projection. Rx4 builds provider requests from a
+separate session log, so the model did not receive that saved history. A
+real-turn regression test reproduced the omission. The bridge now appends
+history to the session, and coding swarm deployments use unique conversation
+IDs to prevent a later deployment from receiving an earlier worker's history.
 
 ## Make parallel agents safely steerable
 
