@@ -56,3 +56,38 @@ impl Tool for DoctorTool {
         Ok(ToolResult::success(render_doctor_report(&report)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_doctor_execute_parses_verbose_flag() {
+        let tool = DoctorTool::new();
+
+        // We test executing without verbose
+        let result = tool.execute(r#"{"verbose": false}"#).await.unwrap();
+        assert!(!result.is_error);
+        // Just asserting on some expected text output
+        assert!(result.output.contains("apollo doctor"));
+
+        // We test executing with verbose
+        let result_verbose = tool.execute(r#"{"verbose": true}"#).await.unwrap();
+        assert!(!result_verbose.is_error);
+        assert!(result_verbose.output.contains("apollo doctor"));
+    }
+
+    #[tokio::test]
+    async fn test_doctor_execute_handles_invalid_json() {
+        let tool = DoctorTool::new();
+
+        // Invalid JSON or missing field falls back to default (verbose = false)
+        let result = tool.execute("invalid json").await.unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("apollo doctor"));
+
+        let result2 = tool.execute(r#"{}"#).await.unwrap();
+        assert!(!result2.is_error);
+        assert!(result2.output.contains("apollo doctor"));
+    }
+}
