@@ -266,6 +266,10 @@ pub struct PolicyConfig {
     pub allow_plugin_shell: bool,
     pub allow_plugin_git: bool,
     pub allow_computer_use: bool,
+    /// Directories whose SKILL.md files may run inline `!`cmd`` snippets.
+    /// Empty by default: a discovered skill is not a trusted one. Relative
+    /// paths resolve against the workspace. Has no effect without `allow_shell`.
+    pub trusted_skill_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -689,6 +693,7 @@ impl Default for PolicyConfig {
             allow_plugin_shell: true,
             allow_plugin_git: true,
             allow_computer_use: true,
+            trusted_skill_dirs: Vec::new(),
         }
     }
 }

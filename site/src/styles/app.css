@@ -384,7 +384,6 @@ footer {
 
 @media (max-width: 860px) {
   .grid-3, .grid-2, .pair, .install, .section-head { grid-template-columns: 1fr; }
-  .nav-links a.quiet { display: none; }
   .hero { padding-bottom: 48px; }
   .word { letter-spacing: -0.05em; }
 }

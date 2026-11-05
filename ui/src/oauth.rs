@@ -42,6 +42,13 @@ pub enum OAuthKind {
 pub enum Support {
     /// Sign-in works and apollo uses it.
     Live,
+    /// Sign-in works; apollo needs a non-default build to use it.
+    #[allow(dead_code)]
+    NeedsFeature(&'static str),
+    /// apollo cannot use this login; sign-in is not offered. (No provider
+    /// is in this state today; kept so the UI handles one honestly.)
+    #[allow(dead_code)]
+    Unsupported(&'static str),
 }
 
 impl OAuthKind {
@@ -118,6 +125,9 @@ impl OAuthKind {
     /// arrives or the flow's own 180s timeout; call it off the UI thread.
     /// Only the outcome is returned — never a token.
     pub fn sign_in(self) -> Result<(), String> {
+        if let Support::Unsupported(why) = self.support() {
+            return Err(why.to_string());
+        }
         let provider = self.provider();
         let result = rs_ai_oauth::start_oauth_flow(provider)
             .map_err(|e| format!("sign-in failed: {e}"))

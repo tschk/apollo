@@ -502,6 +502,7 @@ impl OnboardingView {
     fn fields(&self) -> Vec<Field> {
         match self.step {
             Step::Provider => match self.provider.auth {
+                Auth::OAuth(kind) if matches!(kind.support(), Support::Unsupported(_)) => vec![],
                 Auth::OAuth(_) | Auth::Local => vec![Field::Model],
                 Auth::ApiKey(_) => vec![Field::ApiKey, Field::Model],
                 Auth::Custom => vec![
@@ -675,6 +676,12 @@ impl OnboardingView {
     fn check_provider(&self) -> Result<(), (String, Option<Field>)> {
         match self.provider.auth {
             Auth::OAuth(kind) => {
+                if let Support::Unsupported(why) = kind.support() {
+                    return Err((
+                        format!("{} can't be used: {why}", self.provider.label),
+                        None,
+                    ));
+                }
                 if !self.signed_in[kind_index(kind)] {
                     let msg = if matches!(self.sign_in, SignIn::Waiting(k, _) if k == kind) {
                         "finish signing in in your browser first".to_string()
@@ -1044,6 +1051,9 @@ impl OnboardingView {
     /// blocks until the redirect arrives or its own 3-minute timeout; the
     /// UI only learns the outcome, never a token.
     fn start_sign_in(&mut self, kind: OAuthKind, cx: &mut Context<Self>) {
+        if matches!(kind.support(), Support::Unsupported(_)) {
+            return;
+        }
         self.sign_in = SignIn::Waiting(kind, Instant::now());
         self.error.clear();
         cx.notify();
@@ -1372,6 +1382,9 @@ impl OnboardingView {
             }
         }
         match kind.support() {
+            Support::Unsupported(_) => ("not supported by apollo".into(), GHOST),
+            Support::NeedsFeature(_) if self.signed_in[i] => ("signed in".into(), SUCCESS),
+            Support::NeedsFeature(_) => ("not available in this build".into(), MUTED),
             Support::Live if self.signed_in[i] => ("✓ signed in".into(), SUCCESS),
             Support::Live => ("click to sign in".into(), MUTED),
         }
@@ -1388,6 +1401,7 @@ impl OnboardingView {
                 let Auth::OAuth(kind) = p.auth else {
                     unreachable!("pinned providers are oauth")
                 };
+                let unsupported = matches!(kind.support(), Support::Unsupported(_));
                 let (status, color) = self.oauth_status(kind);
                 div()
                     .id(("oauth", i))
@@ -1407,7 +1421,13 @@ impl OnboardingView {
                         div()
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(if selected { ACCENT } else { TEXT }))
+                            .text_color(rgb(if unsupported {
+                                MUTED
+                            } else if selected {
+                                ACCENT
+                            } else {
+                                TEXT
+                            }))
                             .child(p.label),
                     )
                     .child(div().text_xs().text_color(rgb(GHOST)).child(p.blurb))
@@ -1903,12 +1923,18 @@ impl OnboardingView {
             Auth::OAuth(kind) => {
                 let i = kind_index(kind);
                 let (line, color) = match (&self.sign_in, kind.support()) {
+                    (_, Support::Unsupported(why)) => (why.to_string(), MUTED),
                     (SignIn::Waiting(k, _), _) if *k == kind => {
                         ("sign-in opened in your browser".to_string(), WARN)
                     }
                     (SignIn::Failed(k, e), _) if *k == kind => {
                         (crate::fault_line(e).to_string(), DANGER)
                     }
+                    (_, Support::NeedsFeature(_)) if self.signed_in[i] => (
+                        "signed in, but this build cannot use that login".into(),
+                        WARN,
+                    ),
+                    (_, Support::NeedsFeature(_)) => ("not available in this build".into(), MUTED),
                     (_, Support::Live) if self.signed_in[i] => (
                         "signed in — apollo uses this login directly, no key needed".into(),
                         SUCCESS,
@@ -1917,6 +1943,7 @@ impl OnboardingView {
                 };
                 let waiting = matches!(self.sign_in, SignIn::Waiting(k, _) if k == kind);
                 let actions = match kind.support() {
+                    Support::Unsupported(_) => None,
                     _ if waiting => Some(Self::button(
                         "oauth-cancel",
                         "cancel",
@@ -1967,9 +1994,10 @@ impl OnboardingView {
                             ),
                     )
                     .children(actions);
+                let unsupported = matches!(kind.support(), Support::Unsupported(_));
                 col()
                     .child(panel)
-                    .child(self.model_field(cx))
+                    .when(!unsupported, |d| d.child(self.model_field(cx)))
                     .into_any_element()
             }
             Auth::ApiKey(_) => col()
