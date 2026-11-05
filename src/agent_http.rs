@@ -805,6 +805,7 @@ mod tests {
 
     #[test]
     fn http_listen_addr_uses_default_port_when_env_var_is_absent() {
+        // Verifies fallback default port is used when the environment variable is not set.
         temp_env::with_var("APOLLO_HTTP_PORT", None::<&str>, || {
             let addr = http_listen_addr();
             assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 31338)));
@@ -813,6 +814,7 @@ mod tests {
 
     #[test]
     fn http_listen_addr_uses_custom_port_from_env_var() {
+        // Verifies that a valid custom port is parsed and used correctly.
         temp_env::with_var("APOLLO_HTTP_PORT", Some("8080"), || {
             let addr = http_listen_addr();
             assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 8080)));
@@ -821,6 +823,7 @@ mod tests {
 
     #[test]
     fn http_listen_addr_falls_back_to_default_on_invalid_env_var() {
+        // Verifies that an invalid port string results in the default fallback port.
         temp_env::with_var("APOLLO_HTTP_PORT", Some("invalid_port"), || {
             let addr = http_listen_addr();
             assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 31338)));
