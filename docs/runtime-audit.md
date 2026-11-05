@@ -40,6 +40,12 @@ checkout are attributable to the run and its processes, not necessarily to the
 model. The clone is not a sandbox against other same-user processes or shell
 commands. See [isolated runs](autonomous-isolation.md) for recovery and limits.
 
+The initial isolated-checkout implementation resolved the workspace path but
+compared it against a constructed clone-root path without resolving that root
+again. This relied on its freshly created path components remaining unchanged.
+Containment now resolves both sides and fails closed when resolution fails;
+this is a preparation-time check, not protection from later same-user writes.
+
 ## Conversation history was not sent to the model
 
 Apollo persisted conversation turns, but its rx4 bridge wrote loaded history
