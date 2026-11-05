@@ -489,7 +489,11 @@ mod tests {
         checkout.configure_remote("origin").await.unwrap();
         assert_eq!(
             run(&checkout.clone_root, &["remote", "get-url", "origin"]).await,
-            format!("{}\n", remote.display()).as_bytes()
+            format!(
+                "{}\n",
+                tokio::fs::canonicalize(&remote).await.unwrap().display()
+            )
+            .as_bytes()
         );
     }
 }
