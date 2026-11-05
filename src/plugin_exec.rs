@@ -109,7 +109,9 @@ impl Tool for HostPluginToolAdapter {
     }
 
     async fn execute(&self, arguments: &str) -> anyhow::Result<ToolResult> {
-        let mut child = tokio::process::Command::new(&self.command)
+        let mut command = tokio::process::Command::new(&self.command);
+        crate::tools::child_proc::scrub(&mut command);
+        let mut child = command
             .args(&self.args)
             .current_dir(&self.cwd)
             .stdin(Stdio::piped())
