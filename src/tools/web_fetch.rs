@@ -229,11 +229,19 @@ mod tests {
             strip_html("<style>body { color: red; }</style>Content"),
             "Content"
         );
+        assert_eq!(
+            strip_html("<div>Before<script>let a = 1;</script><style>.a { color: red; }</style>After</div>"),
+            "BeforeAfter"
+        );
     }
 
     #[test]
     fn test_strip_html_entities() {
         assert_eq!(strip_html("I &lt;3 HTML &amp; CSS"), "I <3 HTML & CSS");
+        assert_eq!(
+            strip_html("&gt; &quot;quotes&quot; and &#39;apostrophes&#39;&nbsp;spaced"),
+            "> \"quotes\" and 'apostrophes' spaced"
+        );
     }
 
     #[test]
