@@ -3,6 +3,7 @@
 
 pub mod formatting;
 pub mod http_inject;
+pub mod ingress;
 pub mod media;
 pub mod registry;
 pub mod traits;
@@ -37,6 +38,7 @@ pub mod telegram;
 #[cfg(feature = "channel-whatsapp")]
 pub mod whatsapp;
 
+pub use ingress::{FilteredChannel, IngressFilter};
 pub use registry::{ChannelBuilder, ChannelRegistry, ChannelSettings};
 pub use traits::{
     Channel, Delivery, DraftChannel, IncomingMessage, MediaKind, MediaSource, OutgoingMedia,

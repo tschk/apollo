@@ -327,7 +327,6 @@ pub struct AgentState {
     pub message_count: u64,
 }
 
-#[allow(dead_code)]
 fn parse_state(value: &serde_json::Value) -> AgentState {
     let text = |key: &str| {
         value
@@ -355,7 +354,6 @@ fn parse_state(value: &serde_json::Value) -> AgentState {
     }
 }
 
-#[allow(dead_code)]
 fn blocking_client(timeout_ms: u64) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
@@ -363,7 +361,6 @@ fn blocking_client(timeout_ms: u64) -> Result<reqwest::blocking::Client, String>
         .map_err(|e| e.to_string())
 }
 
-#[allow(dead_code)]
 fn authed(request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
     match auth_token() {
         Some(token) => request.bearer_auth(token),
@@ -372,7 +369,6 @@ fn authed(request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::Requ
 }
 
 /// Read the agent's live state. `None` when no agent is reachable.
-#[allow(dead_code)]
 pub fn fetch_state() -> Option<AgentState> {
     let url = format!("http://127.0.0.1:{}/v1/state", http_port());
     let response = authed(blocking_client(1500).ok()?.get(&url)).send().ok()?;
@@ -553,32 +549,6 @@ pub fn config_model() -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("—")
         .to_string()
-}
-
-/// Model and engine reported by the local config. The TUI status bar still
-/// asks for both; the desktop shows the model only.
-#[allow(dead_code)]
-pub fn config_summary() -> (String, String) {
-    let Ok(text) = std::fs::read_to_string("apollo.json") else {
-        return ("—".into(), "—".into());
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return ("—".into(), "—".into());
-    };
-    let model = v
-        .get("model")
-        .and_then(|m| m.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("—")
-        .to_string();
-    let engine = v
-        .get("agent")
-        .and_then(|a| a.get("engine"))
-        .and_then(|e| e.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("—")
-        .to_string();
-    (model, engine)
 }
 
 #[cfg(test)]

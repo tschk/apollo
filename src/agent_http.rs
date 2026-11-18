@@ -268,6 +268,20 @@ fn authorize(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
     check_auth(headers)
 }
 
+/// The same two gates against an explicit token, for other agent-driving HTTP
+/// servers in this process (the MCP HTTP server).
+pub(crate) fn authorize_with(
+    expected: &str,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), StatusCode> {
+    reject_browser_origin(headers)?;
+    if expected.is_empty() {
+        // An empty token would match an absent header.
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    verify_token(expected, headers)
+}
+
 /// Start the HTTP server.
 ///
 /// The `JoinHandle` is returned rather than dropped: `with_graceful_shutdown`
@@ -665,6 +679,64 @@ mod tests {
     }
 
     #[test]
+    fn load_or_create_token_ignores_empty_disk_token_and_creates_new_one() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let token_file = home.join(".apollo/http-token");
+        std::fs::create_dir_all(token_file.parent().unwrap()).unwrap();
+        std::fs::write(&token_file, "   \n  ").unwrap();
+
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", None),
+                ("HOME", Some(home.to_str().unwrap())),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert!(!token.is_empty());
+                assert_ne!(token, "   \n  ");
+
+                let disk_token = std::fs::read_to_string(&token_file).unwrap();
+                assert_eq!(token, disk_token);
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_trims_env_var_token() {
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", Some("  env-token-with-spaces  \n")),
+                ("HOME", None),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert_eq!(token, "env-token-with-spaces");
+            },
+        );
+    }
+
+    #[test]
+    fn load_or_create_token_trims_disk_token() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let token_file = home.join(".apollo/http-token");
+        std::fs::create_dir_all(token_file.parent().unwrap()).unwrap();
+        std::fs::write(&token_file, "  disk-token-with-spaces  \n").unwrap();
+
+        temp_env::with_vars(
+            [
+                ("APOLLO_HTTP_TOKEN", None),
+                ("HOME", Some(home.to_str().unwrap())),
+            ],
+            || {
+                let token = load_or_create_token().unwrap();
+                assert_eq!(token, "disk-token-with-spaces");
+            },
+        );
+    }
+
+    #[test]
     fn a_correct_bearer_token_is_accepted() {
         let h = headers(&[(header::AUTHORIZATION, "Bearer s3cret")]);
         assert!(verify_token("s3cret", &h).is_ok());
@@ -822,6 +894,22 @@ mod tests {
     #[test]
     fn http_listen_addr_falls_back_to_default_on_invalid_env_var() {
         temp_env::with_var("APOLLO_HTTP_PORT", Some("invalid_port"), || {
+            let addr = http_listen_addr();
+            assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 31338)));
+        });
+    }
+
+    #[test]
+    fn http_listen_addr_falls_back_to_default_on_out_of_bounds_env_var() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some("99999"), || {
+            let addr = http_listen_addr();
+            assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 31338)));
+        });
+    }
+
+    #[test]
+    fn http_listen_addr_falls_back_to_default_on_empty_env_var() {
+        temp_env::with_var("APOLLO_HTTP_PORT", Some(""), || {
             let addr = http_listen_addr();
             assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 31338)));
         });

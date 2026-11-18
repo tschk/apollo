@@ -1,4 +1,4 @@
-//! TodoWriteTool — create, append, and list markdown task files.
+//! Tool to create, append, and read markdown task files.
 
 use std::path::PathBuf;
 

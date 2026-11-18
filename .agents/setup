@@ -25,6 +25,11 @@ PACKAGES=(
   libssl-dev
   clang
   libclang-dev
+  libfontconfig-dev
+  libfreetype6-dev
+  libxcb1-dev
+  libxkbcommon-dev
+  libxkbcommon-x11-dev
   git
 )
 
