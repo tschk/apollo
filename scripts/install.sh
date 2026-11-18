@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${APOLLO_REPO:-https://github.com/tschk/apollo.git}"
+REPO_URL="${APOLLO_REPO:-https://github.com/softwarecorporation/apollo.git}"
 BRANCH="${APOLLO_BRANCH:-main}"
 INSTALL_DIR="${APOLLO_INSTALL_DIR:-$HOME/.local/bin}"
 

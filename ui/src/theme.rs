@@ -1,4 +1,4 @@
-//! Telekinesis portal tokens (tschk/telekinesis apps/desktop
+//! Telekinesis portal tokens (softwarecorporation/telekinesis apps/desktop
 //! `src/styles/tokens.css`, dark theme) and the Chivo Mono face.
 //!
 //! The `.crepus` views use the same values as literals (`bg-[#09090b]`);

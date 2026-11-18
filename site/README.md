@@ -2,7 +2,7 @@
 
 **apollo.tsc.hk** — public site for the Apollo desktop app.
 
-Astro (static) with client behavior on [Moonshine](https://github.com/tschk/moonshine)
+Astro (static) with client behavior on [Moonshine](https://github.com/softwarecorporation/moonshine)
 signals. Chivo Mono, zinc-950, an ASCII fluid field, and the desktop screenshots.
 Deployed to Cloudflare Pages: https://apollo-8e0.pages.dev (`wrangler pages deploy dist --project-name apollo`).
 

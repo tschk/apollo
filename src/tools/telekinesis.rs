@@ -247,7 +247,7 @@ impl Tool for TelekinesisTool {
         let Some(binary) = self.find_binary().await else {
             return Ok(ToolResult::error(format!(
                 "telekinesis is not installed: no '{}' binary next to apollo or on PATH. \
-                 Install it from https://github.com/tschk/telekinesis, or put `tk` on PATH.",
+                 Install it from https://github.com/softwarecorporation/telekinesis, or put `tk` on PATH.",
                 self.binary
             )));
         };

@@ -4,7 +4,7 @@ version = "0.2.2"
 edition = "2021"
 license = "MPL-2.0"
 description = "Desktop chat UI for apollo-agent (Crepuscularity + GPUI)"
-repository = "https://github.com/tschk/apollo"
+repository = "https://github.com/softwarecorporation/apollo"
 publish = false
 
 [[bin]]
