@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-18
+
+### Fixed
+
+- Worktree Git commands withhold Apollo, AI-provider, and channel credentials
+  while preserving Git configuration, credential helpers, filters, and SSH access.
+- Self-update preserves credentials needed by Git and Cargo. The service restart
+  client receives a scrubbed environment while retaining the user bus address.
+- Swarm task completion fetches shared blockers together and preserves dependency,
+  completion, and failure behavior.
+
 ### Upgrade requirements
 
 - WhatsApp requires `channel.settings.app_secret` (the Meta app secret).
