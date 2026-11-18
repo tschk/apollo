@@ -135,6 +135,13 @@ cargo build --release
 [Crepuscularity](https://crepuscularity.tsc.hk) on GPUI and styled with the
 Telekinesis portal tokens (zinc-950, Chivo Mono — bundled, SIL OFL).
 
+On Debian or Ubuntu, install the Rust build prerequisites and desktop libraries:
+
+```bash
+sudo apt-get install build-essential pkg-config cmake clang libclang-dev libssl-dev \
+  libfontconfig-dev libfreetype6-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+```
+
 ```bash
 cargo build -p apollo-ui -p apollo-agent   # keep `apollo` next to `apollo-ui`
 ./target/debug/apollo-ui                   # first launch: onboarding (or `apollo ui`)
