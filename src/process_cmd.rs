@@ -20,12 +20,14 @@ pub async fn run_argv_command(command: &str, timeout_secs: u64) -> anyhow::Resul
     let program = &parts[0];
     let args = &parts[1..];
 
-    let mut child = Command::new(program)
+    let mut child_cmd = Command::new(program);
+    child_cmd
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    crate::tools::child_proc::scrub(&mut child_cmd);
+    let mut child = child_cmd.spawn()?;
 
     let output = match crate::tools::child_proc::wait_with_timeout(
         &mut child,
@@ -125,5 +127,18 @@ mod tests {
             !marker.exists(),
             "the killed command must not have kept running to completion"
         );
+    }
+
+    #[tokio::test]
+    async fn secrets_do_not_reach_the_child() {
+        std::env::set_var("APOLLO_MOCK_SECRET_TEST", "supersecret123");
+        let (out, ok) = run_argv_command("env", 5).await.unwrap();
+        std::env::remove_var("APOLLO_MOCK_SECRET_TEST");
+        assert!(ok);
+        assert!(
+            !out.contains("supersecret123"),
+            "secret-bearing variable reached the child"
+        );
+        assert!(out.contains("PATH="), "PATH must survive");
     }
 }
