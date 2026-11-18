@@ -438,15 +438,6 @@ pub fn write_setup(choices: &SetupChoices) -> Result<WrittenSetup, String> {
     })
 }
 
-/// rx4's reasoning levels. The label is what the desktop shows.
-#[allow(dead_code)]
-pub const EFFORTS: &[(&str, &str)] = &[
-    ("low", "low"),
-    ("medium", "medium"),
-    ("high", "high"),
-    ("xhigh", "max"),
-];
-
 pub fn normalize_effort(value: &str) -> Option<&'static str> {
     match value.trim() {
         "none" => Some("none"),

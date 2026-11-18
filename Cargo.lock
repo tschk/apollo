@@ -238,6 +238,7 @@ dependencies = [
  "dotenvy",
  "ed25519-dalek",
  "futures-util",
+ "hmac",
  "jsonwebtoken",
  "libc",
  "parking_lot",

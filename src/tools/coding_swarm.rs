@@ -36,7 +36,7 @@ impl Tool for CodingSwarmTool {
         ToolSpec {
             name: "coding_swarm".to_string(),
             description: "Deploy parallel coding agents to work on independent subtasks. \
-                Each agent works in isolation on its assigned task and returns its result. \
+                Each agent has its own conversation, but shares the workspace with other agents. \
                 Use when a large coding goal can be decomposed into non-overlapping parts \
                 (e.g. different modules, files, or features)."
                 .to_string(),
@@ -95,7 +95,11 @@ impl Tool for CodingSwarmTool {
         let results = self
             .runner
             .clone()
-            .deploy_coding_swarm(tasks, "swarm", parallelism)
+            .deploy_coding_swarm(
+                tasks,
+                &format!("swarm_{}", uuid::Uuid::new_v4()),
+                parallelism,
+            )
             .await;
 
         let output = results

@@ -170,7 +170,48 @@ impl Tool for WorktreeTool {
 async fn run_git(workspace: &PathBuf, args: &[&str]) -> anyhow::Result<String> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(args).current_dir(workspace);
-    crate::tools::child_proc::scrub(&mut cmd);
+    // Checkout runs hooks and filters. Withhold apollo's configuration and AI/channel
+    // keys, not arbitrary secret-looking names: Git needs GIT_CONFIG_KEY_*, GitHub
+    // and Hugging Face tokens, and may use custom credentials in filters/helpers.
+    for (name, _) in std::env::vars_os() {
+        let upper = name.to_string_lossy().to_ascii_uppercase();
+        if upper.starts_with("APOLLO_")
+            || matches!(
+                upper.as_str(),
+                "ANTHROPIC_API_KEY"
+                    | "OPENAI_API_KEY"
+                    | "GOOGLE_API_KEY"
+                    | "GOOGLE_GENERATIVE_AI_API_KEY"
+                    | "GEMINI_API_KEY"
+                    | "XAI_API_KEY"
+                    | "DEEPSEEK_API_KEY"
+                    | "GROQ_API_KEY"
+                    | "TOGETHER_API_KEY"
+                    | "MISTRAL_API_KEY"
+                    | "FIREWORKS_API_KEY"
+                    | "OPENROUTER_API_KEY"
+                    | "PERPLEXITY_API_KEY"
+                    | "COHERE_API_KEY"
+                    | "CO_API_KEY"
+                    | "CEREBRAS_API_KEY"
+                    | "VENICE_API_KEY"
+                    | "MOONSHOT_API_KEY"
+                    | "MINIMAX_API_KEY"
+                    | "SILICONFLOW_API_KEY"
+                    | "AI_GATEWAY_API_KEY"
+                    | "CLOUDFLARE_API_KEY"
+                    | "VOYAGE_API_KEY"
+                    | "BRAVE_SEARCH_API_KEY"
+                    | "TELEGRAM_BOT_TOKEN"
+                    | "DISCORD_BOT_TOKEN"
+                    | "DISCORD_TOKEN"
+                    | "SLACK_BOT_TOKEN"
+                    | "SLACK_APP_TOKEN"
+            )
+        {
+            cmd.env_remove(name);
+        }
+    }
     let output = cmd.output().await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -181,4 +222,166 @@ async fn run_git(workspace: &PathBuf, args: &[&str]) -> anyhow::Result<String> {
     }
 
     Ok(if stdout.is_empty() { stderr } else { stdout })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn git_worktree_environment_boundary() {
+        // Isolate environment changes from other tests and use synthetic credentials only.
+        if std::env::var_os("APOLLO_WORKTREE_TEST_CHILD").is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tools::worktree::tests::git_worktree_environment_boundary",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("HOME", home.path())
+                .env("APOLLO_WORKTREE_TEST_CHILD", "1")
+                .env("ANTHROPIC_API_KEY", "worktree-provider-test")
+                .env("APOLLO_TELEGRAM_TOKEN", "worktree-channel-test")
+                .env("GH_TOKEN", "worktree-gh-test")
+                .env("GITHUB_TOKEN", "worktree-github-test")
+                .env("HF_TOKEN", "worktree-hf-test")
+                .env("FILTER_SECRET", "worktree-filter-test")
+                .env("SSH_AUTH_SOCK", "/worktree-test/agent.sock")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "apollo.test-config")
+                .env("GIT_CONFIG_VALUE_0", "worktree-config-test")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child test failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let repo = root.path().to_path_buf();
+            run_git(&repo, &["init"]).await.unwrap();
+            run_git(&repo, &["config", "user.email", "worktree@example.invalid"])
+                .await
+                .unwrap();
+            run_git(&repo, &["config", "user.name", "Worktree test"])
+                .await
+                .unwrap();
+            run_git(&repo, &["config", "commit.gpgsign", "false"])
+                .await
+                .unwrap();
+            run_git(
+                &repo,
+                &[
+                    "config",
+                    "credential.helper",
+                    "!f() { printf 'username=test\\npassword=%s\\n' \"$GH_TOKEN\"; }; f",
+                ],
+            )
+            .await
+            .unwrap();
+            tokio::fs::write(repo.join("seed.txt"), "stored\n")
+                .await
+                .unwrap();
+            tokio::fs::write(repo.join(".gitattributes"), "*.txt filter=probe\n")
+                .await
+                .unwrap();
+            run_git(&repo, &["add", "."]).await.unwrap();
+            run_git(&repo, &["commit", "-m", "fixture"])
+                .await
+                .unwrap();
+
+            let hooks = repo.join("test-hooks");
+            tokio::fs::create_dir(&hooks).await.unwrap();
+            let hook = hooks.join("post-checkout");
+            tokio::fs::write(
+                &hook,
+                "#!/bin/sh\n\
+                 test \"${GH_TOKEN-}\" = worktree-gh-test || exit 1\n\
+                 test \"${GITHUB_TOKEN-}\" = worktree-github-test || exit 1\n\
+                 test \"${HF_TOKEN-}\" = worktree-hf-test || exit 1\n\
+                 test \"${SSH_AUTH_SOCK-}\" = /worktree-test/agent.sock || exit 1\n\
+                 test \"$(git config apollo.test-config)\" = worktree-config-test || exit 1\n\
+                 printf 'protocol=https\\nhost=worktree.invalid\\n\\n' | git credential fill | grep -q '^password=worktree-gh-test$' || exit 1\n\
+                 test -z \"${ANTHROPIC_API_KEY-}${APOLLO_TELEGRAM_TOKEN-}${APOLLO_WORKTREE_TEST_CHILD-}\" || exit 1\n\
+                 printf 'hook-ok\\n' > hook-observed\n",
+            )
+            .await
+            .unwrap();
+            tokio::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+                .await
+                .unwrap();
+            run_git(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()])
+                .await
+                .unwrap();
+            run_git(&repo, &["config", "filter.probe.clean", "cat"])
+                .await
+                .unwrap();
+            run_git(
+                &repo,
+                &[
+                    "config",
+                    "filter.probe.smudge",
+                    "test \"${FILTER_SECRET-}\" = worktree-filter-test && \
+                     test -z \"${ANTHROPIC_API_KEY-}${APOLLO_TELEGRAM_TOKEN-}\" && \
+                     cat >/dev/null && printf 'filtered\\n'",
+                ],
+            )
+            .await
+            .unwrap();
+            run_git(&repo, &["config", "filter.probe.required", "true"])
+                .await
+                .unwrap();
+
+            let tool = WorktreeTool::new(repo.clone());
+            let added = tool
+                .execute(r#"{"action":"add","name":"probe","base_branch":"HEAD"}"#)
+                .await
+                .unwrap();
+            assert!(!added.is_error, "{}", added.output);
+            let worktree = repo.join(".worktrees/probe");
+            assert_eq!(
+                tokio::fs::read_to_string(worktree.join("seed.txt"))
+                    .await
+                    .unwrap(),
+                "filtered\n"
+            );
+            assert_eq!(
+                tokio::fs::read_to_string(worktree.join("hook-observed"))
+                    .await
+                    .unwrap(),
+                "hook-ok\n"
+            );
+            assert_eq!(
+                run_git(&worktree, &["branch", "--show-current"])
+                    .await
+                    .unwrap()
+                    .trim(),
+                "worktree/probe"
+            );
+            let listed = tool.execute(r#"{"action":"list"}"#).await.unwrap();
+            assert!(listed.output.contains(worktree.to_str().unwrap()));
+            let removed = tool
+                .execute(r#"{"action":"remove","name":"probe"}"#)
+                .await
+                .unwrap();
+            assert!(!removed.is_error, "{}", removed.output);
+            assert!(!worktree.exists());
+            assert!(run_git(&repo, &["branch", "--list", "worktree/probe"])
+                .await
+                .unwrap()
+                .is_empty());
+        });
+    }
 }
