@@ -446,7 +446,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = r#"#!/bin/sh
 set -eu
-[ "$PWD" = "$HOME" ]
+[ "$PWD" -ef "$HOME" ]
 [ "$CARGO_HOME" = cargo-home ]
 [ "$SSH_AUTH_SOCK" = ssh-agent ]
 [ "$XDG_RUNTIME_DIR" = runtime-dir ]
