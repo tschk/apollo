@@ -44,27 +44,8 @@ fn whisper_python_args(audio_path: &std::path::Path) -> Vec<std::ffi::OsString> 
     ]
 }
 
-#[derive(Clone, Default)]
-pub struct TelegramIngressFilter {
-    pub allowed_chat_ids: Vec<String>,
-    pub allowed_sender_ids: Vec<String>,
-}
-
-impl TelegramIngressFilter {
-    pub fn allows(&self, chat_id: &str, sender_id: &str) -> bool {
-        if !self.allowed_chat_ids.is_empty() && !self.allowed_chat_ids.iter().any(|c| c == chat_id)
-        {
-            return false;
-        }
-        if !self.allowed_sender_ids.is_empty()
-            && !sender_id.is_empty()
-            && !self.allowed_sender_ids.iter().any(|s| s == sender_id)
-        {
-            return false;
-        }
-        true
-    }
-}
+/// Telegram applies the shared allowlist inside its poll loop.
+pub type TelegramIngressFilter = super::ingress::IngressFilter;
 
 #[derive(Clone)]
 pub struct TelegramChannel {

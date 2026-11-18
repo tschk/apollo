@@ -223,15 +223,67 @@ pub fn load_skill_content(skill: &Skill) -> Option<String> {
     std::fs::read_to_string(&skill.location).ok()
 }
 
-/// Preprocess skill content: substitute template vars and expand inline shell.
+/// Preprocess skill content: substitute template vars and, only when
+/// `allow_inline_shell` is set, expand inline shell. Otherwise every snippet is
+/// replaced with a marker and nothing runs — see `inline_shell_trusted`.
 pub fn preprocess_skill_content(
     content: &str,
     skill_dir: Option<&Path>,
     session_id: Option<&str>,
     cwd: Option<&Path>,
+    allow_inline_shell: bool,
 ) -> String {
     let content = substitute_template_vars(content, skill_dir, session_id);
-    expand_inline_shell(&content, cwd, 30)
+    if allow_inline_shell {
+        expand_inline_shell(&content, cwd, 30)
+    } else {
+        inline_shell_re()
+            .replace_all(&content, "[inline-shell disabled: skill is not trusted]")
+            .to_string()
+    }
+}
+
+/// Whether the skill at `skill_md` may run its `!`cmd`` snippets.
+///
+/// Skills are loaded from roots that untrusted parties can write to — an npm
+/// package, workspace `plugins/` directories, and `.apollo/skills`, which the
+/// agent itself writes via `save_managed_skill` (so a prompt injection could
+/// persist a skill). Snippets run at skill-match time, before any tool hook or
+/// policy check, so they need their own gate: `policy.allow_shell` must be on
+/// *and* the skill must sit under one of `policy.trusted_skill_dirs`, which is
+/// empty by default. Paths are canonicalised, so a symlink inside a trusted
+/// directory that points elsewhere is not trusted.
+pub fn inline_shell_trusted(
+    skill_md: &Path,
+    allow_shell: bool,
+    trusted_dirs: &[PathBuf],
+    workspace: &Path,
+) -> bool {
+    if !allow_shell || trusted_dirs.is_empty() {
+        return false;
+    }
+    let Ok(skill) = skill_md.canonicalize() else {
+        return false;
+    };
+    trusted_dirs.iter().any(|dir| {
+        let dir = if dir.is_absolute() {
+            dir.clone()
+        } else {
+            workspace.join(dir)
+        };
+        match dir.canonicalize() {
+            Ok(dir) => skill.starts_with(dir),
+            Err(e) => {
+                // Otherwise skills silently stop running their snippets.
+                tracing::warn!(
+                    "policy.trusted_skill_dirs entry {} cannot be resolved ({e}); \
+                     skills there will not run inline shell",
+                    dir.display()
+                );
+                false
+            }
+        }
+    })
 }
 
 /// Substitute `${HERMES_SKILL_DIR}` and `${HERMES_SESSION_ID}` in skill content.
@@ -442,6 +494,57 @@ mod tests {
         let content = "Token ${UNKNOWN} stays";
         let result = substitute_template_vars(content, None, None);
         assert_eq!(result, "Token ${UNKNOWN} stays");
+    }
+
+    #[test]
+    fn untrusted_skill_snippets_do_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("pwned");
+        let content = format!("Hi !`touch {}` there", marker.display());
+
+        let out = preprocess_skill_content(&content, None, None, None, false);
+        assert!(!marker.exists(), "snippet ran for an untrusted skill");
+        assert_eq!(
+            out,
+            "Hi [inline-shell disabled: skill is not trusted] there"
+        );
+
+        // Control: the same content does run once trusted.
+        preprocess_skill_content(&content, None, None, None, true);
+        assert!(marker.exists());
+    }
+
+    #[test]
+    fn inline_shell_requires_allow_shell_and_a_trusted_dir() {
+        let ws = tempfile::tempdir().unwrap();
+        let trusted = ws.path().join("trusted/deploy");
+        let untrusted = ws.path().join(".apollo/skills/evil");
+        std::fs::create_dir_all(&trusted).unwrap();
+        std::fs::create_dir_all(&untrusted).unwrap();
+        let good = trusted.join("SKILL.md");
+        let bad = untrusted.join("SKILL.md");
+        std::fs::write(&good, "x").unwrap();
+        std::fs::write(&bad, "x").unwrap();
+        let dirs = vec![PathBuf::from("trusted")]; // relative to the workspace
+
+        assert!(inline_shell_trusted(&good, true, &dirs, ws.path()));
+        assert!(!inline_shell_trusted(&good, false, &dirs, ws.path()));
+        assert!(!inline_shell_trusted(&good, true, &[], ws.path()));
+        assert!(!inline_shell_trusted(&bad, true, &dirs, ws.path()));
+
+        // A symlink planted inside the trusted dir does not extend trust to
+        // the file it points at.
+        #[cfg(unix)]
+        {
+            let link = trusted.join("link");
+            std::os::unix::fs::symlink(&untrusted, &link).unwrap();
+            assert!(!inline_shell_trusted(
+                &link.join("SKILL.md"),
+                true,
+                &dirs,
+                ws.path()
+            ));
+        }
     }
 
     #[test]

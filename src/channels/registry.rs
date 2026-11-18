@@ -146,19 +146,23 @@ impl ChannelRegistry {
 
         #[cfg(feature = "channel-whatsapp")]
         reg.register("whatsapp", |s| {
-            Ok(Box::new(super::whatsapp::WhatsAppChannel::new(
-                s.token()?,
-                s.require("phone_number_id")?,
-                s.get("verify_token")
-                    .unwrap_or_else(|| "apollo-verify".to_string()),
-            )))
+            Ok(Box::new(
+                super::whatsapp::WhatsAppChannel::new(
+                    s.token()?,
+                    s.require("phone_number_id")?,
+                    s.get("verify_token")
+                        .unwrap_or_else(|| "apollo-verify".to_string()),
+                )
+                .with_app_secret(s.require("app_secret")?),
+            ))
         });
 
         #[cfg(feature = "channel-googlechat")]
         reg.register("googlechat", |s| {
-            Ok(Box::new(super::googlechat::GoogleChatChannel::new(
-                s.require("service_account_key")?,
-            )))
+            Ok(Box::new(
+                super::googlechat::GoogleChatChannel::new(s.require("service_account_key")?)
+                    .with_audience(s.require("audience")?),
+            ))
         });
 
         #[cfg(feature = "channel-msteams")]

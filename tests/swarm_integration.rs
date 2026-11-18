@@ -374,6 +374,154 @@ async fn test_team_task_dependencies() {
     assert!(claimed);
 }
 
+#[tokio::test]
+async fn test_team_completion_multiple_dependents_and_failure() {
+    let coordinator = setup_coordinator().await;
+    let lead_id = coordinator
+        .register_agent("dependency-lead".to_string(), vec![], None, None)
+        .await
+        .unwrap();
+    let team = coordinator
+        .teams
+        .create_team("dependency-team", &lead_id)
+        .await
+        .unwrap();
+
+    let mut roots = Vec::new();
+    for subject in ["shared", "remaining", "failed", "unrelated"] {
+        roots.push(
+            coordinator
+                .teams
+                .create_task(&team.team_id, subject, None, 0, vec![])
+                .await
+                .unwrap(),
+        );
+    }
+    let mut dependents = Vec::new();
+    for (subject, blockers) in [
+        ("first", vec![roots[0].task_id.clone()]),
+        ("second", vec![roots[0].task_id.clone()]),
+        (
+            "multiple",
+            vec![roots[0].task_id.clone(), roots[1].task_id.clone()],
+        ),
+        (
+            "failed blocker",
+            vec![roots[0].task_id.clone(), roots[2].task_id.clone()],
+        ),
+        ("unrelated dependent", vec![roots[3].task_id.clone()]),
+    ] {
+        dependents.push(
+            coordinator
+                .teams
+                .create_task(&team.team_id, subject, None, 0, blockers)
+                .await
+                .unwrap(),
+        );
+    }
+
+    coordinator
+        .teams
+        .fail_task(&roots[2].task_id, "dependency failed")
+        .await
+        .unwrap();
+    coordinator
+        .teams
+        .complete_task(&roots[0].task_id, "shared complete")
+        .await
+        .unwrap();
+
+    let tasks = coordinator
+        .teams
+        .list_tasks(&team.team_id, None)
+        .await
+        .unwrap();
+    for (dependent, expected) in dependents
+        .iter()
+        .zip(["pending", "pending", "blocked", "blocked", "blocked"])
+    {
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|t| t.task_id == dependent.task_id)
+                .unwrap()
+                .status,
+            expected,
+            "{}",
+            dependent.subject
+        );
+    }
+    let completed = tasks
+        .iter()
+        .find(|t| t.task_id == roots[0].task_id)
+        .unwrap();
+    assert_eq!(completed.status, "done");
+    assert_eq!(completed.result.as_deref(), Some("shared complete"));
+    let failed = tasks
+        .iter()
+        .find(|t| t.task_id == roots[2].task_id)
+        .unwrap();
+    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.error.as_deref(), Some("dependency failed"));
+
+    assert!(coordinator
+        .teams
+        .claim_task(&dependents[0].task_id, &lead_id)
+        .await
+        .unwrap());
+    // Repeating completion must not reset an already claimed dependent.
+    coordinator
+        .teams
+        .complete_task(&roots[0].task_id, "shared complete")
+        .await
+        .unwrap();
+    coordinator
+        .teams
+        .complete_task(&roots[1].task_id, "remaining complete")
+        .await
+        .unwrap();
+    assert!(coordinator
+        .teams
+        .complete_task("missing-task", "not completed")
+        .await
+        .is_err());
+
+    let tasks = coordinator
+        .teams
+        .list_tasks(&team.team_id, None)
+        .await
+        .unwrap();
+    for (dependent, expected) in dependents
+        .iter()
+        .zip(["claimed", "pending", "pending", "blocked", "blocked"])
+    {
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|t| t.task_id == dependent.task_id)
+                .unwrap()
+                .status,
+            expected,
+            "{}",
+            dependent.subject
+        );
+    }
+    for dependent in &dependents[1..3] {
+        assert!(coordinator
+            .teams
+            .claim_task(&dependent.task_id, &lead_id)
+            .await
+            .unwrap());
+    }
+    for dependent in &dependents[3..] {
+        assert!(coordinator
+            .teams
+            .claim_task(&dependent.task_id, &lead_id)
+            .await
+            .is_err());
+    }
+}
+
 // === Team Messages ===
 
 #[tokio::test]
