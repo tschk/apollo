@@ -224,6 +224,8 @@ async fn git_fast_forward(workspace: &Path, remote: &str, branch: &str) -> anyho
 }
 
 async fn cargo_build_release(workspace: &Path) -> anyhow::Result<()> {
+    // Credential providers and build scripts are trusted maintenance code and
+    // may need operator-supplied credentials with arbitrary environment names.
     let output = tokio::process::Command::new("cargo")
         .arg("build")
         .arg("--release")
@@ -249,7 +251,19 @@ async fn maybe_restart_service(
         return Ok(false);
     };
 
-    let output = tokio::process::Command::new("systemctl")
+    let mut command = tokio::process::Command::new("systemctl");
+    crate::tools::child_proc::scrub(&mut command);
+    // This is a bus address, not a session credential; systemctl --user uses it.
+    if let Some(address) = std::env::var_os("DBUS_SESSION_BUS_ADDRESS") {
+        command.env("DBUS_SESSION_BUS_ADDRESS", address);
+    }
+    // Git config values can embed credentials without a secret-bearing name.
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(|key| key.starts_with("GIT_")) {
+            command.env_remove(name);
+        }
+    }
+    let output = command
         .arg("--user")
         .arg("restart")
         .arg(service)
@@ -270,6 +284,7 @@ async fn maybe_restart_service(
 }
 
 async fn run_git(workspace: &Path, args: &[&str]) -> anyhow::Result<String> {
+    // Preserve credential-helper, askpass and SSH authentication environments.
     let output = tokio::process::Command::new("git")
         .args(args)
         .current_dir(workspace)
@@ -421,6 +436,136 @@ mod tests {
             branch: "main".to_string(),
             restart_service: Some("apollo.service".to_string()),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_environment_boundaries() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+set -eu
+[ "$PWD" -ef "$HOME" ]
+[ "$CARGO_HOME" = cargo-home ]
+[ "$SSH_AUTH_SOCK" = ssh-agent ]
+[ "$XDG_RUNTIME_DIR" = runtime-dir ]
+[ "$DBUS_SESSION_BUS_ADDRESS" = session-bus ]
+case "$0" in
+  */git|*/cargo)
+    [ "$CUSTOM_CREDENTIAL" = custom-helper-credential ]
+    [ "$GH_TOKEN" = github-helper ]
+    [ "$GITHUB_TOKEN" = github-token ]
+    [ "$GLAB_TOKEN" = gitlab-helper ]
+    [ "$GIT_CONFIG_VALUE_0" = config-value ]
+    [ "$GIT_CONFIG_KEY_0" = credential.helper ]
+    [ "$GIT_CONFIG_COUNT" = 1 ]
+    [ "$GIT_ASKPASS" = askpass ] ;;
+  */systemctl)
+    [ "${CUSTOM_CREDENTIAL-unset}" = unset ]
+    [ "${ANTHROPIC_API_KEY-unset}" = unset ]
+    [ "${APOLLO_TELEGRAM_TOKEN-unset}" = unset ]
+    [ "${DB_PASSWORD-unset}" = unset ]
+    [ "${GH_TOKEN-unset}" = unset ]
+    [ "${GITHUB_TOKEN-unset}" = unset ]
+    [ "${GLAB_TOKEN-unset}" = unset ]
+    [ "${GIT_CONFIG_KEY_0-unset}" = unset ]
+    [ "${GIT_CONFIG_VALUE_0-unset}" = unset ]
+    [ "${GIT_CONFIG_COUNT-unset}" = unset ]
+    [ "${GIT_ASKPASS-unset}" = unset ] ;;
+esac
+case "$0" in
+  */git)
+    [ "$1" = status ]
+    printf 'fixture git output\n' ;;
+  */cargo)
+    [ "$CARGO_REGISTRY_TOKEN" = registry-token ]
+    [ "$CARGO_REGISTRIES_PRIVATE_TOKEN" = private-token ]
+    [ "$CARGO_REGISTRIES_PRIVATE_CREDENTIAL_PROVIDER" = credential-provider ]
+    [ "$CARGO_HTTP_SSLKEY" = client-key-path ]
+    [ "$*" = 'build --release' ] ;;
+  */systemctl)
+    [ "${CARGO_REGISTRY_TOKEN-unset}" = unset ]
+    [ "${CARGO_REGISTRIES_PRIVATE_TOKEN-unset}" = unset ]
+    [ "${CARGO_REGISTRIES_PRIVATE_CREDENTIAL_PROVIDER-unset}" = unset ]
+    [ "${CARGO_HTTP_SSLKEY-unset}" = unset ]
+    [ "$#" = 3 ]
+    [ "$1" = --user ]
+    [ "$2" = restart ]
+    [ "$3" = 'fixture service;not-a-shell.service' ]
+    : > restart-called
+    if [ -f restart-fail ]; then exit 3; fi ;;
+esac
+"#;
+        for program in ["git", "cargo", "systemctl"] {
+            let path = dir.path().join(program);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        // Isolate sentinels in a subprocess; never mutate the test runner's environment.
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["process_environment_fixture", "--nocapture"])
+            .env_clear()
+            .env("PATH", dir.path())
+            .env("HOME", dir.path())
+            .env("APOLLO_UPDATE_FIXTURE", dir.path())
+            .envs([
+                ("CARGO_HOME", "cargo-home"),
+                ("SSH_AUTH_SOCK", "ssh-agent"),
+                ("XDG_RUNTIME_DIR", "runtime-dir"),
+                ("DBUS_SESSION_BUS_ADDRESS", "session-bus"),
+                ("ANTHROPIC_API_KEY", "dummy-provider"),
+                ("APOLLO_TELEGRAM_TOKEN", "dummy-channel"),
+                ("DB_PASSWORD", "dummy-password"),
+                ("CUSTOM_CREDENTIAL", "custom-helper-credential"),
+                ("GH_TOKEN", "github-helper"),
+                ("GITHUB_TOKEN", "github-token"),
+                ("GLAB_TOKEN", "gitlab-helper"),
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "credential.helper"),
+                ("GIT_CONFIG_VALUE_0", "config-value"),
+                ("GIT_ASKPASS", "askpass"),
+                ("CARGO_REGISTRY_TOKEN", "registry-token"),
+                ("CARGO_REGISTRIES_PRIVATE_TOKEN", "private-token"),
+                (
+                    "CARGO_REGISTRIES_PRIVATE_CREDENTIAL_PROVIDER",
+                    "credential-provider",
+                ),
+                ("CARGO_HTTP_SSLKEY", "client-key-path"),
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_environment_fixture() {
+        let Some(workspace) = std::env::var_os("APOLLO_UPDATE_FIXTURE") else {
+            return;
+        };
+        let workspace = Path::new(&workspace);
+        assert_eq!(
+            run_git(workspace, &["status"]).await.unwrap(),
+            "fixture git output"
+        );
+        cargo_build_release(workspace).await.unwrap();
+        let mut config = mock_config(true);
+        config.restart_service = None;
+        assert!(!maybe_restart_service(workspace, &config).await.unwrap());
+        assert!(!workspace.join("restart-called").exists());
+        config.restart_service = Some("fixture service;not-a-shell.service".into());
+        assert!(maybe_restart_service(workspace, &config).await.unwrap());
+        assert!(workspace.join("restart-called").exists());
+        std::fs::write(workspace.join("restart-fail"), "").unwrap();
+        assert!(!maybe_restart_service(workspace, &config).await.unwrap());
     }
 
     #[tokio::test]
